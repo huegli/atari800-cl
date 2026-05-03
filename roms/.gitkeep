@@ -1,0 +1,7 @@
+# Place Atari 800 XL ROM images here:
+#
+#   atariosxl.rom   — 16K OS ROM
+#   ataribas.rom    — 8K BASIC ROM
+#
+# ROM files are NOT redistributable and are deliberately excluded from
+# this repository (see .gitignore).

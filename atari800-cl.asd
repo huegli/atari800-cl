@@ -1,0 +1,44 @@
+;;;; atari800-cl.asd --- ASDF system definition for atari800-cl
+;;;;
+;;;; A headless Atari 800 XL emulator written in portable Common Lisp.
+;;;; Primary target: LispWorks. Also supported: SBCL.
+
+(defsystem #:atari800-cl
+  :description "Headless Atari 800 XL emulator (Common Lisp)"
+  :author "Nikolai Schlegel"
+  :license "MIT"
+  :version "0.0.1"
+  :homepage "https://example.com/atari800-cl"
+  :depends-on (#:alexandria
+               #:bordeaux-threads
+               #:usocket
+               #:flexi-streams)
+  :serial t
+  :components ((:module "src"
+                :serial t
+                :components ((:file "package")
+                             (:file "compat")
+                             (:file "memory")
+                             (:file "cpu")
+                             (:file "emulator")
+                             (:file "main"))))
+  :in-order-to ((test-op (test-op #:atari800-cl/tests))))
+
+(defsystem #:atari800-cl/tests
+  :description "Test suite for atari800-cl"
+  :author "Nikolai Schlegel"
+  :license "MIT"
+  :depends-on (#:atari800-cl
+               #:fiveam)
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "package")
+                             (:file "test-suite")
+                             (:file "test-compat")
+                             (:file "test-memory")
+                             (:file "test-cpu"))))
+  :perform (test-op (op c)
+             (uiop:symbol-call :fiveam :run!
+                               (uiop:find-symbol* :atari800-cl-suite
+                                                  :atari800-cl/tests))))

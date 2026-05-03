@@ -1,0 +1,39 @@
+# FASL / compiled output
+*.fasl
+*.fas
+*.lx32fsl
+*.lx64fsl
+*.dx32fsl
+*.dx64fsl
+*.64ufasl
+*.ofasl
+*.lib
+*.dfsl
+*.pfsl
+*.d64fsl
+*.p64fsl
+*.lx64fsl
+*.o
+*.so
+
+# ASDF cache
+.asdf-cache/
+.cache/
+
+# Editor/OS junk
+.DS_Store
+*~
+\#*\#
+.\#*
+.idea/
+.vscode/
+*.swp
+
+# ROM images — copyrighted, must not be checked in
+roms/*.rom
+roms/*.ROM
+roms/*.bin
+!roms/.gitkeep
+
+# Local quickproject / sly state
+.sbclrc.local
