@@ -58,7 +58,31 @@
            #:cpu-y
            #:cpu-sp
            #:cpu-flags
-           #:cpu-cycles))
+           #:cpu-cycles
+           #:cpu-bus-read
+           #:cpu-bus-write
+           #:cpu-pending-irq
+           #:cpu-pending-nmi
+           #:cpu-halted
+           #:attach-memory-bus
+           #:trigger-nmi
+           #:set-irq-line
+           #:flag-set?
+           #:set-flag
+           #:clear-flag
+           #:set-flag-to
+           #:status-byte-for-push
+           #:status-byte-from-pull
+           #:push-byte
+           #:pull-byte
+           #:push-word
+           #:pull-word
+           #:+flag-c+ #:+flag-z+ #:+flag-i+ #:+flag-d+
+           #:+flag-b+ #:+flag-u+ #:+flag-v+ #:+flag-n+
+           #:+nmi-vector+ #:+reset-vector+ #:+irq-vector+
+           #:*opcode-table*
+           #:documented-opcodes
+           #:illegal-opcode))
 
 (defpackage #:atari800-cl.emulator
   (:use #:cl
