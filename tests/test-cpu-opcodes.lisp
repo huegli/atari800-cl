@@ -468,6 +468,276 @@ Pulled status forces U=1, B=0 in the in-register copy."
     (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Per-family coverage — at least one variant of each opcode family.
+
+(test ldx-immediate-sets-flags
+  (with-cpu (cpu ram :program (list #xA2 #x00))
+    (declare (ignore ram))
+    (step-cpu cpu)
+    (is (= #x00 (cpu-x cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test ldy-immediate-sets-flags
+  (with-cpu (cpu ram :program (list #xA0 #x7F))
+    (declare (ignore ram))
+    (step-cpu cpu)
+    (is (= #x7F (cpu-y cpu)))
+    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+
+(test stx-zero-page
+  (with-cpu (cpu ram :program (list #x86 #x10))
+    (setf (cpu-x cpu) #xAB)
+    (step-cpu cpu)
+    (is (= #xAB (aref ram #x10)))))
+
+(test sty-zero-page
+  (with-cpu (cpu ram :program (list #x84 #x11))
+    (setf (cpu-y cpu) #xCD)
+    (step-cpu cpu)
+    (is (= #xCD (aref ram #x11)))))
+
+(test and-immediate
+  (with-cpu (cpu ram :program (list #x29 #x0F))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #xF0)
+    (step-cpu cpu)
+    (is (= 0 (cpu-a cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test ora-immediate
+  (with-cpu (cpu ram :program (list #x09 #x0F))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #xF0)
+    (step-cpu cpu)
+    (is (= #xFF (cpu-a cpu)))))
+
+(test eor-immediate
+  (with-cpu (cpu ram :program (list #x49 #xFF))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #xAA)
+    (step-cpu cpu)
+    (is (= #x55 (cpu-a cpu)))))
+
+(test lsr-accumulator-flags
+  "LSR A on $01 -> $00 with C=1, Z=1."
+  (with-cpu (cpu ram :program (list #x4A))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #x01)
+    (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
+    (step-cpu cpu)
+    (is (= #x00 (cpu-a cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test rol-accumulator
+  "ROL A on $80 with C=0 -> $00, C=1."
+  (with-cpu (cpu ram :program (list #x2A))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #x80)
+    (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
+    (step-cpu cpu)
+    (is (= #x00 (cpu-a cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+
+(test ror-accumulator
+  "ROR A on $01 with C=0 -> $00, C=1."
+  (with-cpu (cpu ram :program (list #x6A))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #x01)
+    (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
+    (step-cpu cpu)
+    (is (= #x00 (cpu-a cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+
+(test dec-memory
+  (with-cpu (cpu ram :program (list #xC6 #x20))
+    (setf (aref ram #x20) #x01)
+    (step-cpu cpu)
+    (is (= #x00 (aref ram #x20)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test inx-wraps-and-sets-zero
+  (with-cpu (cpu ram :program (list #xE8))
+    (declare (ignore ram))
+    (setf (cpu-x cpu) #xFF)
+    (step-cpu cpu)
+    (is (= 0 (cpu-x cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test iny-sets-negative
+  (with-cpu (cpu ram :program (list #xC8))
+    (declare (ignore ram))
+    (setf (cpu-y cpu) #x7F)
+    (step-cpu cpu)
+    (is (= #x80 (cpu-y cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+
+(test dex-wraps
+  (with-cpu (cpu ram :program (list #xCA))
+    (declare (ignore ram))
+    (setf (cpu-x cpu) 0)
+    (step-cpu cpu)
+    (is (= #xFF (cpu-x cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+
+(test dey-flags
+  (with-cpu (cpu ram :program (list #x88))
+    (declare (ignore ram))
+    (setf (cpu-y cpu) 1)
+    (step-cpu cpu)
+    (is (= 0 (cpu-y cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test tax-copies-and-flags
+  (with-cpu (cpu ram :program (list #xAA))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #x80 (cpu-x cpu) 0)
+    (step-cpu cpu)
+    (is (= #x80 (cpu-x cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+
+(test tay-copies
+  (with-cpu (cpu ram :program (list #xA8))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #x42)
+    (step-cpu cpu)
+    (is (= #x42 (cpu-y cpu)))))
+
+(test txa-copies
+  (with-cpu (cpu ram :program (list #x8A))
+    (declare (ignore ram))
+    (setf (cpu-x cpu) #x55)
+    (step-cpu cpu)
+    (is (= #x55 (cpu-a cpu)))))
+
+(test tya-copies
+  (with-cpu (cpu ram :program (list #x98))
+    (declare (ignore ram))
+    (setf (cpu-y cpu) #xAA)
+    (step-cpu cpu)
+    (is (= #xAA (cpu-a cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+
+(test txs-no-flag-update
+  "TXS copies X into SP without touching flags."
+  (with-cpu (cpu ram :program (list #x9A))
+    (declare (ignore ram))
+    (setf (cpu-x cpu) #x80
+          (cpu-flags cpu) #x24)
+    (step-cpu cpu)
+    (is (= #x80 (cpu-sp cpu)))
+    (is (= #x24 (cpu-flags cpu)))))
+
+(test tsx-copies-and-flags
+  (with-cpu (cpu ram :program (list #xBA))
+    (declare (ignore ram))
+    (setf (cpu-sp cpu) #x00)
+    (step-cpu cpu)
+    (is (= #x00 (cpu-x cpu)))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test pha-pla-roundtrip
+  (with-cpu (cpu ram :program (list #x48 #xA9 #x00 #x68))
+    (declare (ignore ram))
+    (setf (cpu-a cpu) #x42)
+    (step-cpu cpu)            ; PHA
+    (step-cpu cpu)            ; LDA #$00
+    (is (= 0 (cpu-a cpu)))
+    (step-cpu cpu)            ; PLA
+    (is (= #x42 (cpu-a cpu)))))
+
+(test cpx-immediate-equal
+  (with-cpu (cpu ram :program (list #xE0 #x05))
+    (declare (ignore ram))
+    (setf (cpu-x cpu) #x05)
+    (step-cpu cpu)
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+
+(test cpy-immediate-less-than
+  (with-cpu (cpu ram :program (list #xC0 #x10))
+    (declare (ignore ram))
+    (setf (cpu-y cpu) #x05)
+    (step-cpu cpu)
+    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+
+(test bpl-not-taken-when-n-set
+  (with-cpu (cpu ram :program (list #x10 #x10))
+    (declare (ignore ram))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-n+)
+    (is (= 2 (step-cpu cpu)))
+    (is (= #x0202 (cpu-pc cpu)))))
+
+(test bmi-taken
+  (with-cpu (cpu ram :program (list #x30 #x04))
+    (declare (ignore ram))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-n+)
+    (step-cpu cpu)
+    (is (= #x0206 (cpu-pc cpu)))))
+
+(test bvc-taken
+  (with-cpu (cpu ram :program (list #x50 #x04))
+    (declare (ignore ram))
+    (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-v+)
+    (step-cpu cpu)
+    (is (= #x0206 (cpu-pc cpu)))))
+
+(test bvs-taken
+  (with-cpu (cpu ram :program (list #x70 #x04))
+    (declare (ignore ram))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-v+)
+    (step-cpu cpu)
+    (is (= #x0206 (cpu-pc cpu)))))
+
+(test bcc-taken
+  (with-cpu (cpu ram :program (list #x90 #x04))
+    (declare (ignore ram))
+    (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
+    (step-cpu cpu)
+    (is (= #x0206 (cpu-pc cpu)))))
+
+(test bcs-taken
+  (with-cpu (cpu ram :program (list #xB0 #x04))
+    (declare (ignore ram))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-c+)
+    (step-cpu cpu)
+    (is (= #x0206 (cpu-pc cpu)))))
+
+(test jmp-absolute-sets-pc
+  (with-cpu (cpu ram :program (list #x4C #x00 #x90))
+    (declare (ignore ram))
+    (is (= 3 (step-cpu cpu)))
+    (is (= #x9000 (cpu-pc cpu)))))
+
+(test nop-advances-pc
+  (with-cpu (cpu ram :program (list #xEA))
+    (declare (ignore ram))
+    (is (= 2 (step-cpu cpu)))
+    (is (= #x0201 (cpu-pc cpu)))))
+
+(test flag-instructions-do-the-right-thing
+  "CLC/SEC/CLI/SEI/CLV/CLD/SED each toggle one flag."
+  (with-cpu (cpu ram :program (list #x18 #x38 #x58 #x78 #xB8 #xD8 #xF8))
+    (declare (ignore ram))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-c+)
+    (step-cpu cpu)            ; CLC
+    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+    (step-cpu cpu)            ; SEC
+    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-i+)
+    (step-cpu cpu)            ; CLI
+    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+))
+    (step-cpu cpu)            ; SEI
+    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+))
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-v+)
+    (step-cpu cpu)            ; CLV
+    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-v+))
+    (step-cpu cpu)            ; CLD
+    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-d+))
+    (step-cpu cpu)            ; SED
+    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-d+))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Sanity-check that opcode dispatch wire-up is consistent
 
 (test sample-of-documented-opcodes-execute
@@ -476,3 +746,11 @@ Pulled status forces U=1, B=0 in the in-register copy."
     (dolist (op sample)
       (is-true (functionp (svref atari800-cl.cpu:*opcode-table* op))
                "opcode #x~2,'0X must have a handler" op))))
+
+(test every-handler-has-named-function
+  "Each installed opcode handler is a named function (DEFOPCODE)."
+  (loop for i below 256
+        for h = (svref atari800-cl.cpu:*opcode-table* i)
+        when h
+          do (is-true (functionp h) "opcode #x~2,'0X must be a function" i))
+  (is (= 151 (length (atari800-cl.cpu:documented-opcodes)))))
