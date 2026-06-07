@@ -133,7 +133,10 @@
            #:documented-opcodes
            #:illegal-opcodes
            #:*illegal-opcode-list*
-           #:illegal-opcode))
+           #:illegal-opcode
+           ;; Interrupt service functions (used by IRQ routing layer)
+           #:service-nmi
+           #:service-irq))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.mmu — Memory Management Unit (PORTB bank-switching)
@@ -311,6 +314,45 @@
            #:reset-pokey
            #:attach-pokey
            #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.irq — NMI / IRQ routing helpers
+;;;
+;;; Thin wrappers the machine scheduler calls every clock to service
+;;; whichever interrupt the chips have asserted.
+
+(defpackage #:atari800-cl.irq
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.cpu)
+  (:documentation "Atari 800 XL interrupt routing.")
+  (:export #:check-and-dispatch-nmi
+           #:check-and-dispatch-irq))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.machine — Top-level NTSC scheduler
+;;;
+;;; Owns the CPU plus every chip (mmu, bus, pia, antic, gtia, pokey)
+;;; and runs the frame-loop that pumps them in lockstep.  Distinct
+;;; from atari800-cl.emulator (the legacy CPU + flat-memory scaffold);
+;;; this is the real Atari 800 XL machine.
+
+(defpackage #:atari800-cl.machine
+  (:use #:cl #:atari800-cl.compat
+        #:atari800-cl.cpu #:atari800-cl.bus #:atari800-cl.mmu
+        #:atari800-cl.pia #:atari800-cl.antic #:atari800-cl.gtia
+        #:atari800-cl.pokey #:atari800-cl.irq)
+  (:documentation "Atari 800 XL top-level machine + frame scheduler.")
+  (:export #:atari-machine
+           #:make-atari-machine
+           #:atari-machine-cpu  #:atari-machine-bus
+           #:atari-machine-mmu  #:atari-machine-pia
+           #:atari-machine-antic #:atari-machine-gtia
+           #:atari-machine-pokey
+           #:atari-machine-frame-count
+           #:machine-run-frame
+           #:machine-cold-reset
+           #:machine-install-roms
+           #:load-rom-file
+           #:+clocks-per-frame+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
