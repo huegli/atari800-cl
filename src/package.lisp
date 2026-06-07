@@ -136,6 +136,68 @@
            #:illegal-opcode))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.mmu — Memory Management Unit (PORTB bank-switching)
+;;;
+;;; Owns the PORTB shadow register and the OS/BASIC/self-test ROM mapping
+;;; predicates.  The PIA writes here whenever software writes $D302;
+;;; the bus consults these predicates on every read.
+
+(defpackage #:atari800-cl.mmu
+  (:use #:cl #:atari800-cl.compat)
+  (:documentation "Atari 800 XL PORTB-driven memory bank switching.")
+  (:export #:mmu
+           #:make-mmu
+           #:mmu-portb
+           #:mmu-write-portb
+           #:reset-mmu
+           #:os-rom-mapped-p
+           #:basic-rom-mapped-p
+           #:selftest-mapped-p
+           #:portb-decode
+           #:+portb-os-rom-mask+
+           #:+portb-basic-rom-mask+
+           #:+portb-selftest-mask+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.bus — Atari 800 XL system bus and memory map
+;;;
+;;; The CPU talks through BUS-READ / BUS-WRITE.  The bus owns 64K RAM,
+;;; the OS and BASIC ROM images, a reference to the MMU, and per-chip
+;;; dispatch closures that get installed when individual chips are
+;;; attached (PIA, GTIA, POKEY, ANTIC — added in later milestones).
+
+(defpackage #:atari800-cl.bus
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.mmu)
+  (:documentation "Atari 800 XL system bus: memory map and I/O dispatch.")
+  (:export #:bus
+           #:make-bus
+           #:bus-ram
+           #:bus-os-rom
+           #:bus-basic-rom
+           #:bus-mmu
+           #:bus-read
+           #:bus-write
+           #:bus-read16
+           #:install-os-rom
+           #:install-basic-rom
+           #:attach-mmu
+           #:bus-peek-ram
+           #:bus-poke-ram
+           ;; Chip object back-pointers
+           #:bus-gtia #:bus-pokey #:bus-pia #:bus-antic
+           ;; Per-chip dispatch closures (installed by chip attach functions)
+           #:bus-gtia-read-fn  #:bus-gtia-write-fn
+           #:bus-pokey-read-fn #:bus-pokey-write-fn
+           #:bus-pia-read-fn   #:bus-pia-write-fn
+           #:bus-antic-read-fn #:bus-antic-write-fn
+           ;; Region constants
+           #:+selftest-base+   #:+selftest-end+
+           #:+basic-rom-base+  #:+basic-rom-end+
+           #:+os-rom-low-base+ #:+os-rom-low-end+
+           #:+io-base+         #:+io-end+
+           #:+os-rom-high-base+ #:+os-rom-high-end+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
 ;;;
 ;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE

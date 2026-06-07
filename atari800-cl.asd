@@ -19,6 +19,8 @@
                 :components ((:file "package")
                              (:file "compat")
                              (:file "memory")
+                             (:file "mmu")
+                             (:file "bus")
                              (:file "cpu")
                              (:file "cpu-opcodes")
                              (:file "illegal")
@@ -41,7 +43,8 @@
                              (:file "test-memory")
                              (:file "test-cpu")
                              (:file "test-cpu-opcodes")
-                             (:file "test-illegal"))))
+                             (:file "test-illegal")
+                             (:file "test-mmu"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :atari800-cl-suite
