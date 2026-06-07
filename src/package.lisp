@@ -257,6 +257,37 @@
            #:+nmi-dli+ #:+nmi-vbi+))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.gtia — GTIA (player/missile + collision latches + console)
+;;;
+;;; GTIA registers occupy $D000-$D0FF.  The write side accepts HPOS,
+;;; size, graphics, color, priority, HITCLR, and CONSOL (speaker)
+;;; values.  The read side returns collision latches, console keys,
+;;; triggers, and the PAL/NTSC indicator.
+
+(defpackage #:atari800-cl.gtia
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus)
+  (:documentation "Atari 800 XL GTIA chip (player/missile + collisions).")
+  (:export #:gtia
+           #:make-gtia
+           #:gtia-write-regs
+           #:gtia-read-regs
+           #:gtia-read
+           #:gtia-write
+           #:gtia-record-collision
+           #:gtia-clear-collisions
+           #:reset-gtia
+           #:attach-gtia
+           ;; Register offsets (write side)
+           #:+w-hposp0+ #:+w-hposm0+ #:+w-sizep0+ #:+w-sizem+
+           #:+w-grafp0+ #:+w-grafm+
+           #:+w-colpm0+ #:+w-colpf0+ #:+w-colbk+
+           #:+w-prior+  #:+w-vdelay+ #:+w-gractl+
+           #:+w-hitclr+ #:+w-consol+
+           ;; Register offsets (read side)
+           #:+r-m0pf+ #:+r-p0pf+ #:+r-m0p+ #:+r-p0p+
+           #:+r-trig0+ #:+r-pal+ #:+r-consol+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
 ;;;
 ;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE

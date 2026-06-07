@@ -26,6 +26,7 @@
                              (:file "cpu-opcodes")
                              (:file "illegal")
                              (:file "antic")
+                             (:file "gtia")
                              (:file "emulator")
                              (:file "main"))))
   :in-order-to ((test-op (test-op #:atari800-cl/tests))))
@@ -48,7 +49,8 @@
                              (:file "test-illegal")
                              (:file "test-mmu")
                              (:file "test-pia")
-                             (:file "test-antic"))))
+                             (:file "test-antic")
+                             (:file "test-gtia"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :atari800-cl-suite
