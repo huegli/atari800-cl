@@ -288,6 +288,31 @@
            #:+r-trig0+ #:+r-pal+ #:+r-consol+))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.pokey — POKEY (timers + IRQ + audio + serial + keyboard)
+;;;
+;;; This file models POKEY's timer-based IRQ generation, the polynomial
+;;; RNG used by the RANDOM register, and the IRQEN/IRQST latch protocol.
+;;; Audio output and serial I/O are register-only stubs.
+
+(defpackage #:atari800-cl.pokey
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus #:atari800-cl.cpu)
+  (:documentation "Atari 800 XL POKEY — timers, IRQ, RNG, audio scaffolding.")
+  (:export #:pokey
+           #:make-pokey
+           #:pokey-audf #:pokey-audc
+           #:pokey-audctl #:pokey-skctl
+           #:pokey-irqen #:pokey-irqst
+           #:pokey-timer-counts #:pokey-sub-counters
+           #:pokey-poly17-state #:pokey-poly9-state
+           #:pokey-kbcode
+           #:pokey-tick
+           #:pokey-read #:pokey-write
+           #:pokey-random
+           #:reset-pokey
+           #:attach-pokey
+           #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
 ;;;
 ;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE
