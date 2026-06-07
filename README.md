@@ -79,6 +79,30 @@ sbcl --non-interactive \
      --eval '(asdf:test-system :atari800-cl)'
 ```
 
+### CI batch commands
+
+SBCL — exits 0 on success, 1 on any test failure (suitable for CI):
+
+```sh
+sbcl --non-interactive \
+     --eval "(ql:quickload :atari800-cl/tests)" \
+     --eval "(let ((result (asdf:test-system :atari800-cl/tests))) \
+               (uiop:quit (if result 0 1)))"
+```
+
+LispWorks — same shape, using the LW-specific QUIT primitive:
+
+```sh
+lispworks -eval "(ql:quickload :atari800-cl/tests)" \
+          -eval "(let ((result (asdf:test-system :atari800-cl/tests))) \
+                  (lispworks:quit :status (if result 0 1)))"
+```
+
+The umbrella `ATARI800-CL-SUITE` aggregates every per-component suite
+(compat, memory, CPU, opcodes, illegal opcodes, MMU, PIA, ANTIC,
+GTIA, POKEY, machine, IPC, regressions); a green
+`asdf:test-system` means the whole emulator passed.
+
 ### Smoke-testing the API
 
 ```lisp

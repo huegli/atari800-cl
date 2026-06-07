@@ -46,6 +46,7 @@
                 :serial t
                 :components ((:file "package")
                              (:file "test-suite")
+                             (:file "test-helpers")
                              (:file "test-compat")
                              (:file "test-memory")
                              (:file "test-cpu")
@@ -57,7 +58,8 @@
                              (:file "test-gtia")
                              (:file "test-pokey")
                              (:file "test-machine")
-                             (:file "test-ipc"))))
+                             (:file "test-ipc")
+                             (:file "test-regressions"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :atari800-cl-suite

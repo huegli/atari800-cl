@@ -8,38 +8,9 @@
 
 (in-suite machine-suite)
 
-;;; ---------------------------------------------------------------------------
-;;; Synthetic ROM fixtures.
-;;;
-;;; The repo never ships real ROMs, so tests fabricate small images:
-;;; a 16 KiB "OS ROM" whose reset vector points to a NOP sled, and an
-;;; 8 KiB "BASIC ROM" full of $EA (NOP) so the CPU can walk through it.
-
-(defun %poke (rom i v)
-  "Write V to ROM[I].  Wrapped in a separate function (NOTINLINE) so the
-SBCL/arm64 backend cannot fold I into a constant STR immediate (which
-overflows the 12-bit offset field for offsets >= 4096)."
-  (declare (notinline %poke))
-  (setf (aref rom i) v))
-
-(declaim (notinline %poke))
-
-(defun %make-synthetic-os-rom (&key (reset-pc #xC000))
-  (let ((rom (make-array #x4000 :element-type '(unsigned-byte 8)
-                                :initial-element #xEA)))   ; NOPs everywhere
-    ;; Reset vector at $FFFC/$FFFD — OS-ROM offset $3FFC/$3FFD.
-    (%poke rom #x3FFC (logand reset-pc #xFF))
-    (%poke rom #x3FFD (logand (ash reset-pc -8) #xFF))
-    ;; NMI vector at $FFFA/$FFFB → $FE00 (a NOP).
-    (%poke rom #x3FFA #x00)
-    (%poke rom #x3FFB #xFE)
-    ;; IRQ vector at $FFFE/$FFFF → $FE00.
-    (%poke rom #x3FFE #x00)
-    (%poke rom #x3FFF #xFE)
-    rom))
-
-(defun %make-synthetic-basic-rom ()
-  (make-array #x2000 :element-type '(unsigned-byte 8) :initial-element #xEA))
+;;; Synthetic ROM fixtures (%MAKE-SYNTHETIC-OS-ROM / %MAKE-SYNTHETIC-BASIC-ROM
+;;; / %POKE) and MAKE-TEST-MACHINE / WITH-CPU-STATE come from
+;;; tests/test-helpers.lisp.
 
 ;;; ---------------------------------------------------------------------------
 ;;; Wiring and construction
