@@ -10,37 +10,79 @@ the codebase is plain, conditional-free Common Lisp.
 
 ## Status
 
-Early scaffold. The repository contains:
+Functional core, headless and cycle-aware enough to boot real
+Atari OS+BASIC ROMs and stream state to an external renderer.
 
-- `src/package.lisp` — internal package layout
-- `src/compat.lisp` — LispWorks/SBCL portability layer
-- `src/memory.lisp` — flat 64K address space (RAM only for now)
-- `src/cpu.lisp` — 6502 register file and stub `step-cpu`
-- `src/emulator.lisp` — `machine` glue that owns a CPU + memory
-- `src/main.lisp` — public `:atari800-cl` API
-- `tests/` — FiveAM suites for compat, memory, and CPU
-- `atari800-cl.asd`, `atari800-cl-tests.asd` — ASDF system definitions
+What's implemented:
 
-The 6502 instruction decoder, ANTIC/GTIA/POKEY peripherals, and the
-PORTB-controlled OS/BASIC bank switching are deliberately stubbed —
-those are the next milestones.
+- **6502 CPU** — all 151 documented NMOS opcodes plus all 105
+  undocumented NMOS opcodes (compound RMW, LAX, SAX, ANC, ALR, ARR,
+  AXS, LAS, TAS, unstable high-byte stores, NOPs, KIL/JAM/STP).
+  Klaus Dormann's 6502 functional test runs to completion when the
+  binary is present at `roms/6502_functional_test.bin`.
+- **Memory map** — flat 64 KiB RAM + OS/BASIC/self-test ROM overlays,
+  PORTB-driven bank-switching, I/O dispatch in `$D000-$D7FF`.
+- **PIA** — 6520-compatible PORTA / DDRA / PORTB / DDRB.  PORTB writes
+  propagate to the MMU.
+- **ANTIC** — scanline-oriented NTSC engine (262 × 114).  Display-list
+  parsing (blank lines, JMP/JVB, modes 2-F with LMS), DRAM-refresh
+  cycle stealing, P/M DMA accounting, DLI/VBI NMI generation.
+- **GTIA** — split write/read register windows, player-vs-player /
+  player-vs-playfield / missile-vs-player / missile-vs-playfield
+  collision recording, HITCLR, trigger / CONSOL / PAL defaults.
+- **POKEY** — four-channel timers with per-channel clock divider,
+  IRQEN/IRQST latches (active-low) and timer-1/2/4 IRQs, 17- and
+  9-bit polynomial RNG behind RANDOM, audio register scaffolding.
+- **Machine scheduler** — `MACHINE-RUN-FRAME` pumps 29 868 NTSC color
+  clocks per frame in lockstep with ANTIC and POKEY, services NMI and
+  IRQ each clock, runs the CPU when budget allows, and halts cleanly
+  on KIL.
+- **Optional IPC layer** — Unix-domain server thread streams a
+  56-byte wire frame (magic + frame# + scanline + GTIA write-regs +
+  POKEY audio state) after every frame.
+
+What's *not* yet implemented:
+
+- Pixel-level ANTIC/GTIA rendering — there is no framebuffer; the IPC
+  layer publishes register snapshots so a downstream renderer can
+  draw, but nothing inside the emulator paints.
+- POKEY audio synthesis — register state is published; waveform
+  generation is left to a downstream consumer.
+- Serial I/O and SIO bus (cassette, disk, printer).
+- Keyboard scanning (KBCODE never updates from a real input source).
+- Light pen, paddles, cartridge mapper, and the right-cartridge slot.
+
+See `CHANGES.md` for a phase-by-phase summary of what each commit
+delivered.
 
 ## Requirements
 
-- A Common Lisp implementation: **LispWorks 7+** (primary) or
-  **SBCL 2.x** (secondary).
-- **ASDF 3+** (bundled with both implementations).
-- **Quicklisp** for dependency management.
+- A Common Lisp implementation:
+  - **LispWorks 7.0+** (primary development target), or
+  - **SBCL 2.2+** (verified through 2.6.5 on arm64-macOS and
+    x86-64-Linux; used for CI).
+- **ASDF 3.3+** (bundled with both implementations).
+- **Quicklisp** for fetching runtime dependencies.
 
-Runtime dependencies, all of which work on both implementations:
+For SBCL development the optional Emacs side adds either
+**SLIME** or **Sly** — both load against this project unmodified.
+LispWorks ships its own IDE; no extra setup required.
 
-| System              | Purpose                                  |
-| ------------------- | ---------------------------------------- |
-| `alexandria`        | General-purpose utilities                |
-| `bordeaux-threads`  | Cross-implementation threading & locking |
-| `usocket`           | Network sockets (future debugger/RPC)    |
-| `flexi-streams`     | Binary I/O & encoding helpers            |
-| `fiveam` *(tests)*  | Test framework                           |
+Runtime dependencies (all are in Quicklisp's default dist and load
+on both implementations):
+
+| System              | Min version | Purpose                                  |
+| ------------------- | ----------- | ---------------------------------------- |
+| `alexandria`        | any         | General-purpose utilities                |
+| `bordeaux-threads`  | 0.8+        | Cross-implementation threading & locking |
+| `usocket`           | 0.8+        | Network sockets (future debugger/RPC)    |
+| `flexi-streams`     | any         | Binary I/O & encoding helpers            |
+| `fiveam` *(tests)*  | 1.4+        | Test framework                           |
+
+Additionally, the optional IPC layer uses **`sb-bsd-sockets`** (an
+SBCL contrib, auto-loaded by `src/ipc.lisp`).  On LispWorks the IPC
+functions signal a deliberate error — the rest of the emulator runs
+unaffected.
 
 ## Getting started
 
@@ -64,6 +106,14 @@ In a Lisp REPL (LispWorks or SBCL):
 (ql:quickload :atari800-cl)
 ```
 
+### IDE setup
+
+- **SBCL + SLIME or Sly (Emacs)** — no project-specific configuration
+  needed; just `M-x slime` (or `sly`), then `,ql atari800-cl`.
+- **LispWorks** — `File → Open Application Builder` and load the
+  ASD file, or in the listener:
+  `(load "atari800-cl.asd") (asdf:load-system :atari800-cl)`.
+
 ### Running the test suite
 
 ```lisp
@@ -78,6 +128,30 @@ sbcl --non-interactive \
      --eval '(ql:quickload :atari800-cl/tests)' \
      --eval '(asdf:test-system :atari800-cl)'
 ```
+
+### CI batch commands
+
+SBCL — exits 0 on success, 1 on any test failure (suitable for CI):
+
+```sh
+sbcl --non-interactive \
+     --eval "(ql:quickload :atari800-cl/tests)" \
+     --eval "(let ((result (asdf:test-system :atari800-cl/tests))) \
+               (uiop:quit (if result 0 1)))"
+```
+
+LispWorks — same shape, using the LW-specific QUIT primitive:
+
+```sh
+lispworks -eval "(ql:quickload :atari800-cl/tests)" \
+          -eval "(let ((result (asdf:test-system :atari800-cl/tests))) \
+                  (lispworks:quit :status (if result 0 1)))"
+```
+
+The umbrella `ATARI800-CL-SUITE` aggregates every per-component suite
+(compat, memory, CPU, opcodes, illegal opcodes, MMU, PIA, ANTIC,
+GTIA, POKEY, machine, IPC, regressions); a green
+`asdf:test-system` means the whole emulator passed.
 
 ### Smoke-testing the API
 
@@ -107,35 +181,179 @@ ROM images are **not** included — they remain copyrighted by Atari
 Corporation's successors. Drop your own dumps into `roms/` (the
 directory is `.gitignore`d for `*.rom` / `*.bin`):
 
+| File                  | Size    | Purpose       | Notes                                                          |
+| --------------------- | ------- | ------------- | -------------------------------------------------------------- |
+| `roms/atariosxl.rom`  | 16 KiB  | 800 XL OS ROM | Maps to `$C000-$CFFF` and `$D800-$FFFF`. Holds the self-test code at offset `$1000-$17FF` (mirrored at `$5000-$57FF` when bit 7 of PORTB is 0). |
+| `roms/ataribas.rom`   |  8 KiB  | BASIC ROM     | Maps to `$A000-$BFFF` when PORTB bit 1 is 0.                   |
+
+Common hashes (verify before using a dump):
+
 ```
-roms/atariosxl.rom    16 KiB  OS ROM
-roms/ataribas.rom      8 KiB  BASIC ROM
+md5: c5c11546fb909c64eb1bdfc1eb89b3fe   atariosxl.rom   (16384 bytes)
+md5: 0bac0c6a50104045d902df4503a4c30b   ataribas.rom    ( 8192 bytes)
 ```
+
+Legitimate sources: the Atari 800 XL service manual / firmware
+listings, AtariAge community archives, or your own physical 800 XL
+dumped via a cartridge / cassette interface.
+
+## Running toward BASIC
+
+Once you have legal ROM dumps in `roms/`, you can boot the emulator
+through to its BASIC prompt entirely from the REPL:
+
+```lisp
+(ql:quickload :atari800-cl)
+
+;; 1. Construct a fully-wired machine (CPU + BUS + MMU + PIA + ANTIC +
+;;    GTIA + POKEY).
+(defvar *m* (atari800-cl.machine:make-atari-machine))
+
+;; 2. Cold reset: load ROMs, set PORTB = $FF, load PC from the reset
+;;    vector at $FFFC.
+(atari800-cl.machine:machine-cold-reset
+  *m*
+  :os-path    #P"roms/atariosxl.rom"
+  :basic-path #P"roms/ataribas.rom")
+
+;; 3. Inspect the first 100 CPU instructions executed.
+(atari800-cl.machine:machine-trace-step *m* 100)
+;; => list of (:pc ... :opcode ... :mnemonic "..." :a ... :x ... ...)
+
+;; 4. Run forward 10 NTSC frames (262 scanlines each).
+(dotimes (_ 10) (atari800-cl.machine:machine-run-frame *m*))
+
+;; 5. Poll the bank-switching state.
+(atari800-cl.machine:machine-portb-state *m*)
+;; => (:portb #xFF :os-rom-mapped T :basic-rom-mapped NIL :selftest-mapped NIL)
+
+;; 6. Where is ANTIC right now?
+(atari800-cl.machine:machine-scanline *m*)
+;; => 0   ;; just wrapped to the next frame
+
+;; 7. Are any interrupts still pending?
+(atari800-cl.machine:machine-pending-interrupts *m*)
+;; => (:irq-pending NIL :nmi-pending NIL :i-flag-masked T)
+```
+
+The emulator runs headless: there is no built-in video / audio
+output. To attach a renderer or audio player, use the headless IPC
+layer (`atari800-cl.ipc`) which streams the framebuffer + audio state
+across a Unix domain socket.
+
+## Headless IPC wire protocol
+
+The optional IPC server runs in a background thread, accepts a single
+client over a Unix-domain socket, and pushes a fixed-size payload
+after every `MACHINE-RUN-FRAME`. The total per-frame payload is
+**56 bytes**, all integers **little-endian**:
+
+| Offset | Size | Field          | Notes                                                  |
+| -----: | ---: | -------------- | ------------------------------------------------------ |
+|     0  |   4  | magic          | ASCII `"A8XL"` (`0x41 0x38 0x58 0x4C`)                 |
+|     4  |   4  | frame_number   | u32, increments after each run-frame                   |
+|     8  |   2  | scanline       | u16, ANTIC scanline counter (0..261)                   |
+|    10  |   6  | reserved       | reserved for future use; sent as zero                  |
+|    16  |  32  | gtia_writes    | Last-written GTIA write-register array (HPOS/SIZE/GRAF/COL/PRIOR/…) |
+|    48  |   4  | pokey_audf     | AUDF1..AUDF4                                           |
+|    52  |   4  | pokey_audc     | AUDC1..AUDC4                                           |
+
+Server-side API:
+
+```lisp
+;; Start the server on a chosen socket path.
+(defvar *srv*
+  (atari800-cl.ipc:ipc-server-start *m* "/tmp/atari800-cl.sock"))
+
+;; ... external renderer connects, receives 56-byte frames ...
+
+;; Cleanly shut down.
+(atari800-cl.ipc:ipc-server-stop *srv*)
+```
+
+The IPC layer is **entirely optional**: nothing in `MACHINE-RUN-FRAME`
+or any other emulator code-path depends on the server being running.
 
 ## Project layout
 
 ```
 atari800-cl/
-├── atari800-cl.asd          # main system
+├── atari800-cl.asd          # main system definition
 ├── atari800-cl-tests.asd    # convenience alias for the test system
 ├── README.md
+├── CHANGES.md               # phase-by-phase changelog
 ├── .gitignore
+├── AI-Docs/
+│   └── AI-Prompts.md        # the build-by-prompt plan
 ├── src/
-│   ├── package.lisp
+│   ├── package.lisp         # all package definitions
 │   ├── compat.lisp          # LispWorks/SBCL portability layer
-│   ├── memory.lisp
-│   ├── cpu.lisp
-│   ├── emulator.lisp
-│   └── main.lisp
+│   ├── memory.lisp          # legacy flat 64K memory (scaffold)
+│   ├── mmu.lisp             # PORTB-driven bank-switching unit
+│   ├── bus.lisp             # system bus + memory map + I/O dispatch
+│   ├── pia.lisp             # 6520 PIA
+│   ├── cpu.lisp             # 6502 register file + interrupt service
+│   ├── cpu-opcodes.lisp     # 151 documented opcodes
+│   ├── illegal.lisp         # 105 NMOS undocumented opcodes
+│   ├── antic.lisp           # NTSC display-list / DMA engine
+│   ├── gtia.lisp            # player/missile + collision latches
+│   ├── pokey.lisp           # timers + IRQ + RNG + audio scaffolding
+│   ├── irq.lisp             # NMI/IRQ routing helpers
+│   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame
+│   ├── ipc.lisp             # optional Unix-socket renderer streamer
+│   ├── emulator.lisp        # legacy CPU+memory machine (kept for compat)
+│   └── main.lisp            # public :atari800-cl façade
 ├── tests/
 │   ├── package.lisp
-│   ├── test-suite.lisp
+│   ├── test-suite.lisp      # root FiveAM suite
+│   ├── test-helpers.lisp    # shared fixtures + MAKE-TEST-MACHINE
 │   ├── test-compat.lisp
 │   ├── test-memory.lisp
-│   └── test-cpu.lisp
-└── roms/                    # ROM images go here (gitignored)
+│   ├── test-cpu.lisp
+│   ├── test-cpu-opcodes.lisp
+│   ├── test-illegal.lisp
+│   ├── test-mmu.lisp
+│   ├── test-pia.lisp
+│   ├── test-antic.lisp
+│   ├── test-gtia.lisp
+│   ├── test-pokey.lisp
+│   ├── test-machine.lisp
+│   ├── test-ipc.lisp        # IPC server lifecycle + loopback
+│   └── test-regressions.lisp
+└── roms/                    # user-supplied ROM images (gitignored)
     └── .gitkeep
 ```
+
+## Known limitations
+
+- **No pixel rendering or audio synthesis.** ANTIC and GTIA emulate
+  the program-visible state of the chips (display list parsing, mode
+  lines, P/M positions, collision latches), but the emulator does
+  *not* paint a framebuffer.  Likewise POKEY emulates timer / IRQ /
+  RNG accurately, but does not produce a PCM stream.  Pixel and audio
+  output are expected to live in a downstream renderer that consumes
+  the IPC frames.
+- **Cycle accounting is approximate.**  ANTIC's DMA steal is lumped
+  at color-clock 0 of each scanline rather than spread across the
+  line, and `MACHINE-RUN-FRAME` uses a budget-style CPU advance
+  rather than a true cycle-accurate interleave.  Cycle-sensitive
+  tricks (raster effects, mid-scanline reprogramming) are out of
+  scope today.
+- **Decimal-mode quirks** for ADC/SBC follow the standard reference,
+  but ARR's decimal-mode flag behaviour is not modelled (binary mode
+  is always assumed for that one undocumented opcode).
+- **Unstable opcodes** (XAA, AHX, SHX, SHY, TAS, LAX #imm) use the
+  most-consistent canonical implementation — real hardware results
+  vary chip-to-chip and the emulator does not try to reproduce the
+  fault-injection that happens on indexed page crosses.
+- **No real keyboard, joystick, light pen, paddles, or SIO bus.**
+  PORTA reads return $FF (no buttons pressed), POT0-7 return $FF,
+  KBCODE stays 0.  TRIG0-3 default to 1 (released).
+- **No cartridge or right-cartridge support.**  $8000-$9FFF behaves
+  as plain RAM with no mapper.
+- **IPC server is SBCL-only** in this build (uses `sb-bsd-sockets`).
+  On LispWorks the IPC functions signal a deliberate error; nothing
+  else in the emulator is affected.
 
 ## Portability notes
 

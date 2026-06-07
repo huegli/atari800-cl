@@ -130,8 +130,256 @@
            #:+nmi-vector+ #:+reset-vector+ #:+irq-vector+
            ;; Opcode dispatch table and introspection
            #:*opcode-table*
+           #:*opcode-mnemonic-table*
            #:documented-opcodes
-           #:illegal-opcode))
+           #:illegal-opcodes
+           #:*illegal-opcode-list*
+           #:illegal-opcode
+           ;; Interrupt service functions (used by IRQ routing layer)
+           #:service-nmi
+           #:service-irq))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.mmu — Memory Management Unit (PORTB bank-switching)
+;;;
+;;; Owns the PORTB shadow register and the OS/BASIC/self-test ROM mapping
+;;; predicates.  The PIA writes here whenever software writes $D302;
+;;; the bus consults these predicates on every read.
+
+(defpackage #:atari800-cl.mmu
+  (:use #:cl #:atari800-cl.compat)
+  (:documentation "Atari 800 XL PORTB-driven memory bank switching.")
+  (:export #:mmu
+           #:make-mmu
+           #:mmu-portb
+           #:mmu-write-portb
+           #:reset-mmu
+           #:os-rom-mapped-p
+           #:basic-rom-mapped-p
+           #:selftest-mapped-p
+           #:portb-decode
+           #:+portb-os-rom-mask+
+           #:+portb-basic-rom-mask+
+           #:+portb-selftest-mask+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.bus — Atari 800 XL system bus and memory map
+;;;
+;;; The CPU talks through BUS-READ / BUS-WRITE.  The bus owns 64K RAM,
+;;; the OS and BASIC ROM images, a reference to the MMU, and per-chip
+;;; dispatch closures that get installed when individual chips are
+;;; attached (PIA, GTIA, POKEY, ANTIC — added in later milestones).
+
+(defpackage #:atari800-cl.bus
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.mmu)
+  (:documentation "Atari 800 XL system bus: memory map and I/O dispatch.")
+  (:export #:bus
+           #:make-bus
+           #:bus-ram
+           #:bus-os-rom
+           #:bus-basic-rom
+           #:bus-mmu
+           #:bus-read
+           #:bus-write
+           #:bus-read16
+           #:install-os-rom
+           #:install-basic-rom
+           #:attach-mmu
+           #:bus-peek-ram
+           #:bus-poke-ram
+           ;; Chip object back-pointers
+           #:bus-gtia #:bus-pokey #:bus-pia #:bus-antic
+           ;; Per-chip dispatch closures (installed by chip attach functions)
+           #:bus-gtia-read-fn  #:bus-gtia-write-fn
+           #:bus-pokey-read-fn #:bus-pokey-write-fn
+           #:bus-pia-read-fn   #:bus-pia-write-fn
+           #:bus-antic-read-fn #:bus-antic-write-fn
+           ;; Region constants
+           #:+selftest-base+   #:+selftest-end+
+           #:+basic-rom-base+  #:+basic-rom-end+
+           #:+os-rom-low-base+ #:+os-rom-low-end+
+           #:+io-base+         #:+io-end+
+           #:+os-rom-high-base+ #:+os-rom-high-end+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.pia — 6520 PIA (joystick input + PORTB → MMU output)
+;;;
+;;; The PIA owns PORTA / DDRA / PORTB / DDRB at $D300-$D303.  A write
+;;; to PORTB (offset 2) propagates to the attached MMU so bank-switching
+;;; takes effect on the next bus access.
+
+(defpackage #:atari800-cl.pia
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.mmu #:atari800-cl.bus)
+  (:documentation "Atari 800 XL PIA (6520-compatible).")
+  (:export #:pia
+           #:make-pia
+           #:pia-porta #:pia-ddra
+           #:pia-portb #:pia-ddrb
+           #:pia-mmu
+           #:pia-read
+           #:pia-write
+           #:reset-pia
+           #:attach-pia))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.antic — Display list / DMA engine for the 800 XL
+;;;
+;;; Scanline-oriented model: ANTIC-TICK advances one NTSC color clock,
+;;; performs display-list parsing on the correct scanline boundaries,
+;;; lumps DRAM refresh and P/M DMA steals at color-clock 0 of each
+;;; scanline, and raises NMI lines for DLI and VBI events.
+
+(defpackage #:atari800-cl.antic
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus #:atari800-cl.cpu)
+  (:documentation "Atari 800 XL ANTIC video controller (NTSC scanline timing).")
+  (:export #:antic
+           #:make-antic
+           #:antic-registers
+           #:antic-dlist-pointer
+           #:antic-dl-offset
+           #:antic-scanline
+           #:antic-color-clock
+           #:antic-dmactl
+           #:antic-nmien
+           #:antic-nmist
+           #:antic-current-mode
+           #:antic-mode-scanlines-remaining
+           #:antic-dli-armed
+           #:antic-jvb-wait
+           #:antic-frame-count
+           #:antic-stolen-cycles
+           #:antic-tick
+           #:antic-read
+           #:antic-write
+           #:reset-antic
+           #:attach-antic
+           #:mode-line-scanlines
+           #:+scanlines-per-frame+
+           #:+color-clocks-per-scanline+
+           #:+vbi-scanline+
+           #:+dram-refresh-cycles+
+           #:+nmi-dli+ #:+nmi-vbi+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.gtia — GTIA (player/missile + collision latches + console)
+;;;
+;;; GTIA registers occupy $D000-$D0FF.  The write side accepts HPOS,
+;;; size, graphics, color, priority, HITCLR, and CONSOL (speaker)
+;;; values.  The read side returns collision latches, console keys,
+;;; triggers, and the PAL/NTSC indicator.
+
+(defpackage #:atari800-cl.gtia
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus)
+  (:documentation "Atari 800 XL GTIA chip (player/missile + collisions).")
+  (:export #:gtia
+           #:make-gtia
+           #:gtia-write-regs
+           #:gtia-read-regs
+           #:gtia-read
+           #:gtia-write
+           #:gtia-record-collision
+           #:gtia-clear-collisions
+           #:reset-gtia
+           #:attach-gtia
+           ;; Register offsets (write side)
+           #:+w-hposp0+ #:+w-hposm0+ #:+w-sizep0+ #:+w-sizem+
+           #:+w-grafp0+ #:+w-grafm+
+           #:+w-colpm0+ #:+w-colpf0+ #:+w-colbk+
+           #:+w-prior+  #:+w-vdelay+ #:+w-gractl+
+           #:+w-hitclr+ #:+w-consol+
+           ;; Register offsets (read side)
+           #:+r-m0pf+ #:+r-p0pf+ #:+r-m0p+ #:+r-p0p+
+           #:+r-trig0+ #:+r-pal+ #:+r-consol+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.pokey — POKEY (timers + IRQ + audio + serial + keyboard)
+;;;
+;;; This file models POKEY's timer-based IRQ generation, the polynomial
+;;; RNG used by the RANDOM register, and the IRQEN/IRQST latch protocol.
+;;; Audio output and serial I/O are register-only stubs.
+
+(defpackage #:atari800-cl.pokey
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus #:atari800-cl.cpu)
+  (:documentation "Atari 800 XL POKEY — timers, IRQ, RNG, audio scaffolding.")
+  (:export #:pokey
+           #:make-pokey
+           #:pokey-audf #:pokey-audc
+           #:pokey-audctl #:pokey-skctl
+           #:pokey-irqen #:pokey-irqst
+           #:pokey-timer-counts #:pokey-sub-counters
+           #:pokey-poly17-state #:pokey-poly9-state
+           #:pokey-kbcode
+           #:pokey-tick
+           #:pokey-read #:pokey-write
+           #:pokey-random
+           #:reset-pokey
+           #:attach-pokey
+           #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.irq — NMI / IRQ routing helpers
+;;;
+;;; Thin wrappers the machine scheduler calls every clock to service
+;;; whichever interrupt the chips have asserted.
+
+(defpackage #:atari800-cl.irq
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.cpu)
+  (:documentation "Atari 800 XL interrupt routing.")
+  (:export #:check-and-dispatch-nmi
+           #:check-and-dispatch-irq))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.machine — Top-level NTSC scheduler
+;;;
+;;; Owns the CPU plus every chip (mmu, bus, pia, antic, gtia, pokey)
+;;; and runs the frame-loop that pumps them in lockstep.  Distinct
+;;; from atari800-cl.emulator (the legacy CPU + flat-memory scaffold);
+;;; this is the real Atari 800 XL machine.
+
+(defpackage #:atari800-cl.machine
+  (:use #:cl #:atari800-cl.compat
+        #:atari800-cl.cpu #:atari800-cl.bus #:atari800-cl.mmu
+        #:atari800-cl.pia #:atari800-cl.antic #:atari800-cl.gtia
+        #:atari800-cl.pokey #:atari800-cl.irq)
+  (:documentation "Atari 800 XL top-level machine + frame scheduler.")
+  (:export #:atari-machine
+           #:make-atari-machine
+           #:atari-machine-cpu  #:atari-machine-bus
+           #:atari-machine-mmu  #:atari-machine-pia
+           #:atari-machine-antic #:atari-machine-gtia
+           #:atari-machine-pokey
+           #:atari-machine-frame-count
+           #:machine-run-frame
+           #:machine-cold-reset
+           #:machine-install-roms
+           #:load-rom-file
+           #:+clocks-per-frame+
+           ;; Debug / REPL instrumentation
+           #:machine-trace-step
+           #:machine-portb-state
+           #:machine-scanline
+           #:machine-pending-interrupts))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.ipc — Optional headless IPC layer
+;;;
+;;; A background thread accepts ONE client on a Unix-domain socket and
+;;; streams machine state after every MACHINE-RUN-FRAME.  Both the
+;;; thread and the socket are optional — nothing in the main emulator
+;;; loop requires the server to be running.
+
+(defpackage #:atari800-cl.ipc
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.machine)
+  (:documentation "Optional headless IPC server for the Atari 800 XL emulator.")
+  (:export #:ipc-server
+           #:ipc-server-start
+           #:ipc-server-stop
+           #:ipc-server-thread
+           #:ipc-server-socket-path
+           #:ipc-send-frame
+           #:+ipc-magic+
+           #:+ipc-frame-size+
+           #:+ipc-header-size+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
