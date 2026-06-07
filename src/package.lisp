@@ -218,6 +218,45 @@
            #:attach-pia))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.antic — Display list / DMA engine for the 800 XL
+;;;
+;;; Scanline-oriented model: ANTIC-TICK advances one NTSC color clock,
+;;; performs display-list parsing on the correct scanline boundaries,
+;;; lumps DRAM refresh and P/M DMA steals at color-clock 0 of each
+;;; scanline, and raises NMI lines for DLI and VBI events.
+
+(defpackage #:atari800-cl.antic
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus #:atari800-cl.cpu)
+  (:documentation "Atari 800 XL ANTIC video controller (NTSC scanline timing).")
+  (:export #:antic
+           #:make-antic
+           #:antic-registers
+           #:antic-dlist-pointer
+           #:antic-dl-offset
+           #:antic-scanline
+           #:antic-color-clock
+           #:antic-dmactl
+           #:antic-nmien
+           #:antic-nmist
+           #:antic-current-mode
+           #:antic-mode-scanlines-remaining
+           #:antic-dli-armed
+           #:antic-jvb-wait
+           #:antic-frame-count
+           #:antic-stolen-cycles
+           #:antic-tick
+           #:antic-read
+           #:antic-write
+           #:reset-antic
+           #:attach-antic
+           #:mode-line-scanlines
+           #:+scanlines-per-frame+
+           #:+color-clocks-per-scanline+
+           #:+vbi-scanline+
+           #:+dram-refresh-cycles+
+           #:+nmi-dli+ #:+nmi-vbi+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
 ;;;
 ;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE
