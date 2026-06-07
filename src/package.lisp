@@ -198,6 +198,26 @@
            #:+os-rom-high-base+ #:+os-rom-high-end+))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.pia — 6520 PIA (joystick input + PORTB → MMU output)
+;;;
+;;; The PIA owns PORTA / DDRA / PORTB / DDRB at $D300-$D303.  A write
+;;; to PORTB (offset 2) propagates to the attached MMU so bank-switching
+;;; takes effect on the next bus access.
+
+(defpackage #:atari800-cl.pia
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.mmu #:atari800-cl.bus)
+  (:documentation "Atari 800 XL PIA (6520-compatible).")
+  (:export #:pia
+           #:make-pia
+           #:pia-porta #:pia-ddra
+           #:pia-portb #:pia-ddrb
+           #:pia-mmu
+           #:pia-read
+           #:pia-write
+           #:reset-pia
+           #:attach-pia))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
 ;;;
 ;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE

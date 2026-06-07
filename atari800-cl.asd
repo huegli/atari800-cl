@@ -21,6 +21,7 @@
                              (:file "memory")
                              (:file "mmu")
                              (:file "bus")
+                             (:file "pia")
                              (:file "cpu")
                              (:file "cpu-opcodes")
                              (:file "illegal")
@@ -44,7 +45,8 @@
                              (:file "test-cpu")
                              (:file "test-cpu-opcodes")
                              (:file "test-illegal")
-                             (:file "test-mmu"))))
+                             (:file "test-mmu")
+                             (:file "test-pia"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :atari800-cl-suite
