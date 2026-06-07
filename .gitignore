@@ -19,6 +19,7 @@
 # ASDF cache
 .asdf-cache/
 .cache/
+compiled-cache/
 
 # Editor/OS junk
 .DS_Store
