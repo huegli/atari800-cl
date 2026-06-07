@@ -739,11 +739,7 @@ sets I flag, and vectors through $FFFE (same as IRQ)."
 
 (setf *opcode-table* *opcode-table-builder*)
 
-(defun documented-opcodes ()
-  "Return a list of opcode numbers (integers 0–255) that have a handler installed.
-There are 151 documented NMOS 6502 opcodes; the remaining 105 slots are NIL."
-  ;; LOOP with WHEN ... COLLECT filters the array: only indices with
-  ;; a non-NIL handler are collected into the result list.
-  (loop for i below 256
-        when (svref *opcode-table* i)
-          collect i))
+;;; DOCUMENTED-OPCODES is defined in src/illegal.lisp, after the full
+;;; opcode map (documented + 105 NMOS undocumented) has been installed.
+;;; It filters *OPCODE-TABLE* against *ILLEGAL-OPCODE-LIST* to return
+;;; just the 151 officially documented entries.

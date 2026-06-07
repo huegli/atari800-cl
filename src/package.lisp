@@ -131,6 +131,8 @@
            ;; Opcode dispatch table and introspection
            #:*opcode-table*
            #:documented-opcodes
+           #:illegal-opcodes
+           #:*illegal-opcode-list*
            #:illegal-opcode))
 
 ;;; ---------------------------------------------------------------------------
