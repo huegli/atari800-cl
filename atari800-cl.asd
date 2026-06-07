@@ -30,6 +30,7 @@
                              (:file "pokey")
                              (:file "irq")
                              (:file "machine")
+                             (:file "ipc")
                              (:file "emulator")
                              (:file "main"))))
   :in-order-to ((test-op (test-op #:atari800-cl/tests))))
@@ -55,7 +56,8 @@
                              (:file "test-antic")
                              (:file "test-gtia")
                              (:file "test-pokey")
-                             (:file "test-machine"))))
+                             (:file "test-machine")
+                             (:file "test-ipc"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :atari800-cl-suite

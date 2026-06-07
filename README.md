@@ -167,6 +167,39 @@ output. To attach a renderer or audio player, use the headless IPC
 layer (`atari800-cl.ipc`) which streams the framebuffer + audio state
 across a Unix domain socket.
 
+## Headless IPC wire protocol
+
+The optional IPC server runs in a background thread, accepts a single
+client over a Unix-domain socket, and pushes a fixed-size payload
+after every `MACHINE-RUN-FRAME`. The total per-frame payload is
+**56 bytes**, all integers **little-endian**:
+
+| Offset | Size | Field          | Notes                                                  |
+| -----: | ---: | -------------- | ------------------------------------------------------ |
+|     0  |   4  | magic          | ASCII `"A8XL"` (`0x41 0x38 0x58 0x4C`)                 |
+|     4  |   4  | frame_number   | u32, increments after each run-frame                   |
+|     8  |   2  | scanline       | u16, ANTIC scanline counter (0..261)                   |
+|    10  |   6  | reserved       | reserved for future use; sent as zero                  |
+|    16  |  32  | gtia_writes    | Last-written GTIA write-register array (HPOS/SIZE/GRAF/COL/PRIOR/…) |
+|    48  |   4  | pokey_audf     | AUDF1..AUDF4                                           |
+|    52  |   4  | pokey_audc     | AUDC1..AUDC4                                           |
+
+Server-side API:
+
+```lisp
+;; Start the server on a chosen socket path.
+(defvar *srv*
+  (atari800-cl.ipc:ipc-server-start *m* "/tmp/atari800-cl.sock"))
+
+;; ... external renderer connects, receives 56-byte frames ...
+
+;; Cleanly shut down.
+(atari800-cl.ipc:ipc-server-stop *srv*)
+```
+
+The IPC layer is **entirely optional**: nothing in `MACHINE-RUN-FRAME`
+or any other emulator code-path depends on the server being running.
+
 ## Project layout
 
 ```

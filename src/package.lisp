@@ -361,6 +361,27 @@
            #:machine-pending-interrupts))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.ipc — Optional headless IPC layer
+;;;
+;;; A background thread accepts ONE client on a Unix-domain socket and
+;;; streams machine state after every MACHINE-RUN-FRAME.  Both the
+;;; thread and the socket are optional — nothing in the main emulator
+;;; loop requires the server to be running.
+
+(defpackage #:atari800-cl.ipc
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.machine)
+  (:documentation "Optional headless IPC server for the Atari 800 XL emulator.")
+  (:export #:ipc-server
+           #:ipc-server-start
+           #:ipc-server-stop
+           #:ipc-server-thread
+           #:ipc-server-socket-path
+           #:ipc-send-frame
+           #:+ipc-magic+
+           #:+ipc-frame-size+
+           #:+ipc-header-size+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
 ;;;
 ;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE
