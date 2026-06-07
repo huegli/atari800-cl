@@ -254,6 +254,11 @@ by ADDR-RELATIVE).  Returns the number of cycles consumed."
 either NIL or a named function (defined by DEFOPCODE) that handles one
 opcode.  Installed as *OPCODE-TABLE* at the end of the file.")
 
+(defparameter *opcode-mnemonic-table*
+  (make-array 256 :initial-element nil)
+  "Parallel to *OPCODE-TABLE*: stores the mnemonic string (e.g. \"LDA-IMM\")
+for each installed opcode.  Used by the trace / disassembly helpers.")
+
 ;; EVAL-WHEN ensures this helper function exists at compile time, because
 ;; DEFOPCODE (a macro) calls it during macro expansion (which happens at
 ;; compile time).  Without EVAL-WHEN, the function wouldn't exist yet when
@@ -290,7 +295,9 @@ The macro expands into:
     ;;   #'... gets the function object for the SETF
     `(progn
        (defun ,fn-name ,lambda-list ,@body)
-       (setf (svref *opcode-table-builder* ,opcode) (function ,fn-name))
+       (setf (svref *opcode-table-builder* ,opcode) (function ,fn-name)
+             (svref *opcode-mnemonic-table* ,opcode)
+             ,(string-upcase (string mnemonic)))
        ',fn-name)))
 
 ;; Another EVAL-WHEN helper: converts addressing-mode function names to

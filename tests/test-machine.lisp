@@ -157,6 +157,98 @@ serviced (PC jumps to the NMI vector, pending-nmi clears)."
     (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+)
              "service-irq must set the I flag to mask further IRQs")))
 
+;;; ---------------------------------------------------------------------------
+;;; Debug instrumentation (Prompt 11)
+
+(test machine-trace-step-returns-n-snapshots
+  "MACHINE-TRACE-STEP returns the requested number of snapshots."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-cold-reset m :os-rom (%make-synthetic-os-rom))
+    (let ((snaps (atari800-cl.machine:machine-trace-step m 10)))
+      (is (= 10 (length snaps))
+          "Asked for 10 snapshots; got ~A" (length snaps))
+      (let ((first (first snaps)))
+        (is-true (getf first :pc))
+        (is-true (member :opcode first))
+        (is-true (member :a first))
+        (is-true (member :p first))))))
+
+(test machine-trace-step-decodes-nop-mnemonic
+  "The synthetic ROM is full of $EA (NOP); snapshots must show \"NOP\"."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-cold-reset m :os-rom (%make-synthetic-os-rom))
+    (let ((snaps (atari800-cl.machine:machine-trace-step m 3)))
+      (dolist (s snaps)
+        (is (= #xEA (getf s :opcode))
+            "Each opcode byte must be #xEA (NOP filler); got #x~2,'0X"
+            (getf s :opcode))
+        (is (string= "NOP" (getf s :mnemonic))
+            "Mnemonic for $EA must decode to \"NOP\"; got ~S"
+            (getf s :mnemonic))))))
+
+(test machine-portb-state-after-cold-reset
+  "PORTB-STATE plist after cold reset: OS mapped, BASIC off, self-test off."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-cold-reset m :os-rom (%make-synthetic-os-rom))
+    (let ((p (atari800-cl.machine:machine-portb-state m)))
+      (is (= #xFF (getf p :portb)))
+      (is-true (getf p :os-rom-mapped))
+      (is-false (getf p :basic-rom-mapped))
+      (is-false (getf p :selftest-mapped)))))
+
+(test machine-pending-interrupts-shape
+  "MACHINE-PENDING-INTERRUPTS returns a plist with three known keys."
+  (let* ((m (atari800-cl.machine:make-atari-machine))
+         (info (progn
+                 (atari800-cl.machine:machine-cold-reset
+                  m :os-rom (%make-synthetic-os-rom))
+                 (atari800-cl.machine:machine-pending-interrupts m))))
+    (is (member :irq-pending info))
+    (is (member :nmi-pending info))
+    (is (member :i-flag-masked info))
+    (is-false (getf info :irq-pending))
+    (is-false (getf info :nmi-pending))
+    (is-true  (getf info :i-flag-masked) "I flag should be set after cold reset")))
+
+(test machine-scanline-progresses-and-resets
+  "MACHINE-SCANLINE reports an integer 0..261 and wraps after each frame."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-cold-reset m :os-rom (%make-synthetic-os-rom))
+    (is (zerop (atari800-cl.machine:machine-scanline m))
+        "Scanline starts at 0 after cold reset")
+    (atari800-cl.machine:machine-run-frame m)
+    (is (zerop (atari800-cl.machine:machine-scanline m))
+        "Scanline wraps back to 0 after one full frame")))
+
+(test machine-run-frame-survives-five-frames
+  "Five frames in a row run without raising any condition."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-cold-reset
+     m :os-rom (%make-synthetic-os-rom) :basic-rom (%make-synthetic-basic-rom))
+    (finishes
+     (dotimes (i 5)
+       (atari800-cl.machine:machine-run-frame m)))
+    (is (= 5 (atari800-cl.machine:atari-machine-frame-count m)))))
+
+(test machine-cold-reset-portb-maps-os-and-basic-correctly
+  "With PORTB=$FF after cold reset, reading at $C100 returns the OS ROM
+byte; toggling bit 1 to 0 then reading $A100 returns the BASIC ROM byte."
+  (let* ((m (atari800-cl.machine:make-atari-machine))
+         (os (%make-synthetic-os-rom))
+         (basic (%make-synthetic-basic-rom)))
+    ;; Mark sentinel bytes in the synthetic ROMs.
+    (%poke os #x0100 #xAB)            ; OS ROM offset $0100 → $C100
+    (%poke basic #x0100 #xCD)         ; BASIC ROM offset $0100 → $A100
+    (atari800-cl.machine:machine-cold-reset m :os-rom os :basic-rom basic)
+    (let ((bus (atari800-cl.machine:atari-machine-bus m))
+          (mmu (atari800-cl.machine:atari-machine-mmu m)))
+      ;; OS visible at $C100.
+      (is (= #xAB (atari800-cl.bus:bus-read bus #xC100))
+          "OS ROM byte must be visible at $C100 after cold reset")
+      ;; BASIC requires bit 1 clear; cold reset leaves it set.  Clear it.
+      (atari800-cl.mmu:mmu-write-portb mmu #xFD)              ; OS on, BASIC on
+      (is (= #xCD (atari800-cl.bus:bus-read bus #xA100))))))
+
 (test machine-irq-masked-when-i-flag-set
   "With I flag set, pending-irq is NOT serviced (still pending after frame)."
   (let* ((m   (atari800-cl.machine:make-atari-machine))

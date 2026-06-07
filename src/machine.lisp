@@ -112,6 +112,67 @@ vector at $FFFC to set the initial PC.  Returns MACHINE."
 ;;; ---------------------------------------------------------------------------
 ;;; Frame scheduler
 
+;;; ---------------------------------------------------------------------------
+;;; Debug / instrumentation helpers (Prompt 11)
+;;;
+;;; These are the entry points the README's "Running toward BASIC" section
+;;; recommends for poking at a running machine from the REPL.
+
+(defun machine-trace-step (machine n)
+  "Step the CPU N times, returning a list of N snapshots in execution order.
+Each snapshot is a plist:
+  (:pc <u16> :opcode <u8> :mnemonic <string-or-nil>
+   :a <u8> :x <u8> :y <u8> :p <u8> :sp <u8> :cycles <fixnum>)
+
+If the CPU halts (illegal opcode → CPU-HALTED set to T), tracing stops
+early and the partial list is returned.  No ANTIC/POKEY pumping happens
+here — use MACHINE-RUN-FRAME for full-system stepping."
+  (declare (type atari-machine machine) (type fixnum n))
+  (let* ((cpu (atari-machine-cpu machine))
+         (bus (atari-machine-bus machine))
+         (snapshots '()))
+    (dotimes (i n)
+      (declare (ignore i))
+      (when (cpu-halted cpu) (return))
+      (let* ((pc      (cpu-pc cpu))
+             (opcode  (bus-read bus pc))
+             (mnem    (svref *opcode-mnemonic-table* opcode)))
+        (push (list :pc pc :opcode opcode :mnemonic mnem
+                    :a (cpu-a cpu) :x (cpu-x cpu) :y (cpu-y cpu)
+                    :p (cpu-flags cpu) :sp (cpu-sp cpu)
+                    :cycles (cpu-cycles cpu))
+              snapshots))
+      (handler-case (step-cpu cpu)
+        (illegal-opcode ()
+          (setf (cpu-halted cpu) t)
+          (return))))
+    (nreverse snapshots)))
+
+(defun machine-portb-state (machine)
+  "Return a plist describing the current PORTB / bank-switching state.
+Keys: :PORTB :OS-ROM-MAPPED :BASIC-ROM-MAPPED :SELFTEST-MAPPED."
+  (declare (type atari-machine machine))
+  (portb-decode (atari-machine-mmu machine)))
+
+(defun machine-scanline (machine)
+  "Return the current ANTIC scanline counter (0..261)."
+  (declare (type atari-machine machine))
+  (antic-scanline (atari-machine-antic machine)))
+
+(defun machine-pending-interrupts (machine)
+  "Return a plist with the current interrupt-line state:
+  :IRQ-PENDING <boolean>
+  :NMI-PENDING <boolean>
+  :I-FLAG-MASKED <boolean> (T when IRQs are masked by the CPU's I flag)"
+  (declare (type atari-machine machine))
+  (let ((cpu (atari-machine-cpu machine)))
+    (list :irq-pending  (cpu-pending-irq cpu)
+          :nmi-pending  (cpu-pending-nmi cpu)
+          :i-flag-masked (flag-set? cpu +flag-i+))))
+
+;;; ---------------------------------------------------------------------------
+;;; Frame scheduler
+
 (defun machine-run-frame (machine)
   "Run one NTSC frame: 29,868 color clocks.  Pumps ANTIC + POKEY in
 lockstep with the CPU, services NMI/IRQ each clock, and increments

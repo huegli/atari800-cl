@@ -130,6 +130,7 @@
            #:+nmi-vector+ #:+reset-vector+ #:+irq-vector+
            ;; Opcode dispatch table and introspection
            #:*opcode-table*
+           #:*opcode-mnemonic-table*
            #:documented-opcodes
            #:illegal-opcodes
            #:*illegal-opcode-list*
@@ -352,7 +353,12 @@
            #:machine-cold-reset
            #:machine-install-roms
            #:load-rom-file
-           #:+clocks-per-frame+))
+           #:+clocks-per-frame+
+           ;; Debug / REPL instrumentation
+           #:machine-trace-step
+           #:machine-portb-state
+           #:machine-scanline
+           #:machine-pending-interrupts))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.emulator — Top-level machine wiring
