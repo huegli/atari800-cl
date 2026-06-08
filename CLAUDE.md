@@ -13,17 +13,36 @@ Load the system in a Lisp REPL:
 (ql:quickload :atari800-cl)
 ```
 
-Run the full test suite:
+Run the full test suite in a REPL:
 ```lisp
 (ql:quickload :atari800-cl/tests)
 (asdf:test-system :atari800-cl)
 ```
 
-Run from shell (SBCL):
+**Tests must pass on BOTH SBCL and LispWorks** — this is a portability
+project, and a change is not done until the suite is green on both. Run
+both before committing.
+
+> **Exit-code gotcha:** `asdf:test-system` returns `T` even when tests
+> *fail*, so it is useless for shell/CI exit codes. Always key the exit
+> status off `fiveam:run!`, which returns `T` only when every check
+> passes. The commands below do this (exit 0 = all pass, 1 = failure).
+
+Run from shell with **SBCL** (`.sbclrc` loads Quicklisp before `--eval`):
 ```sh
 sbcl --non-interactive \
      --eval '(ql:quickload :atari800-cl/tests)' \
-     --eval '(asdf:test-system :atari800-cl)'
+     --eval '(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))'
+```
+
+Run from shell with **LispWorks** (the console image is `lw-console` in
+`$PATH`). Command-line `-eval` forms are *read* before the init file
+loads Quicklisp, so load `setup.lisp` first and defer the `ql:` symbol
+with `read-from-string`:
+```sh
+lw-console -eval '(load "~/quicklisp/setup.lisp")' \
+           -eval '(funcall (read-from-string "ql:quickload") :atari800-cl/tests)' \
+           -eval '(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))'
 ```
 
 Run a single FiveAM test by name:
