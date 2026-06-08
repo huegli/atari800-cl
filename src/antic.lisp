@@ -35,39 +35,46 @@
 
 ;;; ---------------------------------------------------------------------------
 ;;; NTSC timing constants
+;;;
+;;; Wrapped in EVAL-WHEN so the register-offset constants below have values at
+;;; compile time.  ANTIC-READ/ANTIC-WRITE use them as CASE keys via the `#.`
+;;; read-time-eval reader macro, which requires the value to exist while the
+;;; file is being compiled.  SBCL evaluates DEFCONSTANT's value form at compile
+;;; time anyway, but LispWorks does not guarantee this, so make it explicit.
 
-(defconstant +scanlines-per-frame+        262)
-(defconstant +color-clocks-per-scanline+  114)
-(defconstant +active-start-scanline+      8)
-(defconstant +vbi-scanline+               248)
-(defconstant +dram-refresh-cycles+        9)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defconstant +scanlines-per-frame+        262)
+  (defconstant +color-clocks-per-scanline+  114)
+  (defconstant +active-start-scanline+      8)
+  (defconstant +vbi-scanline+               248)
+  (defconstant +dram-refresh-cycles+        9)
 
-;;; ANTIC register offsets (within the 32-byte register file).
-(defconstant +reg-dmactl+  #x00)
-(defconstant +reg-chactl+  #x01)
-(defconstant +reg-dlistl+  #x02)
-(defconstant +reg-dlisth+  #x03)
-(defconstant +reg-hscrol+  #x04)
-(defconstant +reg-vscrol+  #x05)
-(defconstant +reg-pmbase+  #x07)
-(defconstant +reg-chbase+  #x09)
-(defconstant +reg-wsync+   #x0A)
-(defconstant +reg-vcount+  #x0B)
-(defconstant +reg-penh+    #x0C)
-(defconstant +reg-penv+    #x0D)
-(defconstant +reg-nmien+   #x0E)
-(defconstant +reg-nmires+  #x0F)
+  ;; ANTIC register offsets (within the 32-byte register file).
+  (defconstant +reg-dmactl+  #x00)
+  (defconstant +reg-chactl+  #x01)
+  (defconstant +reg-dlistl+  #x02)
+  (defconstant +reg-dlisth+  #x03)
+  (defconstant +reg-hscrol+  #x04)
+  (defconstant +reg-vscrol+  #x05)
+  (defconstant +reg-pmbase+  #x07)
+  (defconstant +reg-chbase+  #x09)
+  (defconstant +reg-wsync+   #x0A)
+  (defconstant +reg-vcount+  #x0B)
+  (defconstant +reg-penh+    #x0C)
+  (defconstant +reg-penv+    #x0D)
+  (defconstant +reg-nmien+   #x0E)
+  (defconstant +reg-nmires+  #x0F)
 
-;;; NMI status bits — also the masks used in NMIEN.
-(defconstant +nmi-dli+    #x80)
-(defconstant +nmi-vbi+    #x40)
-(defconstant +nmi-reset+  #x20)
+  ;; NMI status bits — also the masks used in NMIEN.
+  (defconstant +nmi-dli+    #x80)
+  (defconstant +nmi-vbi+    #x40)
+  (defconstant +nmi-reset+  #x20)
 
-;;; DMACTL bits.
-(defconstant +dmactl-playfield-mask+ #x03)   ; 00=off, 01=narrow, 10=normal, 11=wide
-(defconstant +dmactl-missile-mask+   #x04)
-(defconstant +dmactl-player-mask+    #x08)
-(defconstant +dmactl-instructions+   #x20)   ; bit 5: DL fetching enabled
+  ;; DMACTL bits.
+  (defconstant +dmactl-playfield-mask+ #x03)   ; 00=off, 01=narrow, 10=normal, 11=wide
+  (defconstant +dmactl-missile-mask+   #x04)
+  (defconstant +dmactl-player-mask+    #x08)
+  (defconstant +dmactl-instructions+   #x20))  ; bit 5: DL fetching enabled
 
 ;;; ---------------------------------------------------------------------------
 ;;; ANTIC struct
