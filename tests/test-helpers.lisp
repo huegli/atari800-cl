@@ -8,8 +8,8 @@
 ;;;;                              filled with $EA NOPs, vectors hand-poked.
 ;;;;   WITH-CPU-STATE           — install a specific CPU register snapshot
 ;;;;                              for a targeted test, restore after.
-;;;;   %MAKE-SYNTHETIC-OS-ROM   — bare ROM-array builder (used by IPC and
-;;;;                              machine tests).
+;;;;   %MAKE-SYNTHETIC-OS-ROM   — bare ROM-array builder (used by machine
+;;;;                              and regression tests).
 ;;;;   %MAKE-SYNTHETIC-BASIC-ROM — bare 8K-of-NOPs.
 ;;;;   %POKE                    — NOTINLINE AREF setter that dodges the
 ;;;;                              SBCL/arm64 codegen bug on >=4 KiB offsets.

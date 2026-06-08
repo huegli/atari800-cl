@@ -10,9 +10,7 @@
   :version "0.0.1"
   :homepage "https://example.com/atari800-cl"
   :depends-on (#:alexandria
-               #:bordeaux-threads
-               #:usocket
-               #:flexi-streams)
+               #:bordeaux-threads)
   :serial t
   :components ((:module "src"
                 :serial t
@@ -30,7 +28,6 @@
                              (:file "pokey")
                              (:file "irq")
                              (:file "machine")
-                             (:file "ipc")
                              (:file "emulator")
                              (:file "main"))))
   :in-order-to ((test-op (test-op #:atari800-cl/tests))))
@@ -58,7 +55,6 @@
                              (:file "test-gtia")
                              (:file "test-pokey")
                              (:file "test-machine")
-                             (:file "test-ipc")
                              (:file "test-regressions"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!

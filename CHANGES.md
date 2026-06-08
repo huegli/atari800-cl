@@ -3,6 +3,14 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Removed the headless IPC layer
+
+- Deleted `src/ipc.lisp`, `tests/test-ipc.lisp`, the `atari800-cl.ipc`
+  package, and the now-unused `usocket` / `flexi-streams` dependencies.
+  The Unix-domain-socket streamer added in Phase 12 (below) is gone;
+  a downstream renderer should instead drive `MACHINE-RUN-FRAME` and
+  read the program-visible chip state directly after each frame.
+
 ## Phase 14 — Repository handoff (Prompt 14)
 
 - Comprehensive README rewrite: project status, dependency table with

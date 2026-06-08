@@ -37,16 +37,12 @@ What's implemented:
   clocks per frame in lockstep with ANTIC and POKEY, services NMI and
   IRQ each clock, runs the CPU when budget allows, and halts cleanly
   on KIL.
-- **Optional IPC layer** — Unix-domain server thread streams a
-  56-byte wire frame (magic + frame# + scanline + GTIA write-regs +
-  POKEY audio state) after every frame.
 
 What's *not* yet implemented:
 
-- Pixel-level ANTIC/GTIA rendering — there is no framebuffer; the IPC
-  layer publishes register snapshots so a downstream renderer can
-  draw, but nothing inside the emulator paints.
-- POKEY audio synthesis — register state is published; waveform
+- Pixel-level ANTIC/GTIA rendering — there is no framebuffer; nothing
+  inside the emulator paints.
+- POKEY audio synthesis — register state is maintained; waveform
   generation is left to a downstream consumer.
 - Serial I/O and SIO bus (cassette, disk, printer).
 - Keyboard scanning (KBCODE never updates from a real input source).
@@ -75,14 +71,7 @@ on both implementations):
 | ------------------- | ----------- | ---------------------------------------- |
 | `alexandria`        | any         | General-purpose utilities                |
 | `bordeaux-threads`  | 0.8+        | Cross-implementation threading & locking |
-| `usocket`           | 0.8+        | Network sockets (future debugger/RPC)    |
-| `flexi-streams`     | any         | Binary I/O & encoding helpers            |
 | `fiveam` *(tests)*  | 1.4+        | Test framework                           |
-
-Additionally, the optional IPC layer uses **`sb-bsd-sockets`** (an
-SBCL contrib, auto-loaded by `src/ipc.lisp`).  On LispWorks the IPC
-functions signal a deliberate error — the rest of the emulator runs
-unaffected.
 
 ## Getting started
 
@@ -150,7 +139,7 @@ lispworks -eval "(ql:quickload :atari800-cl/tests)" \
 
 The umbrella `ATARI800-CL-SUITE` aggregates every per-component suite
 (compat, memory, CPU, opcodes, illegal opcodes, MMU, PIA, ANTIC,
-GTIA, POKEY, machine, IPC, regressions); a green
+GTIA, POKEY, machine, regressions); a green
 `asdf:test-system` means the whole emulator passed.
 
 ### Smoke-testing the API
@@ -237,42 +226,10 @@ through to its BASIC prompt entirely from the REPL:
 ```
 
 The emulator runs headless: there is no built-in video / audio
-output. To attach a renderer or audio player, use the headless IPC
-layer (`atari800-cl.ipc`) which streams the framebuffer + audio state
-across a Unix domain socket.
-
-## Headless IPC wire protocol
-
-The optional IPC server runs in a background thread, accepts a single
-client over a Unix-domain socket, and pushes a fixed-size payload
-after every `MACHINE-RUN-FRAME`. The total per-frame payload is
-**56 bytes**, all integers **little-endian**:
-
-| Offset | Size | Field          | Notes                                                  |
-| -----: | ---: | -------------- | ------------------------------------------------------ |
-|     0  |   4  | magic          | ASCII `"A8XL"` (`0x41 0x38 0x58 0x4C`)                 |
-|     4  |   4  | frame_number   | u32, increments after each run-frame                   |
-|     8  |   2  | scanline       | u16, ANTIC scanline counter (0..261)                   |
-|    10  |   6  | reserved       | reserved for future use; sent as zero                  |
-|    16  |  32  | gtia_writes    | Last-written GTIA write-register array (HPOS/SIZE/GRAF/COL/PRIOR/…) |
-|    48  |   4  | pokey_audf     | AUDF1..AUDF4                                           |
-|    52  |   4  | pokey_audc     | AUDC1..AUDC4                                           |
-
-Server-side API:
-
-```lisp
-;; Start the server on a chosen socket path.
-(defvar *srv*
-  (atari800-cl.ipc:ipc-server-start *m* "/tmp/atari800-cl.sock"))
-
-;; ... external renderer connects, receives 56-byte frames ...
-
-;; Cleanly shut down.
-(atari800-cl.ipc:ipc-server-stop *srv*)
-```
-
-The IPC layer is **entirely optional**: nothing in `MACHINE-RUN-FRAME`
-or any other emulator code-path depends on the server being running.
+output. A downstream renderer or audio player can drive the machine
+with `MACHINE-RUN-FRAME` and read the program-visible chip state
+(GTIA write registers, POKEY audio registers, ANTIC scanline) directly
+after each frame.
 
 ## Project layout
 
@@ -300,7 +257,6 @@ atari800-cl/
 │   ├── pokey.lisp           # timers + IRQ + RNG + audio scaffolding
 │   ├── irq.lisp             # NMI/IRQ routing helpers
 │   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame
-│   ├── ipc.lisp             # optional Unix-socket renderer streamer
 │   ├── emulator.lisp        # legacy CPU+memory machine (kept for compat)
 │   └── main.lisp            # public :atari800-cl façade
 ├── tests/
@@ -318,7 +274,6 @@ atari800-cl/
 │   ├── test-gtia.lisp
 │   ├── test-pokey.lisp
 │   ├── test-machine.lisp
-│   ├── test-ipc.lisp        # IPC server lifecycle + loopback
 │   └── test-regressions.lisp
 └── roms/                    # user-supplied ROM images (gitignored)
     └── .gitkeep
@@ -331,8 +286,8 @@ atari800-cl/
   lines, P/M positions, collision latches), but the emulator does
   *not* paint a framebuffer.  Likewise POKEY emulates timer / IRQ /
   RNG accurately, but does not produce a PCM stream.  Pixel and audio
-  output are expected to live in a downstream renderer that consumes
-  the IPC frames.
+  output are expected to live in a downstream renderer that reads the
+  chip state after each frame.
 - **Cycle accounting is approximate.**  ANTIC's DMA steal is lumped
   at color-clock 0 of each scanline rather than spread across the
   line, and `MACHINE-RUN-FRAME` uses a budget-style CPU advance
@@ -351,9 +306,6 @@ atari800-cl/
   KBCODE stays 0.  TRIG0-3 default to 1 (released).
 - **No cartridge or right-cartridge support.**  $8000-$9FFF behaves
   as plain RAM with no mapper.
-- **IPC server is SBCL-only** in this build (uses `sb-bsd-sockets`).
-  On LispWorks the IPC functions signal a deliberate error; nothing
-  else in the emulator is affected.
 
 ## Portability notes
 

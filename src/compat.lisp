@@ -139,7 +139,8 @@ a single helper so callers never need to know the spelling."
 ;;; Binary file I/O
 ;;;
 ;;; The path we want is "open in binary mode, read N bytes into a byte
-;;; vector".  flexi-streams gives us a uniform spelling on both hosts.
+;;; vector".  Plain WITH-OPEN-FILE with an (UNSIGNED-BYTE 8) element type
+;;; gives us a uniform spelling on both hosts.
 
 (defun read-binary-file (pathname)
   "Read PATHNAME into a freshly allocated (UNSIGNED-BYTE 8) vector."
