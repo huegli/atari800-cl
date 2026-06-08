@@ -400,6 +400,8 @@
            #:reset-machine
            #:step-machine
            #:run-machine
+           #:run-frame
+           #:machine-frame-count
            #:load-os-rom
            #:load-basic-rom
            #:*version*))

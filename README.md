@@ -149,24 +149,29 @@ GTIA, POKEY, machine, regressions); a green
 
 ### Smoke-testing the API
 
+The public façade (package `atari800-cl`, nickname `a800`) builds and
+drives the full machine:
+
 ```lisp
-(let ((m (atari800-cl.emulator:make-machine)))
-  (atari800-cl.emulator:reset-machine m)
-  (atari800-cl.emulator:step-machine m)
-  (atari800-cl.cpu:cpu-cycles
-    (atari800-cl.emulator:machine-cpu m)))
+(let ((m (a800:make-machine)))     ; full machine, cold-reset
+  (a800:step-machine m)            ; one CPU instruction; returns cycles
+  (a800:run-frame m :count 1)      ; one NTSC frame (CPU + ANTIC + POKEY)
+  (a800:machine-frame-count m))
 ;; => 1
 ```
 
-Once you have ROM images, the public façade looks like this:
+Once you have ROM images, point `make-machine` at them and run whole
+frames:
 
 ```lisp
 (defparameter *m*
-  (atari800-cl:make-machine
+  (a800:make-machine
     :os-rom    #P"roms/atariosxl.rom"
     :basic-rom #P"roms/ataribas.rom"))
 
-(atari800-cl:run-machine *m* :cycles 1000)
+;; RUN-FRAME drives the entire machine; RUN-MACHINE/STEP-MACHINE advance
+;; only the CPU (handy for debugging, but they don't pump ANTIC/POKEY).
+(a800:run-frame *m* :count 60)     ; ~1 second of emulated time
 ```
 
 ## ROM images

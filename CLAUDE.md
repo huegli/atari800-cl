@@ -85,9 +85,9 @@ Each chip lives in its own package; `:use` edges define the layering. The `.asd`
 
 7. **atari800-cl.machine** (`src/machine.lisp`) — The real top-level: the `atari-machine` struct owns one of each chip plus the bus. `make-atari-machine` builds and wires everything (chip closures into the bus, bus into the CPU's hooks); `machine-cold-reset` loads ROMs and boots; `machine-run-frame` is the frame scheduler. Also provides REPL instrumentation (`machine-trace-step`, `machine-portb-state`, `machine-scanline`, `machine-pending-interrupts`).
 
-8. **atari800-cl.emulator** (`src/emulator.lisp`) — **Legacy** `machine` struct gluing just CPU + `memory` together (no chips). Predates the full `machine` package; kept because the public facade still wraps it.
+8. **atari800-cl.emulator** (`src/emulator.lisp`) — **Legacy/orphaned** `machine` struct gluing just CPU + `memory` together (no chips). Predates the full `machine` package and is no longer referenced by anything (the facade was migrated off it); still compiled, and a candidate for removal.
 
-9. **atari800-cl** (`src/main.lisp`) — Public facade (nicknamed `a800`) re-exporting a user-facing API. **Note:** it currently wraps the legacy `emulator`, not the full `atari-machine` — driving the complete machine means calling `atari800-cl.machine:` functions directly.
+9. **atari800-cl** (`src/main.lisp`) — Public facade (nicknamed `a800`) re-exporting a user-facing API. Wraps the full `atari-machine`: `make-machine` builds and cold-resets a complete machine, `step-machine`/`run-machine` advance the CPU, and `run-frame` drives the whole system (ANTIC/POKEY in lockstep) one or more NTSC frames at a time. ROM-loading and instrumentation reach into the `atari800-cl.machine` / `atari800-cl.cpu` packages.
 
 ### CPU opcode pattern
 
