@@ -12,8 +12,6 @@
 ;;;;
 ;;;; The facade drives the FULL machine: ATARI800-CL.MACHINE:ATARI-MACHINE,
 ;;;; which owns the CPU, system bus, MMU, PIA, ANTIC, GTIA, and POKEY.
-;;;; (The older ATARI800-CL.EMULATOR package — a bare CPU+memory bundle —
-;;;; is no longer used here.)
 ;;;;
 ;;;; All calls use fully-qualified names like ATARI800-CL.MACHINE:MAKE-ATARI-MACHINE.
 ;;;; The PACKAGE:SYMBOL syntax accesses an exported symbol from another

@@ -28,7 +28,6 @@
                              (:file "pokey")
                              (:file "irq")
                              (:file "machine")
-                             (:file "emulator")
                              (:file "main"))))
   :in-order-to ((test-op (test-op #:atari800-cl/tests))))
 

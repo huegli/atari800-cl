@@ -1,11 +1,14 @@
 ;;;; src/package.lisp --- Package definitions for atari800-cl.
 ;;;;
-;;;; The emulator is split across a small set of internal packages:
+;;;; The emulator is split across a set of internal packages, layered
+;;;; bottom-up (see CLAUDE.md for the full list):
 ;;;;
 ;;;;   atari800-cl.compat   — implementation portability layer
 ;;;;   atari800-cl.memory   — 64K address space and memory map
 ;;;;   atari800-cl.cpu      — 6502 CPU core
-;;;;   atari800-cl.emulator — top-level machine glue
+;;;;   atari800-cl.bus/.mmu — system bus + bank switching
+;;;;   atari800-cl.<chip>   — pia, antic, gtia, pokey, irq
+;;;;   atari800-cl.machine  — top-level machine + frame scheduler
 ;;;;   atari800-cl          — public façade re-exporting user-facing API
 ;;;;
 ;;;; Internal packages keep their symbols private; only :atari800-cl
@@ -332,9 +335,8 @@
 ;;; atari800-cl.machine — Top-level NTSC scheduler
 ;;;
 ;;; Owns the CPU plus every chip (mmu, bus, pia, antic, gtia, pokey)
-;;; and runs the frame-loop that pumps them in lockstep.  Distinct
-;;; from atari800-cl.emulator (the legacy CPU + flat-memory scaffold);
-;;; this is the real Atari 800 XL machine.
+;;; and runs the frame-loop that pumps them in lockstep.  This is the
+;;; real Atari 800 XL machine that the public façade drives.
 
 (defpackage #:atari800-cl.machine
   (:use #:cl #:atari800-cl.compat
@@ -361,33 +363,13 @@
            #:machine-pending-interrupts))
 
 ;;; ---------------------------------------------------------------------------
-;;; atari800-cl.emulator — Top-level machine wiring
-;;;
-;;; Depends on compat, memory, and cpu.  Bundles them into one MACHINE
-;;; struct and provides the step/run interface.
-
-(defpackage #:atari800-cl.emulator
-  (:use #:cl
-        #:atari800-cl.compat
-        #:atari800-cl.memory
-        #:atari800-cl.cpu)
-  (:documentation "Top-level Atari 800 XL machine: wiring CPU + memory + I/O.")
-  (:export #:machine
-           #:make-machine
-           #:reset-machine
-           #:step-machine
-           #:run-machine
-           #:machine-cpu
-           #:machine-memory))
-
-;;; ---------------------------------------------------------------------------
 ;;; atari800-cl — Public facade
 ;;;
 ;;; This package :USE's only #:cl — it does NOT :USE the internal packages.
 ;;; Instead, src/main.lisp calls internal functions with fully-qualified
-;;; names (e.g. atari800-cl.emulator:make-machine).  This keeps the public
-;;; API surface small and explicit: only the symbols listed in :EXPORT are
-;;; part of the stable contract.
+;;; names (e.g. atari800-cl.machine:make-atari-machine).  This keeps the
+;;; public API surface small and explicit: only the symbols listed in
+;;; :EXPORT are part of the stable contract.
 ;;;
 ;;; (:NICKNAMES #:a800) lets users type A800:MAKE-MACHINE as a shorthand.
 

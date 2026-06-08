@@ -24,8 +24,7 @@
   (:use #:cl
         #:atari800-cl.compat
         #:atari800-cl.memory
-        #:atari800-cl.cpu
-        #:atari800-cl.emulator)
+        #:atari800-cl.cpu)
   ;; Selective import from FiveAM — only the macros and functions we use.
   (:import-from #:fiveam
                 #:def-suite       ; define a test suite

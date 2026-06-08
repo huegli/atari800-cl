@@ -7,8 +7,9 @@
 ;;;;
 ;;;; Anywhere their APIs diverge, route the call through this file rather
 ;;;; than reaching for #+lispworks / #+sbcl in business logic.  The intent
-;;;; is that src/cpu, src/memory, src/emulator, src/main contain *zero*
-;;;; implementation-specific reader conditionals.
+;;;; is that all other source files (src/cpu, src/bus, src/machine,
+;;;; src/main, …) contain *zero* implementation-specific reader
+;;;; conditionals.
 ;;;;
 ;;;; --- Common Lisp notes for beginners ---
 ;;;;

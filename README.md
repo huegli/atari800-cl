@@ -267,7 +267,6 @@ atari800-cl/
 │   ├── pokey.lisp           # timers + IRQ + RNG + audio scaffolding
 │   ├── irq.lisp             # NMI/IRQ routing helpers
 │   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame
-│   ├── emulator.lisp        # legacy CPU+memory machine (kept for compat)
 │   └── main.lisp            # public :atari800-cl façade
 ├── tests/
 │   ├── package.lisp
@@ -327,9 +326,10 @@ SBCL disagree:
 - GC-warning suppression,
 - numeric-type aliases (`u8`, `u16`, `byte-vector`).
 
-If you find yourself reaching for `#+lispworks` / `#+sbcl` in
-`src/cpu.lisp`, `src/memory.lisp`, `src/emulator.lisp`, or `src/main.lisp`,
-add the abstraction to `compat.lisp` instead.
+If you find yourself reaching for `#+lispworks` / `#+sbcl` in any source
+file other than `compat.lisp` (`src/cpu.lisp`, `src/bus.lisp`,
+`src/machine.lisp`, `src/main.lisp`, …), add the abstraction to
+`compat.lisp` instead.
 
 ## License
 

@@ -3,6 +3,16 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Public façade now drives the full machine; legacy emulator removed
+
+- The `:atari800-cl` (`a800`) façade was rewired from the bare
+  CPU+memory `atari800-cl.emulator` bundle to the full
+  `atari800-cl.machine:atari-machine` (CPU + bus + MMU + PIA + ANTIC +
+  GTIA + POKEY). New `RUN-FRAME` / `MACHINE-FRAME-COUNT` entry points.
+- With nothing left referencing it, the `atari800-cl.emulator` package
+  was deleted: removed `src/emulator.lisp`, its `defpackage`, the ASDF
+  component, and the test package's `:use` of it.
+
 ## Removed the headless IPC layer
 
 - Deleted `src/ipc.lisp`, `tests/test-ipc.lisp`, the `atari800-cl.ipc`
