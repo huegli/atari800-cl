@@ -4,7 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Headless Atari 800 XL emulator in portable Common Lisp. Primary target is **LispWorks**; also supports **SBCL**. Early stage — the 6502 CPU core is complete, but ANTIC/GTIA/POKEY peripherals and PORTB bank switching are not yet implemented.
+Headless Atari 800 XL emulator in portable Common Lisp. Primary target is **LispWorks**; also supports **SBCL**.
+
+The emulated machine is functionally complete at the chip-state level:
+
+- **6502 CPU** — all 256 opcodes (151 documented + 105 NMOS illegal/undocumented), with NMI/IRQ servicing.
+- **MMU** — PORTB-driven bank switching (OS ROM, BASIC ROM, self-test overlay).
+- **System bus** — full Atari 800 XL memory map with RAM/ROM banking and memory-mapped I/O dispatch to the four chips.
+- **PIA** (6520), **ANTIC** (NTSC scanline timing + display-list DMA), **GTIA** (player/missile state + collision latches), **POKEY** (timers, IRQ, RNG, audio register scaffolding).
+- **Machine scheduler** — `MACHINE-RUN-FRAME` pumps 29,868 NTSC color clocks per frame, ticking ANTIC/POKEY and stepping the CPU.
+
+What is *not* modelled: pixel-level video rendering (no framebuffer), POKEY audio synthesis (register state only), serial/SIO bus, keyboard scanning, paddles/light-pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
 
 ## Build & Test Commands
 
@@ -59,29 +69,39 @@ Run a single test suite (e.g. just the CPU opcode tests):
 
 ### Package layering (bottom-up dependency order)
 
+Each chip lives in its own package; `:use` edges define the layering. The `.asd` lists files in this dependency order (`:serial t`).
+
 1. **atari800-cl.compat** (`src/compat.lisp`) — Portability layer isolating all `#+lispworks`/`#+sbcl` differences: type aliases (`u8`, `u16`, `byte-vector`), threading, binary I/O, GC warnings. **All conditional compilation lives here**; other source files must not use reader conditionals.
 
-2. **atari800-cl.memory** (`src/memory.lisp`) — Flat 64K address space. Currently RAM-only; ROM overlay slots (`os-rom`, `basic-rom`) exist but bank-switching is not yet wired.
+2. **atari800-cl.memory** (`src/memory.lisp`) — Legacy flat 64K address space, RAM + ROM overlay slots. Used only by the legacy `emulator` facade (below); the full machine uses `bus`/`mmu` instead.
 
-3. **atari800-cl.cpu** (`src/cpu.lisp` + `src/cpu-opcodes.lisp`) — Bus-agnostic NMOS 6502 core. The CPU communicates via two function slots (`cpu-bus-read`, `cpu-bus-write`) rather than directly referencing memory, so peripherals can intercept reads/writes. `attach-memory-bus` wires a memory object into these slots. The 256-entry dispatch table (`*opcode-table*`) is a simple-vector of `(lambda (cpu) -> cycles)` built by `DEFOPCODE` macros in `cpu-opcodes.lisp`.
+3. **atari800-cl.mmu** (`src/mmu.lisp`) — Bank-switching unit: owns the PORTB shadow byte and exposes the OS-ROM / BASIC-ROM / self-test predicates the bus consults on ROM-overlap reads.
 
-4. **atari800-cl.emulator** (`src/emulator.lisp`) — `machine` struct gluing CPU + memory together. Future peripherals (ANTIC, GTIA, POKEY, PIA) will be added here.
+4. **atari800-cl.bus** (`src/bus.lisp`) — System bus owning RAM + ROM images and the full memory map. Routes every address to RAM, a ROM image, or one of the four chip I/O ranges (`$D000` GTIA, `$D200` POKEY, `$D300` PIA, `$D400` ANTIC). Chips register **read/write closures** into the bus when attached, so `bus.lisp` never references chip-package symbols — this breaks what would otherwise be circular package dependencies.
 
-5. **atari800-cl** (`src/main.lisp`) — Public facade re-exporting user-facing API. Nicknamed `a800`.
+5. **atari800-cl.cpu** (`src/cpu.lisp` + `src/cpu-opcodes.lisp` + `src/illegal.lisp`) — Bus-agnostic NMOS 6502 core. The CPU communicates via two function slots (`cpu-bus-read`, `cpu-bus-write`) rather than referencing memory directly, so anything (the bus, or a bare memory object via the legacy `attach-memory-bus`) can intercept reads/writes. The 256-entry dispatch table (`*opcode-table*`) is a simple-vector of `(lambda (cpu) -> cycles)` built by `DEFOPCODE`; `illegal.lisp` fills the remaining 105 undocumented slots.
+
+6. **Peripheral chips** — **atari800-cl.pia** (`src/pia.lisp`, 6520; PORTB writes route through `mmu`), **atari800-cl.antic** (`src/antic.lisp`), **atari800-cl.gtia** (`src/gtia.lisp`), **atari800-cl.pokey** (`src/pokey.lisp`), and **atari800-cl.irq** (`src/irq.lisp`, NMI/IRQ line routing into the CPU).
+
+7. **atari800-cl.machine** (`src/machine.lisp`) — The real top-level: the `atari-machine` struct owns one of each chip plus the bus. `make-atari-machine` builds and wires everything (chip closures into the bus, bus into the CPU's hooks); `machine-cold-reset` loads ROMs and boots; `machine-run-frame` is the frame scheduler. Also provides REPL instrumentation (`machine-trace-step`, `machine-portb-state`, `machine-scanline`, `machine-pending-interrupts`).
+
+8. **atari800-cl.emulator** (`src/emulator.lisp`) — **Legacy** `machine` struct gluing just CPU + `memory` together (no chips). Predates the full `machine` package; kept because the public facade still wraps it.
+
+9. **atari800-cl** (`src/main.lisp`) — Public facade (nicknamed `a800`) re-exporting a user-facing API. **Note:** it currently wraps the legacy `emulator`, not the full `atari-machine` — driving the complete machine means calling `atari800-cl.machine:` functions directly.
 
 ### CPU opcode pattern
 
-Opcodes are defined via `DEFOPCODE` macro which creates a named function (`OPCODE-<MNEMONIC>-<HEX>`) and installs it into `*opcode-table-builder*`. Family macrolets (`load-op`, `store-op`, `logical`, `arith`, `cmp-op`, `memop`, `rmw`) generate all addressing-mode variants from compact declarations. NIL entries in the table are illegal/undocumented opcodes.
+Opcodes are defined via the `DEFOPCODE` macro which creates a named function (`OPCODE-<MNEMONIC>-<HEX>`) and installs it into `*opcode-table-builder*` (copied into `*opcode-table*` once all files load). Family macrolets (`load-op`, `store-op`, `logical`, `arith`, `cmp-op`, `memop`, `rmw`) generate all addressing-mode variants from compact declarations. Documented opcodes live in `cpu-opcodes.lisp`; the 105 NMOS illegal/undocumented opcodes (KIL/JAM, SLO/RLA/SRE/RRA/DCP/ISC, LAX/SAX, etc.) live in `illegal.lisp`.
 
 ### Test structure
 
-Tests use FiveAM. The root suite is `atari800-cl-suite` in `tests/test-suite.lisp`. Child suites: `compat-suite`, `memory-suite`, `cpu-suite`, `cpu-opcode-suite`. The test package `:import-from`s FiveAM symbols (not `:use`) to avoid name collisions between implementations.
+Tests use FiveAM. The root suite is `atari800-cl-suite` in `tests/test-suite.lisp`; each component file defines a child suite `:in` it: `compat-suite`, `memory-suite`, `cpu-suite`, `cpu-opcodes-suite`, `illegal-opcodes`, `mmu-suite`, `pia-suite`, `antic-suite`, `gtia-suite`, `pokey-suite`, `machine-suite`, and `regression-suite`. Shared fixtures (`%MAKE-SYNTHETIC-OS-ROM`, `MAKE-TEST-MACHINE`, `WITH-CPU-STATE`, `%POKE`) live in `tests/test-helpers.lisp`. The test package `:import-from`s FiveAM symbols (not `:use`) to avoid name collisions between implementations.
 
 The **Klaus Dormann 6502 functional test** (`tests/test-cpu.lisp`) runs if `roms/6502_functional_test.bin` exists (or `$ATARI800_CL_FUNCTIONAL_TEST` points to it), otherwise it skips gracefully. Build the binary from https://github.com/Klaus2m5/6502_65C02_functional_tests with `org=0000` and `load_data_direct=1`.
 
 ## Development Plan
 
-`AI-Docs/AI-Prompts.md` contains the step-by-step build plan for the emulator. Prompts #1–#3 are completed. Consult this file before planning new work.
+`AI-Docs/AI-Prompts.md` contains the step-by-step build plan (Prompts 1–14) that produced the emulator; all of it is complete. (Prompt 12's optional Unix-socket IPC layer was later removed — see `CHANGES.md`.) The prompt file and `AI-Docs/atari800-plan.md` are historical records; consult them for context, but the code and `CHANGES.md` are the source of truth for current state.
 
 ## Key Conventions
 
