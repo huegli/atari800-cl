@@ -36,6 +36,14 @@
 
 (in-package #:atari800-cl.compat)
 
+;;; On SBCL the POSIX + BSD-socket contribs are loaded on demand for the
+;;; process/filesystem/Unix-socket helpers below.  REQUIRE is a no-op if a
+;;; module is already present.
+#+sbcl
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (require :sb-posix)
+  (require :sb-bsd-sockets))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Implementation identification
 ;;;
@@ -177,6 +185,181 @@ a single helper so callers never need to know the spelling."
     (write-sequence bytes out))
   ;; Returning PATHNAME lets callers chain: (read-binary-file (write-binary-file ...)).
   pathname)
+
+;;; ---------------------------------------------------------------------------
+;;; Process / filesystem helpers
+;;;
+;;; Used by the socket-protocol servers (AESP / CLI): the CLI socket path
+;;; embeds the PID, and the socket file is chmod'd to 0600.
+
+#+lispworks
+(fli:define-foreign-function (%getpid "getpid") () :result-type :int)
+
+(defun current-process-id ()
+  "Return the current OS process id as an integer."
+  #+sbcl       (sb-posix:getpid)
+  #+lispworks  (%getpid)
+  #-(or sbcl lispworks)
+  (error "current-process-id: unsupported implementation"))
+
+(defun delete-file-if-exists (pathname)
+  "Delete PATHNAME if it exists.  Return T if a file was removed, else NIL."
+  (when (probe-file pathname)
+    (delete-file pathname)
+    t))
+
+(defun chmod-file (pathname mode)
+  "Set the permission bits of PATHNAME to MODE (an integer, e.g. #o600)."
+  (let ((ns (namestring pathname)))
+    #+sbcl       (sb-posix:chmod ns mode)
+    #+lispworks  (system:call-system (format nil "chmod ~o ~a" mode ns) :wait t)
+    #-(or sbcl lispworks)
+    (error "chmod-file: unsupported implementation")
+    ns))
+
+;;; ---------------------------------------------------------------------------
+;;; Unix-domain stream sockets
+;;;
+;;; usocket (0.8.x) has NO local-socket support, so these are implemented
+;;; per-implementation (verified end-to-end on both, 2026-06-08):
+;;;   * SBCL       — sb-bsd-sockets:local-socket.
+;;;   * LispWorks  — an FLI wrapper around libc socket(AF_UNIX,…)/bind/
+;;;                  listen/accept/connect, with the accepted fd wrapped in
+;;;                  a COMM:SOCKET-STREAM.
+;;;
+;;; ACCEPT-UNIX-CLIENT / OPEN-UNIX-CLIENT return a bidirectional character
+;;; stream (the CLI line protocol is text); closing the stream closes the
+;;; connection.
+
+(defstruct (unix-listener (:constructor %make-unix-listener))
+  "Opaque handle for a bound, listening Unix-domain socket.
+HANDLE is implementation-specific (an SB-BSD-SOCKETS socket on SBCL, a raw
+integer fd on LispWorks); PATH is the filesystem path it is bound to."
+  handle
+  (path "" :type string))
+
+#+lispworks
+(progn
+  ;; libc entry points (resolved from libSystem / libc of the running host).
+  (fli:define-foreign-function (%c-socket "socket")
+      ((domain :int) (type :int) (protocol :int)) :result-type :int)
+  (fli:define-foreign-function (%c-bind "bind")
+      ((fd :int) (addr (:pointer (:unsigned :byte))) (len :int)) :result-type :int)
+  (fli:define-foreign-function (%c-listen "listen")
+      ((fd :int) (backlog :int)) :result-type :int)
+  (fli:define-foreign-function (%c-accept "accept")
+      ((fd :int) (addr (:pointer :void)) (len (:pointer :int))) :result-type :int)
+  (fli:define-foreign-function (%c-connect "connect")
+      ((fd :int) (addr (:pointer (:unsigned :byte))) (len :int)) :result-type :int)
+  (fli:define-foreign-function (%c-close "close")
+      ((fd :int)) :result-type :int)
+
+  (defconstant +af-unix+     1)         ; AF_UNIX (same value on Darwin + Linux)
+  (defconstant +sock-stream+ 1)
+
+  (defun %fill-sockaddr-un (buf path)
+    "Fill a sockaddr_un at BUF (a >=110-byte foreign buffer).  Return the
+addrlen to pass to bind/connect.  The layout differs by platform: Darwin
+has a leading 1-byte SUN_LEN then a 1-byte family; Linux has a 2-byte
+family and no SUN_LEN.  Either way the path starts at offset 2 and addrlen
+= 2 + strlen(path)."
+    (let* ((bytes (map 'list #'char-code path))
+           (plen  (length bytes)))
+      (dotimes (i 110) (setf (fli:dereference buf :index i) 0))
+      #+darwin
+      (setf (fli:dereference buf :index 0) (+ 2 plen)   ; sun_len
+            (fli:dereference buf :index 1) +af-unix+)   ; sun_family (1 byte)
+      #-darwin
+      (setf (fli:dereference buf :index 0) +af-unix+    ; sun_family low byte
+            (fli:dereference buf :index 1) 0)           ; sun_family high byte
+      (loop for b in bytes for i from 2 do (setf (fli:dereference buf :index i) b))
+      (+ 2 plen)))
+
+  (defun %unix-socket ()
+    (let ((fd (%c-socket +af-unix+ +sock-stream+ 0)))
+      (when (< fd 0) (error "socket(AF_UNIX) failed"))
+      fd))
+
+  (defun %unix-bind (fd path)
+    (fli:with-dynamic-foreign-objects ()
+      (let* ((buf  (fli:allocate-dynamic-foreign-object
+                    :type '(:unsigned :byte) :nelems 110))
+             (alen (%fill-sockaddr-un buf path)))
+        (when (< (%c-bind fd buf alen) 0)
+          (error "bind(~A) failed" path)))))
+
+  (defun %unix-connect (fd path)
+    (fli:with-dynamic-foreign-objects ()
+      (let* ((buf  (fli:allocate-dynamic-foreign-object
+                    :type '(:unsigned :byte) :nelems 110))
+             (alen (%fill-sockaddr-un buf path)))
+        (when (< (%c-connect fd buf alen) 0)
+          (error "connect(~A) failed" path)))))
+
+  (defun %unix-accept (fd)
+    (let ((cfd (%c-accept fd (fli:make-pointer :address 0 :type :void)
+                          (fli:make-pointer :address 0 :type :int))))
+      (when (< cfd 0) (error "accept() failed"))
+      cfd))
+
+  (defun %fd->stream (fd)
+    (make-instance 'comm:socket-stream :socket fd :direction :io
+                                       :element-type 'base-char)))
+
+(defun open-unix-listener (path &key (backlog 4))
+  "Create, bind, and listen on a Unix-domain stream socket at PATH.
+Any pre-existing file at PATH is removed first.  Returns a UNIX-LISTENER."
+  (let ((ns (namestring path)))
+    (delete-file-if-exists ns)
+    #+sbcl
+    (let ((s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+      (sb-bsd-sockets:socket-bind s ns)
+      (sb-bsd-sockets:socket-listen s backlog)
+      (%make-unix-listener :handle s :path ns))
+    #+lispworks
+    (let ((fd (%unix-socket)))
+      (%unix-bind fd ns)
+      (when (< (%c-listen fd backlog) 0) (error "listen() failed"))
+      (%make-unix-listener :handle fd :path ns))
+    #-(or sbcl lispworks)
+    (error "open-unix-listener: unsupported implementation")))
+
+(defun accept-unix-client (listener)
+  "Block until a client connects to LISTENER; return a bidirectional
+character stream for the accepted connection."
+  #+sbcl
+  (let ((c (sb-bsd-sockets:socket-accept (unix-listener-handle listener))))
+    (sb-bsd-sockets:socket-make-stream c :input t :output t
+                                         :element-type 'character
+                                         :buffering :none))
+  #+lispworks
+  (%fd->stream (%unix-accept (unix-listener-handle listener)))
+  #-(or sbcl lispworks)
+  (error "accept-unix-client: unsupported implementation"))
+
+(defun open-unix-client (path)
+  "Connect to a Unix-domain listener at PATH; return a bidirectional
+character stream for the connection."
+  (let ((ns (namestring path)))
+    #+sbcl
+    (let ((c (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+      (sb-bsd-sockets:socket-connect c ns)
+      (sb-bsd-sockets:socket-make-stream c :input t :output t
+                                           :element-type 'character
+                                           :buffering :none))
+    #+lispworks
+    (let ((fd (%unix-socket)))
+      (%unix-connect fd ns)
+      (%fd->stream fd))
+    #-(or sbcl lispworks)
+    (error "open-unix-client: unsupported implementation")))
+
+(defun close-unix-listener (listener)
+  "Close LISTENER and unlink its socket file.  Returns NIL."
+  #+sbcl       (sb-bsd-sockets:socket-close (unix-listener-handle listener))
+  #+lispworks  (%c-close (unix-listener-handle listener))
+  (delete-file-if-exists (unix-listener-path listener))
+  nil)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Misc

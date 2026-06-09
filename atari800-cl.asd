@@ -18,6 +18,7 @@
                 :serial t
                 :components ((:file "package")
                              (:file "compat")
+                             (:file "input")
                              (:file "memory")
                              (:file "mmu")
                              (:file "bus")
@@ -56,6 +57,7 @@
                              (:file "test-gtia")
                              (:file "test-pokey")
                              (:file "test-machine")
+                             (:file "test-input")
                              (:file "test-regressions"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!

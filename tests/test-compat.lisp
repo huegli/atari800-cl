@@ -78,3 +78,66 @@
       ;; Cleanup form: delete the temp file if it exists.
       (when (probe-file path)
         (delete-file path)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Process / filesystem helpers
+
+(test current-process-id-is-positive
+  "CURRENT-PROCESS-ID returns this process's PID (a positive integer)."
+  (let ((pid (current-process-id)))
+    (is (integerp pid))
+    (is (plusp pid) "PID should be > 0; got ~S" pid)))
+
+(test delete-file-if-exists-semantics
+  "Returns T and removes the file when present; NIL when absent."
+  (let ((path (merge-pathnames "atari800-cl-del-test.tmp"
+                               (uiop:temporary-directory)))
+        )
+    (with-open-file (s path :direction :output :if-exists :supersede)
+      (write-line "x" s))
+    (is (eq t (delete-file-if-exists path)) "first delete removes file")
+    (is (null (probe-file path)) "file is gone")
+    (is (null (delete-file-if-exists path)) "second delete is a no-op -> NIL")))
+
+(test chmod-file-runs-without-error
+  "CHMOD-FILE applies a mode to an existing file without error."
+  (let ((path (merge-pathnames "atari800-cl-chmod-test.tmp"
+                               (uiop:temporary-directory))))
+    (unwind-protect
+         (progn
+           (with-open-file (s path :direction :output :if-exists :supersede)
+             (write-line "x" s))
+           (finishes (chmod-file path #o600))
+           (is (and (probe-file path) t) "file survives chmod"))
+      (delete-file-if-exists path))))
+
+;;; ---------------------------------------------------------------------------
+;;; Unix-domain stream sockets
+;;;
+;;; usocket has no local-socket support, so these go through the
+;;; per-implementation compat helpers (sb-bsd-sockets / LispWorks FLI).
+;;; This test is the product-code form of the Stage-0 spike.
+
+(test unix-socket-roundtrip
+  "open-unix-listener / accept-unix-client / open-unix-client carry a line
+across a Unix-domain socket on whichever implementation we're running."
+  (let* ((path (format nil "/tmp/atari800-cl-test-~D.sock" (current-process-id)))
+         (listener (open-unix-listener path)))
+    (unwind-protect
+         (let ((reply nil))
+           (let ((client-thread
+                   (make-thread
+                    (lambda ()
+                      (let ((s (open-unix-client path)))
+                        (unwind-protect
+                             (progn (write-line "hello-unix" s) (force-output s))
+                          (close s))))
+                    :name "unix-roundtrip-client")))
+             (let ((server-stream (accept-unix-client listener)))
+               (unwind-protect
+                    (setf reply (read-line server-stream))
+                 (close server-stream)))
+             (join-thread client-thread))
+           (is (string= "hello-unix" reply)
+               "server read what the client wrote; got ~S" reply))
+      (close-unix-listener listener))))

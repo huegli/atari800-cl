@@ -116,7 +116,17 @@ product code.
 **Gate:** deps `ql:quickload` clean on both runtimes; suite still green on
 both; spike findings written down. No risky product code committed yet.
 
-## Stage 1 — Foundation: compat + input-state (~1 day)
+## Stage 1 — Foundation: compat + input-state (~1 day) — ✅ COMPLETE (2026-06-08)
+
+> **Status: done.** `compat.lisp` gained `current-process-id`,
+> `delete-file-if-exists`, `chmod-file`, and the Unix-socket helpers
+> (`open-unix-listener` / `accept-unix-client` / `open-unix-client` /
+> `close-unix-listener`, with the `unix-listener` struct) — the Stage-0
+> FLI spike ported into product code. `src/input.lisp` (`:atari800-cl.input`)
+> adds the mutex-guarded `input-state` with all setters/getters; loaded
+> early (after `compat`). New `input-suite` + compat tests (incl. a real
+> Unix-socket round-trip). Suite **1289/1289 green on both runtimes**
+> (was 1254; +35).
 
 **Goal:** portability primitives + the shared input model.
 

@@ -63,7 +63,47 @@
            #:current-thread
            #:read-binary-file
            #:write-binary-file
-           #:without-gc-warnings))
+           #:without-gc-warnings
+           ;; Process / filesystem helpers
+           #:current-process-id
+           #:delete-file-if-exists
+           #:chmod-file
+           ;; Unix-domain stream sockets
+           #:unix-listener
+           #:unix-listener-p
+           #:unix-listener-path
+           #:open-unix-listener
+           #:accept-unix-client
+           #:open-unix-client
+           #:close-unix-listener))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.input — Host input state
+;;;
+;;; A single mutex-guarded struct holding the current keyboard, joystick,
+;;; console-key, and paddle state.  Loaded early (right after compat) so the
+;;; PIA / GTIA / POKEY register-read paths can delegate to its getters.
+;;; Setters are called from socket reader threads; getters from the emulator
+;;; thread — hence the lock.
+
+(defpackage #:atari800-cl.input
+  (:use #:cl #:atari800-cl.compat)
+  (:documentation "Thread-safe host input state (keyboard / joystick / console / paddles).")
+  (:export #:input-state
+           #:make-input-state
+           #:input-state-p
+           ;; Setters (called from socket reader threads)
+           #:input-set-joystick
+           #:input-set-console
+           #:input-set-paddle
+           #:input-set-key
+           ;; Getters (called from the emulator thread by PIA/GTIA/POKEY)
+           #:input-pia-porta
+           #:input-gtia-trig
+           #:input-gtia-consol
+           #:input-pokey-pot
+           #:input-pokey-kbcode
+           #:input-pokey-skstat))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.memory — 64K address space
