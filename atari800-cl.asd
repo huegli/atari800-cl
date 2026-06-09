@@ -10,7 +10,9 @@
   :version "0.0.1"
   :homepage "https://example.com/atari800-cl"
   :depends-on (#:alexandria
-               #:bordeaux-threads)
+               #:bordeaux-threads
+               #:usocket          ; AESP TCP transport (no local-socket support; CLI uses compat)
+               #:flexi-streams)   ; octet <-> string for AESP INFO payloads
   :serial t
   :components ((:module "src"
                 :serial t

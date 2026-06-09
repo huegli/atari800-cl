@@ -57,7 +57,43 @@ risk is retired.
 
 ---
 
-## Stage 0 — De-risk + unblock (~½ day)
+## Stage 0 — De-risk + unblock (~½ day) — ✅ COMPLETE (2026-06-08)
+
+> **Status: done.** Deps re-added (`usocket` 0.8.8 + `flexi-streams`);
+> full suite green on both runtimes (1254/1254); both spikes retired.
+> The three open decisions are resolved (see below). Key findings:
+>
+> - **usocket has NO Unix-domain socket support** (0.8.8) — `socket-listen`
+>   doesn't even accept `:protocol`. The design doc's "usocket
+>   `:protocol :local` first" plan is dead. AESP uses **usocket TCP**
+>   (validated round-trip on both runtimes); the CLI socket uses
+>   **per-implementation primitives directly**:
+>   - SBCL → `sb-bsd-sockets:local-socket` — validated round-trip.
+>   - LispWorks → **FLI** `socket(AF_UNIX,SOCK_STREAM,0)`/`bind`/`listen`/
+>     `accept` (libc via libSystem), then wrap the fd with
+>     `(make-instance 'comm:socket-stream :socket fd :direction :io
+>     :element-type 'base-char)` — validated round-trip.
+> - **`sockaddr_un` is platform-specific:** Darwin has a leading
+>   `sun_len` byte then a 1-byte family; Linux has a 2-byte family and no
+>   `sun_len`. The LispWorks FLI helper needs a `#+darwin`/`#-darwin`
+>   split (confined to `compat.lisp`; SBCL's `sb-bsd-sockets` handles this
+>   internally, so only the LW path cares).
+> - **Validated LW FLI reference** (the de-risking artifact, to port into
+>   `compat.lisp` in Stage 1):
+>
+>   ```lisp
+>   (fli:define-foreign-function (%socket "socket")
+>       ((domain :int) (type :int) (protocol :int)) :result-type :int)
+>   (fli:define-foreign-function (%bind "bind")
+>       ((fd :int) (addr (:pointer (:unsigned :byte))) (len :int)) :result-type :int)
+>   (fli:define-foreign-function (%listen "listen")
+>       ((fd :int) (backlog :int)) :result-type :int)
+>   (fli:define-foreign-function (%accept "accept")
+>       ((fd :int) (addr (:pointer :void)) (len (:pointer :int))) :result-type :int)
+>   ;; Darwin sockaddr_un: [sun_len][sun_family=1][path...]; addrlen = 2 + strlen(path)
+>   ;; wrap accepted fd: (make-instance 'comm:socket-stream :socket fd
+>   ;;                                  :direction :io :element-type 'base-char)
+>   ```
 
 **Goal:** retire the two unknowns and re-enable dependencies before any
 product code.
@@ -197,17 +233,25 @@ loudly here (but should already be retired by Spike A).
 | AESP byte-layout drift from spec | 4b | Byte-exact codec suite before any server work |
 | Port / socket conflicts flake CI | 4c / 5b | Port-conflict → `skip`; per-test temp socket paths |
 
-## Open decisions (resolve before Stage 0 / Stage 3)
+## Decisions (RESOLVED 2026-06-08)
 
-1. **Abort granularity.** Frame-granularity (simple, no new slot, ~16.7 ms
-   command latency) vs scanline-granularity (`cpu-budget` becomes a slot,
-   ~63 µs latency, more refactor). **Recommended: frame-granularity for
-   MVP.**
-2. **`input.lisp` load position.** Early (after `compat`, recommended) vs
-   the design doc's "after machine." Cleanliness only, not behavior.
-3. **Octet encoding dep.** `flexi-streams` (as written) vs `babel` vs
-   hand-rolled ASCII for the `INFO` JSON. Re-adding `flexi-streams` is the
-   least-effort path.
+1. **Abort granularity → frame-granularity for MVP.** No `cpu-budget`
+   slot; `%run-clocks`' `abort-pred` is checked at frame boundaries.
+   Worst-case command latency ≈ one frame (~16.7 ms), fine for
+   pause/resume/reset. Scanline-granularity (~63 µs) is a later refinement
+   if needed.
+2. **`input.lisp` load position → early** (right after `compat`, before
+   `pia`). Avoids the forward-reference subtlety.
+3. **Octet encoding → `flexi-streams`** (re-added in Stage 0;
+   `flexi-streams:string-to-octets` for the AESP `INFO` payload).
+
+### Spike A resolution (the long pole)
+
+usocket does **not** provide Unix-domain sockets — CLI transport uses
+`sb-bsd-sockets:local-socket` (SBCL) and an FLI AF_UNIX wrapper +
+`comm:socket-stream` (LispWorks), both validated end-to-end. AESP uses
+usocket TCP, validated on both runtimes. See the Stage 0 status callout
+for the FLI reference and the Darwin/Linux `sockaddr_un` caveat.
 
 ## Per-commit verification (every stage)
 
