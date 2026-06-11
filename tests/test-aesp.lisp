@@ -91,7 +91,9 @@ recovers the type and payload."
   "Start a paused run-loop + an AESP server on ephemeral ports, connect a
 control client (STREAMVAR), run BODY, then tear it all down."
   (let ((stop (gensym "STOP")) (loop-th (gensym "LOOP")) (conn (gensym "CONN")))
-    `(let* ((,mvar (atari800-cl.machine:make-atari-machine))
+    `(if (not (tcp-listener-available-p))
+         (skip "TCP listener bind is not permitted in this execution environment.")
+         (let* ((,mvar (atari800-cl.machine:make-atari-machine))
             (,stop (list nil))
             (,loop-th (make-thread
                        (lambda () (atari800-cl.machine:machine-run-loop
@@ -108,7 +110,7 @@ control client (STREAMVAR), run BODY, then tear it all down."
          (ignore-errors (atari800-cl.transport:tcp-close ,conn))
          (atari800-cl.aesp:stop-aesp-server ,svar)
          (setf (car ,stop) t)
-         (join-thread ,loop-th)))))
+         (join-thread ,loop-th))))))
 
 (test aesp-server-ping-pong
   "PING returns a payload-less PONG."

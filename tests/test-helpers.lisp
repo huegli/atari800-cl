@@ -57,6 +57,42 @@ PORTB is configured to expose BASIC."
   (make-array #x2000 :element-type '(unsigned-byte 8) :initial-element #xEA))
 
 ;;; ---------------------------------------------------------------------------
+;;; Environment probes for live socket integration tests
+
+(defvar *tcp-listener-available-p* :unknown)
+(defvar *unix-listener-available-p* :unknown)
+
+(defun tcp-listener-available-p ()
+  "Return true when this process can bind a loopback TCP listener.
+Some command sandboxes deny listener creation even though the implementation
+and project code support it.  The live AESP server tests use this to skip
+only when the execution environment blocks the required socket primitive."
+  (when (eq *tcp-listener-available-p* :unknown)
+    (setf *tcp-listener-available-p*
+          (handler-case
+              (let ((listener (usocket:socket-listen "127.0.0.1" 0
+                                                      :reuse-address t)))
+                (unwind-protect t
+                  (ignore-errors (usocket:socket-close listener))))
+            (error () nil))))
+  *tcp-listener-available-p*)
+
+(defun unix-listener-available-p ()
+  "Return true when this process can bind a Unix-domain listener."
+  (when (eq *unix-listener-available-p* :unknown)
+    (setf *unix-listener-available-p*
+          (let ((path (format nil "/tmp/atari800-cl-probe-~D.sock"
+                              (current-process-id))))
+            (handler-case
+                (let ((listener (open-unix-listener path)))
+                  (unwind-protect t
+                    (ignore-errors (close-unix-listener listener))))
+              (error ()
+                (ignore-errors (delete-file-if-exists path))
+                nil)))))
+  *unix-listener-available-p*)
+
+;;; ---------------------------------------------------------------------------
 ;;; MAKE-TEST-MACHINE
 
 (defun make-test-machine (&key (reset-pc #xC000) os-rom basic-rom)

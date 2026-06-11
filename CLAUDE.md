@@ -33,20 +33,52 @@ Run the full test suite in a REPL:
 project, and a change is not done until the suite is green on both. Run
 both before committing.
 
+Preferred noninteractive runners:
+```sh
+./scripts/test-sbcl.sh
+./scripts/test-lispworks.sh
+```
+
+These scripts are designed for both normal shells and restricted sandbox
+execution environments. They deliberately avoid relying on `.sbclrc`,
+LispWorks init-file side effects, or Quicklisp writing to
+`~/quicklisp/local-projects/system-index.txt`. Instead they:
+
+- register this repository and the installed Quicklisp software tree directly
+  with ASDF via `asdf:initialize-source-registry`;
+- redirect ASDF/FASL output into `.cache/fasls/` inside the repository via
+  `asdf:initialize-output-translations`, because some sandboxes forbid writes
+  to `~/.cache/common-lisp`;
+- run `fiveam:run!` directly for the shell exit status, because
+  `asdf:test-system` can return successfully even when FiveAM reports failed
+  checks;
+- run the LispWorks test body inside `mp:initialize-multiprocessing`, because
+  batch LispWorks images otherwise signal `Cannot create processes before
+  multiprocessing is initialized` when tests create threads; and
+- allow `QUICKLISP_SOFTWARE=/path/to/software` if the dependency tree is not
+  at the default `~/quicklisp/dists/quicklisp/software`.
+
+Sandbox caveat: some tool sandboxes deny listener creation with `EPERM` for
+both TCP loopback sockets and Unix-domain sockets, even under `/tmp` and inside
+the repository. The live AESP TCP server tests, CLI Unix socket server tests,
+and Unix socket roundtrip test probe this capability and skip themselves when
+listener bind is prohibited. On an unrestricted local shell these tests should
+run normally.
+
 > **Exit-code gotcha:** `asdf:test-system` returns `T` even when tests
 > *fail*, so it is useless for shell/CI exit codes. Always key the exit
 > status off `fiveam:run!`, which returns `T` only when every check
 > passes. The commands below do this (exit 0 = all pass, 1 = failure).
 
-Run from shell with **SBCL** (`.sbclrc` loads Quicklisp before `--eval`):
+Legacy manual shell form for **SBCL** (`.sbclrc` loads Quicklisp before `--eval`; prefer `./scripts/test-sbcl.sh` for automation):
 ```sh
 sbcl --non-interactive \
      --eval '(ql:quickload :atari800-cl/tests)' \
      --eval '(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))'
 ```
 
-Run from shell with **LispWorks** (the console image is `lw-console` in
-`$PATH`). Two LispWorks-isms matter here:
+Legacy manual shell form for **LispWorks** (the console image is `lw-console` in
+`$PATH`; prefer `./scripts/test-lispworks.sh` for automation). Two LispWorks-isms matter here:
 - Command-line `-eval` forms are *read* before the init file loads
   Quicklisp, so load `setup.lisp` first and defer non-CL symbols
   (`ql:`, `fiveam:`) with `read-from-string`.

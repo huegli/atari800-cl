@@ -121,23 +121,25 @@
 (test unix-socket-roundtrip
   "open-unix-listener / accept-unix-client / open-unix-client carry a line
 across a Unix-domain socket on whichever implementation we're running."
-  (let* ((path (format nil "/tmp/atari800-cl-test-~D.sock" (current-process-id)))
-         (listener (open-unix-listener path)))
-    (unwind-protect
-         (let ((reply nil))
-           (let ((client-thread
-                   (make-thread
-                    (lambda ()
-                      (let ((s (open-unix-client path)))
-                        (unwind-protect
-                             (progn (write-line "hello-unix" s) (force-output s))
-                          (close s))))
-                    :name "unix-roundtrip-client")))
-             (let ((server-stream (accept-unix-client listener)))
-               (unwind-protect
-                    (setf reply (read-line server-stream))
-                 (close server-stream)))
-             (join-thread client-thread))
-           (is (string= "hello-unix" reply)
-               "server read what the client wrote; got ~S" reply))
-      (close-unix-listener listener))))
+  (if (not (unix-listener-available-p))
+      (skip "Unix-domain listener bind is not permitted in this execution environment.")
+      (let* ((path (format nil "/tmp/atari800-cl-test-~D.sock" (current-process-id)))
+             (listener (open-unix-listener path)))
+        (unwind-protect
+             (let ((reply nil))
+               (let ((client-thread
+                       (make-thread
+                        (lambda ()
+                          (let ((s (open-unix-client path)))
+                            (unwind-protect
+                                 (progn (write-line "hello-unix" s) (force-output s))
+                              (close s))))
+                        :name "unix-roundtrip-client")))
+                 (let ((server-stream (accept-unix-client listener)))
+                   (unwind-protect
+                        (setf reply (read-line server-stream))
+                     (close server-stream)))
+                 (join-thread client-thread))
+               (is (string= "hello-unix" reply)
+                   "server read what the client wrote; got ~S" reply))
+          (close-unix-listener listener)))))

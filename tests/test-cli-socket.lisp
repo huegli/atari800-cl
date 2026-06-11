@@ -85,7 +85,9 @@
   "Start a paused run-loop + a CLI Unix-socket server on a unique path,
 connect a client (STREAMVAR), run BODY, then tear it all down."
   (let ((stop (gensym "STOP")) (loop-th (gensym "LOOP")) (path (gensym "PATH")))
-    `(let* ((,mvar (atari800-cl.machine:make-atari-machine))
+    `(if (not (unix-listener-available-p))
+         (skip "Unix-domain listener bind is not permitted in this execution environment.")
+         (let* ((,mvar (atari800-cl.machine:make-atari-machine))
             (,stop (list nil))
             (,loop-th (make-thread
                        (lambda () (atari800-cl.machine:machine-run-loop
@@ -99,7 +101,7 @@ connect a client (STREAMVAR), run BODY, then tear it all down."
          (ignore-errors (close ,streamvar))
          (atari800-cl.cli-socket:stop-cli-socket ,svar)
          (setf (car ,stop) t)
-         (join-thread ,loop-th)))))
+         (join-thread ,loop-th))))))
 
 (test cli-server-ping-and-version
   "ping -> OK:pong; version -> OK:<version>."
