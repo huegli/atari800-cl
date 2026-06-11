@@ -473,6 +473,28 @@
            #:aesp-server-audio-port))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.cli-socket — Text CLI/GUI line protocol over a Unix socket
+;;;
+;;; Newline-terminated `CMD:<verb> [args]` requests -> `OK:<data>` / `ERR:<msg>`
+;;; replies.  The parser is pure and socket-free; the server drives the
+;;; machine via its command mailbox.
+
+(defpackage #:atari800-cl.cli-socket
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.transport #:atari800-cl.machine)
+  (:documentation "Attic-style text CLI line protocol over a Unix socket.")
+  (:export ;; Parser
+           #:cli-parse-error
+           #:parse-cli-command
+           #:parse-hex-address
+           #:parse-hex-byte-list
+           #:parse-register-assignments
+           ;; Dispatch + server
+           #:*cli-verbs*
+           #:dispatch-cli-line
+           #:cli-server #:cli-server-p #:cli-server-path
+           #:start-cli-socket #:stop-cli-socket))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl — Public facade
 ;;;
 ;;; This package :USE's only #:cl — it does NOT :USE the internal packages.

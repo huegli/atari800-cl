@@ -241,7 +241,27 @@ Three sub-commits, each green on both:
 **Gate:** codec + server suites green on both; full suite green. Delivers
 a working AESP surface **without depending on the Unix-socket risk.**
 
-## Stage 5 — CLI / Unix-socket track (~2 days, gated on Spike A)
+## Stage 5 — CLI / Unix-socket track (~2 days, gated on Spike A) — ✅ COMPLETE (2026-06-10)
+
+> **Status: done.** **5a** `cli-socket.lisp` parser — `parse-cli-command`
+> (strips `CMD:`, tokenizes), `parse-hex-address` ($/0x/bare),
+> `parse-hex-byte-list`, `parse-register-assignments`, `cli-parse-error`;
+> `cli-parse-suite`. **5b** server — Unix-domain listener via the compat
+> helpers (socket file chmod 0600), acceptor + per-client reader; line
+> protocol `CMD:<verb>` → `OK:`/`ERR:`. Verbs: ping, version, pause,
+> resume, reset, status, step [n], read $ADDR N, write $ADDR HEX,…,
+> fill $S $E $V, registers [REG=$V…], quit; `*cli-verbs*` alist + a
+> deferred-verb list (→ `ERR:Not implemented`), unknown → `ERR:unknown
+> command`. State-mutating verbs run through the mailbox. `cli-server-suite`
+> exercises every verb over a real Unix socket on a unique per-test path.
+> Suite **1398/1398 green on both runtimes** (was 1375; +23); LispWorks
+> 5× clean. (Replaced a non-portable `#\Rs` literal with `(code-char #x1E)`.)
+>
+> Note on flakes: two rare intermittent LispWorks failures earlier in
+> Stage 4/5 were never reproducible in isolation (0 in ~25 controlled
+> runs) and coincided with many competing `lw-console` processes —
+> environmental contention, not a logic bug. The concurrency primitives
+> are lost-wakeup-safe and the timing assertions now poll.
 
 Two sub-commits:
 

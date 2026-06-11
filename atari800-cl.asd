@@ -33,6 +33,7 @@
                              (:file "machine")
                              (:file "transport")
                              (:file "aesp")
+                             (:file "cli-socket")
                              (:file "main"))))
   :in-order-to ((test-op (test-op #:atari800-cl/tests))))
 
@@ -61,6 +62,7 @@
                              (:file "test-machine")
                              (:file "test-input")
                              (:file "test-aesp")
+                             (:file "test-cli-socket")
                              (:file "test-regressions"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
