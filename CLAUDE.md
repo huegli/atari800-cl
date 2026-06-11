@@ -46,13 +46,27 @@ sbcl --non-interactive \
 ```
 
 Run from shell with **LispWorks** (the console image is `lw-console` in
-`$PATH`). Command-line `-eval` forms are *read* before the init file
-loads Quicklisp, so load `setup.lisp` first and defer the `ql:` symbol
-with `read-from-string`:
+`$PATH`). Two LispWorks-isms matter here:
+- Command-line `-eval` forms are *read* before the init file loads
+  Quicklisp, so load `setup.lisp` first and defer non-CL symbols
+  (`ql:`, `fiveam:`) with `read-from-string`.
+- **Multiprocessing is initialized asynchronously at startup.** If
+  `-eval` forms create threads before it's ready you get *"Cannot create
+  processes before multiprocessing is initialized"* — and **every
+  threaded test (mailbox/run-loop, AESP/CLI servers, sockets) fails
+  intermittently.** Run the suite inside `mp:initialize-multiprocessing`
+  so threads are safe. (The REPL already runs under multiprocessing, so
+  an interactive `(asdf:test-system …)` is fine — this only bites batch
+  `-eval` runs.)
 ```sh
-lw-console -eval '(load "~/quicklisp/setup.lisp")' \
-           -eval '(funcall (read-from-string "ql:quickload") :atari800-cl/tests)' \
-           -eval '(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))'
+lw-console -eval '(mp:initialize-multiprocessing "ci" ()
+                    (lambda ()
+                      (load "~/quicklisp/setup.lisp")
+                      (funcall (read-from-string "ql:quickload") :atari800-cl/tests)
+                      (lw:quit :status
+                        (if (funcall (read-from-string "fiveam:run!")
+                                     (read-from-string "atari800-cl/tests::atari800-cl-suite"))
+                            0 1))))'
 ```
 
 Run a single FiveAM test by name:

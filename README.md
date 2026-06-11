@@ -36,17 +36,23 @@ What's implemented:
 - **Machine scheduler** — `MACHINE-RUN-FRAME` pumps 29 868 NTSC color
   clocks per frame in lockstep with ANTIC and POKEY, services NMI and
   IRQ each clock, runs the CPU when budget allows, and halts cleanly
-  on KIL.
+  on KIL.  A background run loop + command mailbox let other threads
+  drive the machine safely.
+- **Host input** — a thread-safe input-state feeds live joystick,
+  console-key, paddle, and keyboard values into PIA/GTIA/POKEY reads.
+- **Protocol servers** — AESP (binary, 3 TCP ports) and a CLI (text,
+  Unix socket) let an external GUI/CLI/web client drive the emulator.
+  See [Protocol servers](#protocol-servers-aesp--cli).
 
 What's *not* yet implemented:
 
 - Pixel-level ANTIC/GTIA rendering — there is no framebuffer; nothing
-  inside the emulator paints.
+  inside the emulator paints.  (AESP `VIDEO_SUBSCRIBE` replies with a
+  frame config but sends no frames yet.)
 - POKEY audio synthesis — register state is maintained; waveform
   generation is left to a downstream consumer.
 - Serial I/O and SIO bus (cassette, disk, printer).
-- Keyboard scanning (KBCODE never updates from a real input source).
-- Light pen, paddles, cartridge mapper, and the right-cartridge slot.
+- Light pen, cartridge mapper, and the right-cartridge slot.
 
 See `CHANGES.md` for a phase-by-phase summary of what each commit
 delivered.
@@ -71,7 +77,13 @@ on both implementations):
 | ------------------- | ----------- | ---------------------------------------- |
 | `alexandria`        | any         | General-purpose utilities                |
 | `bordeaux-threads`  | 0.8+        | Cross-implementation threading & locking |
+| `usocket`           | 0.8+        | TCP transport for the AESP server        |
+| `flexi-streams`     | any         | Octet/string + in-memory streams (AESP)  |
 | `fiveam` *(tests)*  | 1.4+        | Test framework                           |
+
+The Unix-domain socket used by the CLI server is handled per-implementation
+in `compat.lisp` (`sb-bsd-sockets` on SBCL, an FLI `AF_UNIX` wrapper on
+LispWorks) — usocket has no local-socket support.
 
 ## Getting started
 
@@ -133,18 +145,29 @@ sbcl --non-interactive \
 ```
 
 LispWorks — the console image is `lw-console`. Command-line `-eval`
-forms are read before the init file loads Quicklisp, so load
-`setup.lisp` first and defer the `ql:` symbol with `read-from-string`:
+forms are read before Quicklisp loads (so defer non-CL symbols with
+`read-from-string`) **and** before multiprocessing is fully initialized
+— creating threads too early raises *"Cannot create processes before
+multiprocessing is initialized"* and fails every threaded test. Run the
+suite inside `mp:initialize-multiprocessing`:
 
 ```sh
-lw-console -eval '(load "~/quicklisp/setup.lisp")' \
-           -eval '(funcall (read-from-string "ql:quickload") :atari800-cl/tests)' \
-           -eval '(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))'
+lw-console -eval '(mp:initialize-multiprocessing "ci" ()
+                    (lambda ()
+                      (load "~/quicklisp/setup.lisp")
+                      (funcall (read-from-string "ql:quickload") :atari800-cl/tests)
+                      (lw:quit :status
+                        (if (funcall (read-from-string "fiveam:run!")
+                                     (read-from-string "atari800-cl/tests::atari800-cl-suite"))
+                            0 1))))'
 ```
 
+(An interactive `(asdf:test-system :atari800-cl)` from the LispWorks REPL
+needs no such wrapper — the REPL already runs under multiprocessing.)
+
 The umbrella `ATARI800-CL-SUITE` aggregates every per-component suite
-(compat, memory, CPU, opcodes, illegal opcodes, MMU, PIA, ANTIC,
-GTIA, POKEY, machine, regressions); a green
+(compat, input, memory, CPU, opcodes, illegal opcodes, MMU, PIA, ANTIC,
+GTIA, POKEY, machine, AESP, CLI, regressions); a green
 `asdf:test-system` means the whole emulator passed.
 
 ### Smoke-testing the API
@@ -241,6 +264,56 @@ with `MACHINE-RUN-FRAME` and read the program-visible chip state
 (GTIA write registers, POKEY audio registers, ANTIC scanline) directly
 after each frame.
 
+## Protocol servers (AESP + CLI)
+
+The emulator can be driven by an external GUI/CLI/web client over two
+socket protocols (compatible with the [Attic](https://github.com/huegli/attic)
+project's `PROTOCOL.md`).  Both run against a single background emulator
+thread; a client never touches the machine directly — requests are posted
+to the machine's command mailbox and executed on the emulator thread.
+
+```lisp
+(ql:quickload :atari800-cl)
+
+(defparameter *m* (a800:make-machine))
+(defparameter *runner* (a800:start-machine *m*))               ; background run loop
+
+;; AESP — binary protocol over three TCP ports (control/video/audio).
+(defparameter *aesp* (a800:start-aesp-server *m*))             ; default ports 47800-47802
+;; CLI — text line protocol over a Unix-domain socket.
+(defparameter *cli*  (a800:start-cli-socket  *m*))             ; /tmp/atari800-cl-<pid>.sock
+
+;; ... clients connect and drive the machine ...
+
+(a800:stop-aesp-server *aesp*)
+(a800:stop-cli-socket  *cli*)
+(a800:stop-machine     *runner*)
+```
+
+**AESP** (binary).  Each message is an 8-byte big-endian header — magic
+`0xAE50`, version 1, a 1-byte type, and a 4-byte payload length (≤ 16 MiB)
+— followed by the payload.  The MVP control surface: `PING`→`PONG`;
+`PAUSE`/`RESUME`/`RESET`→`ACK`; `STATUS`/`INFO`; the input events
+`KEY_DOWN`/`KEY_UP`/`JOYSTICK`/`CONSOLE_KEYS`/`PADDLE`→`ACK`;
+`VIDEO_SUBSCRIBE`→`FRAME_CONFIG` and `AUDIO_SUBSCRIBE`→`AUDIO_CONFIG`
+(no frame/PCM payloads yet); any other type → `ERROR`.
+
+**CLI** (text).  Newline-terminated `CMD:<verb> [args]` requests yield
+`OK:<data>` or `ERR:<msg>` replies.  MVP verbs: `ping`, `version`,
+`pause`, `resume`, `step [n]`, `reset [cold|warm]`, `status`,
+`read $ADDR N`, `write $ADDR HEX,HEX,…`, `fill $START $END $VALUE`,
+`registers [REG=$VAL …]`, `quit`.  Anything else replies
+`ERR:Not implemented` or `ERR:unknown command`.
+
+```sh
+# CLI: a one-shot ping (any line-oriented socket client works).
+printf 'CMD:ping\n' | nc -U /tmp/atari800-cl-$(pgrep -n sbcl).sock
+# => OK:pong
+```
+
+Not yet implemented (both protocols): video frame payloads, audio PCM,
+`BOOT_FILE`, the debugger/disk/BASIC/state/screenshot command families.
+
 ## Project layout
 
 ```
@@ -254,7 +327,8 @@ atari800-cl/
 │   └── AI-Prompts.md        # the build-by-prompt plan
 ├── src/
 │   ├── package.lisp         # all package definitions
-│   ├── compat.lisp          # LispWorks/SBCL portability layer
+│   ├── compat.lisp          # LispWorks/SBCL portability layer (+ sockets)
+│   ├── input.lisp           # thread-safe host input state
 │   ├── memory.lisp          # legacy flat 64K memory (scaffold)
 │   ├── mmu.lisp             # PORTB-driven bank-switching unit
 │   ├── bus.lisp             # system bus + memory map + I/O dispatch
@@ -266,13 +340,17 @@ atari800-cl/
 │   ├── gtia.lisp            # player/missile + collision latches
 │   ├── pokey.lisp           # timers + IRQ + RNG + audio scaffolding
 │   ├── irq.lisp             # NMI/IRQ routing helpers
-│   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame
+│   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame + mailbox
+│   ├── transport.lisp       # TCP (usocket) + Unix-socket transport
+│   ├── aesp.lisp            # AESP binary protocol codec + 3-port server
+│   ├── cli-socket.lisp      # CLI text line protocol over a Unix socket
 │   └── main.lisp            # public :atari800-cl façade
 ├── tests/
 │   ├── package.lisp
 │   ├── test-suite.lisp      # root FiveAM suite
 │   ├── test-helpers.lisp    # shared fixtures + MAKE-TEST-MACHINE
 │   ├── test-compat.lisp
+│   ├── test-input.lisp
 │   ├── test-memory.lisp
 │   ├── test-cpu.lisp
 │   ├── test-cpu-opcodes.lisp
@@ -283,6 +361,8 @@ atari800-cl/
 │   ├── test-gtia.lisp
 │   ├── test-pokey.lisp
 │   ├── test-machine.lisp
+│   ├── test-aesp.lisp
+│   ├── test-cli-socket.lisp
 │   └── test-regressions.lisp
 └── roms/                    # user-supplied ROM images (gitignored)
     └── .gitkeep

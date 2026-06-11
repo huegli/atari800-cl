@@ -100,3 +100,41 @@ Returns MACHINE for chaining."
   (atari800-cl.machine:machine-install-roms
    machine :basic-rom (atari800-cl.machine:load-rom-file pathname))
   machine)
+
+;;; ---------------------------------------------------------------------------
+;;; Background run loop + protocol servers
+;;;
+;;; The servers post state-mutating commands to the machine's command mailbox,
+;;; which only drains while a run loop is active — so START-MACHINE before
+;;; (or alongside) starting a server.
+
+(defun start-machine (machine)
+  "Start a background thread that drives MACHINE (its frame scheduler + command
+mailbox) and return a runner handle for STOP-MACHINE.  The machine starts
+paused; RESUME it via a protocol client (or by posting to its mailbox)."
+  (atari800-cl.machine:start-machine machine))
+
+(defun stop-machine (runner)
+  "Stop the background run loop started by START-MACHINE.  Returns RUNNER."
+  (atari800-cl.machine:stop-machine runner))
+
+(defun start-aesp-server (machine &rest options &key &allow-other-keys)
+  "Start the AESP binary-protocol server (control/video/audio TCP ports) for
+MACHINE and return a server handle for STOP-AESP-SERVER.  OPTIONS are passed
+through (e.g. :host, :control-port, :video-port, :audio-port; pass a port of
+0 for an OS-assigned one)."
+  (apply #'atari800-cl.aesp:start-aesp-server machine options))
+
+(defun stop-aesp-server (server)
+  "Stop an AESP server started by START-AESP-SERVER.  Returns SERVER."
+  (atari800-cl.aesp:stop-aesp-server server))
+
+(defun start-cli-socket (machine &rest options &key &allow-other-keys)
+  "Start the CLI line-protocol server on a Unix-domain socket for MACHINE and
+return a server handle for STOP-CLI-SOCKET.  OPTIONS are passed through
+(e.g. :path; the default is /tmp/atari800-cl-<pid>.sock, mode 0600)."
+  (apply #'atari800-cl.cli-socket:start-cli-socket machine options))
+
+(defun stop-cli-socket (server)
+  "Stop a CLI server started by START-CLI-SOCKET.  Returns SERVER."
+  (atari800-cl.cli-socket:stop-cli-socket server))

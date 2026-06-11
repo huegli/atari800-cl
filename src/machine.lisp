@@ -381,3 +381,41 @@ registers reflect live input.  Pass NIL to detach.  Returns MACHINE."
   (attach-gtia-input  (atari-machine-gtia  machine) input)
   (attach-pokey-input (atari-machine-pokey machine) input)
   machine)
+
+;;; ---------------------------------------------------------------------------
+;;; Background run-loop driver
+
+(defstruct (machine-runner (:constructor %make-machine-runner))
+  "Handle for a background MACHINE-RUN-LOOP thread (see START-MACHINE).
+STOP-CELL is a 1-element list whose car the stop-flag closure reads."
+  machine
+  thread
+  (stop-cell (list nil)))
+
+(defun start-machine (machine)
+  "Spawn a background thread running MACHINE-RUN-LOOP on MACHINE and return a
+MACHINE-RUNNER handle.  The machine starts paused (RUNNING-P NIL); drive it
+by posting commands to its mailbox (e.g. RESUME from a protocol server).  A
+running loop is required for the AESP/CLI servers' state-mutating commands to
+complete.  Stop it with STOP-MACHINE."
+  (declare (type atari-machine machine))
+  (let* ((stop   (list nil))
+         (runner (%make-machine-runner :machine machine :stop-cell stop)))
+    (setf (machine-runner-thread runner)
+          (make-thread (lambda () (machine-run-loop machine
+                                                    :stop-flag (lambda () (car stop))))
+                       :name "atari800-cl-machine"))
+    runner))
+
+(defun stop-machine (runner &key (timeout 2.0))
+  "Signal RUNNER's run-loop to stop and join its thread (forcibly destroying
+it if it outlives TIMEOUT seconds).  Returns RUNNER."
+  (setf (car (machine-runner-stop-cell runner)) t)
+  (let ((th (machine-runner-thread runner)))
+    (when th
+      (let ((deadline (+ (get-internal-real-time)
+                         (truncate (* timeout internal-time-units-per-second)))))
+        (loop while (and (thread-alive-p th) (< (get-internal-real-time) deadline))
+              do (sleep 0.005))
+        (when (thread-alive-p th) (destroy-thread th)))))
+  runner)

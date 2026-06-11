@@ -3,6 +3,38 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## AESP + CLI protocol servers
+
+External GUI/CLI/web clients can now drive the headless emulator over two
+socket protocols (compatible with the Attic project's `PROTOCOL.md`).
+Built in stages (see `AI-Docs/AESP-CLI-Implementation-Stages.md`):
+
+- **Foundation** — `usocket` + `flexi-streams` re-added; `compat.lisp`
+  gained process-id / chmod / file-delete and Unix-domain socket helpers
+  (`sb-bsd-sockets` on SBCL, an FLI `AF_UNIX` wrapper on LispWorks, since
+  usocket has no local-socket support), plus condition-variable and
+  thread-lifecycle wrappers.
+- **Host input** — `atari800-cl.input`: a mutex-guarded input-state for
+  joystick/console/paddle/keyboard, delegated to from PIA/GTIA/POKEY reads
+  when attached.
+- **Concurrency core** — `atari-machine` gained a command mailbox, a
+  background `machine-run-loop` (+ `start-machine`/`stop-machine`), and
+  `machine-submit` so non-emulator threads mutate the machine safely.
+  `machine-run-frame` was refactored over a new `%run-clocks` helper
+  (correctness-neutral).
+- **AESP** (`atari800-cl.aesp`) — 8-byte big-endian binary protocol
+  (magic `0xAE50`); pure codec + a 3-port (control/video/audio) TCP
+  server covering ping/pause/resume/reset/status/info, input events, and
+  video/audio subscribe→config.
+- **CLI** (`atari800-cl.cli-socket`) — `CMD:<verb>` → `OK:`/`ERR:` text
+  protocol over a Unix socket: ping/version/pause/resume/step/reset/
+  status/read/write/fill/registers/quit.
+- **Façade** — `a800:start-machine`/`stop-machine`,
+  `start-aesp-server`/`stop-aesp-server`, `start-cli-socket`/
+  `stop-cli-socket`.
+
+Suite grew from 1254 to 1398 checks, green on both SBCL and LispWorks.
+
 ## Public façade now drives the full machine; legacy emulator removed
 
 - The `:atari800-cl` (`a800`) façade was rewired from the bare

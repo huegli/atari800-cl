@@ -420,6 +420,10 @@
            #:mailbox-full
            #:machine-submit
            #:machine-run-loop
+           #:machine-runner
+           #:machine-runner-p
+           #:start-machine
+           #:stop-machine
            #:attach-input
            ;; Debug / REPL instrumentation
            #:machine-trace-step
@@ -518,4 +522,11 @@
            #:machine-frame-count
            #:load-os-rom
            #:load-basic-rom
+           ;; Background run loop + protocol servers
+           #:start-machine
+           #:stop-machine
+           #:start-aesp-server
+           #:stop-aesp-server
+           #:start-cli-socket
+           #:stop-cli-socket
            #:*version*))

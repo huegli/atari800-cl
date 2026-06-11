@@ -257,11 +257,10 @@ a working AESP surface **without depending on the Unix-socket risk.**
 > Suite **1398/1398 green on both runtimes** (was 1375; +23); LispWorks
 > 5× clean. (Replaced a non-portable `#\Rs` literal with `(code-char #x1E)`.)
 >
-> Note on flakes: two rare intermittent LispWorks failures earlier in
-> Stage 4/5 were never reproducible in isolation (0 in ~25 controlled
-> runs) and coincided with many competing `lw-console` processes —
-> environmental contention, not a logic bug. The concurrency primitives
-> are lost-wakeup-safe and the timing assertions now poll.
+> Note on flakes: the intermittent LispWorks failures seen here were
+> later root-caused in Stage 6 — a multiprocessing-init race in the batch
+> `-eval` test command, not contention or a logic bug. See the Stage 6
+> flake note; fixed by wrapping the run in `mp:initialize-multiprocessing`.
 
 Two sub-commits:
 
@@ -279,7 +278,32 @@ suite **fails (not skips)** if neither usocket-local nor the compat FLI
 fallback works on the running impl — so any LispWorks socket gap surfaces
 loudly here (but should already be retired by Spike A).
 
-## Stage 6 — Facade + docs + smoke (~½ day)
+## Stage 6 — Facade + docs + smoke (~½ day) — ✅ COMPLETE (2026-06-10)
+
+> **Status: done.** `machine.lisp` gained `start-machine`/`stop-machine`
+> (a background `machine-run-loop` thread behind a `machine-runner`
+> handle). The `a800` façade re-exports `start-machine`/`stop-machine`,
+> `start-aesp-server`/`stop-aesp-server`, `start-cli-socket`/
+> `stop-cli-socket`. README documents both protocol surfaces (new
+> "Protocol servers" section, deps table, layout, status); CHANGES
+> summarizes the effort. **End-to-end façade smoke passes on both
+> runtimes** — start machine + both servers, drive an AESP PING→PONG and
+> CLI ping/resume/status over real sockets, machine free-runs frames.
+> (socat isn't installed here; the in-process smoke uses real loopback
+> TCP + Unix sockets across threads — equivalent.) Final suite
+> **1398/1398, green on both** SBCL 2.6.5 and LispWorks 8.1.1.
+>
+> **Flake — ROOT-CAUSED and fixed (was misdiagnosed as environmental).**
+> The intermittent LispWorks failures seen across Stages 4–6 were a
+> single deterministic cause: **LispWorks initializes multiprocessing
+> asynchronously at startup, and batch `-eval` forms can create threads
+> before it's ready** → *"Cannot create processes before multiprocessing
+> is initialized"*, failing every threaded test at once. The REPL/here-doc
+> runs always had MP up (hence always green); only `-eval` runs raced,
+> which looked load-correlated. The library code is correct (MP is always
+> up in a real app). Fix: the documented LispWorks batch command now wraps
+> the run in `mp:initialize-multiprocessing` — deterministic 1398/1398
+> across repeated runs. CLAUDE.md / README updated.
 
 - `src/main.lisp` re-exports: `start-aesp-server`/`stop-…`,
   `start-cli-socket`/`stop-…`, `start-machine`/`stop-machine` on `a800`.
