@@ -140,6 +140,14 @@ a single helper so callers never need to know the spelling."
   "Wait for THREAD to finish."
   (bordeaux-threads:join-thread thread))
 
+(defun thread-alive-p (thread)
+  "Return true if THREAD has not yet finished."
+  (bordeaux-threads:thread-alive-p thread))
+
+(defun destroy-thread (thread)
+  "Forcibly terminate THREAD (last resort when a clean stop times out)."
+  (ignore-errors (bordeaux-threads:destroy-thread thread)))
+
 (defun current-thread ()
   "Return the current thread object."
   (bordeaux-threads:current-thread))

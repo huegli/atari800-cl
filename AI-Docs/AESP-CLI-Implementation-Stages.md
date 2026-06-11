@@ -207,7 +207,22 @@ stage that touches the emulator hot path and the existing tests.
 both runtimes — the refactor is correctness-neutral. Commit in isolation
 so any regression bisects to exactly this change.
 
-## Stage 4 — AESP / TCP track (~2–3 days, low portability risk)
+## Stage 4 — AESP / TCP track (~2–3 days, low portability risk) — ✅ COMPLETE (2026-06-10)
+
+> **Status: done.** **4a** `transport.lisp` — binary TCP via usocket
+> (+ Unix delegates to compat for Stage 5). **4b** `aesp.lisp` codec —
+> 8-byte big-endian header, type/error constants (eval-when-wrapped),
+> encode/decode/read/write, `aesp-protocol-error`; `aesp-codec-suite`
+> byte-exact. **4c** `aesp.lisp` server — 3 TCP listeners (control/video/
+> audio), per-client acceptor+reader threads, control dispatch (PING→PONG;
+> PAUSE/RESUME/RESET via mailbox→ACK; STATUS/INFO direct; input events →
+> input-state→ACK; VIDEO/AUDIO_SUBSCRIBE→CONFIG; unknown→ERROR), clean
+> shutdown (close-listener/close-clients/join-or-destroy, mirroring the
+> historical ipc template). `aesp-server-suite` boots on **ephemeral
+> ports (0)** — no port-conflict skip — and round-trips every control
+> message over a real loopback usocket client. compat gained
+> `thread-alive-p`/`destroy-thread`. Suite **1359/1359 green on both
+> runtimes** (was 1331; +28); LispWorks 3× clean.
 
 Three sub-commits, each green on both:
 

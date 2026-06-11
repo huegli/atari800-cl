@@ -60,6 +60,8 @@
            #:with-lock
            #:make-thread
            #:join-thread
+           #:thread-alive-p
+           #:destroy-thread
            #:current-thread
            #:make-condition-variable
            #:condition-wait
@@ -444,7 +446,8 @@
 ;;; server drives the machine via its command mailbox.
 
 (defpackage #:atari800-cl.aesp
-  (:use #:cl #:atari800-cl.compat #:atari800-cl.transport)
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.transport
+        #:atari800-cl.input #:atari800-cl.machine)
   (:documentation "AESP binary protocol codec and TCP server.")
   (:export ;; Codec
            #:aesp-protocol-error
