@@ -149,7 +149,16 @@ both; spike findings written down. No risky product code committed yet.
 
 **Gate:** `input-suite` green on both; full suite green on both.
 
-## Stage 2 — Chip input delegation (~½ day, pure)
+## Stage 2 — Chip input delegation (~½ day, pure) — ✅ COMPLETE (2026-06-10)
+
+> **Status: done.** PIA/GTIA/POKEY each got an `(input nil)` slot,
+> `attach-*-input`, and guarded read delegation: `pia-read` offset 0 →
+> `input-pia-porta`; `gtia-read` offsets 16-19/31 → `input-gtia-trig`/
+> `-consol` (`+r-trig0+`/`+r-consol+` confirmed at #x10/#x1F); `pokey-read`
+> offsets 0-3/9/15 → `input-pokey-pot`/`-kbcode`/`-skstat`. Input getters
+> referenced qualified (`atari800-cl.input:`); new `*-input` accessors +
+> `attach-*-input` exported. One delegation test per chip suite. Suite
+> **1304/1304 green on both runtimes** (was 1289; +15).
 
 **Goal:** PIA/GTIA/POKEY reads reflect injected input.
 

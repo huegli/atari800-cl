@@ -139,3 +139,21 @@
     (setf (atari800-cl.pia:pia-porta p) #x69)
     (atari800-cl.pia:attach-pia bus p)
     (is (= #x69 (atari800-cl.bus:bus-read bus #xD300)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Host input delegation (Stage 2)
+
+(test pia-porta-reflects-attached-input
+  "With an INPUT-STATE attached, a PORTA read returns the live joystick
+packing instead of the static latch; detaching restores the latch."
+  (let ((p  (atari800-cl.pia:make-pia))
+        (in (make-input-state)))
+    ;; Static latch path first: PORTA defaults to $FF.
+    (is (= #xFF (atari800-cl.pia:pia-read p #xD300)) "latch idle = $FF")
+    (atari800-cl.pia:attach-pia-input p in)
+    (input-set-joystick in 0 :up t)      ; stick-0 up -> low nibble bit0 = 0
+    (is (= #xFE (atari800-cl.pia:pia-read p #xD300))
+        "PORTA reflects live input ($FE)")
+    ;; Detach -> back to the static latch.
+    (atari800-cl.pia:attach-pia-input p nil)
+    (is (= #xFF (atari800-cl.pia:pia-read p #xD300)) "detached -> latch again")))

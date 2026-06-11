@@ -35,7 +35,10 @@ Slots:
   (ddra  #x00 :type u8)
   (portb #xFF :type u8)
   (ddrb  #x00 :type u8)
-  (mmu   nil))
+  (mmu   nil)
+  ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, PORTA
+  ;; reads reflect live joystick input instead of the static latch.
+  (input nil))
 
 (defun reset-pia (pia)
   "Reset all PIA latches to their cold-reset defaults.  Returns PIA."
@@ -59,7 +62,10 @@ The chip mirrors across the entire $D300-$D3FF range, so any address
 in that page is valid."
   (declare (type pia pia) (type u16 address))
   (ecase (%offset address)
-    (0 (pia-porta pia))
+    (0 (let ((input (pia-input pia)))
+         (if input
+             (atari800-cl.input:input-pia-porta input)
+             (pia-porta pia))))
     (1 (pia-ddra  pia))
     (2 (pia-portb pia))
     (3 (pia-ddrb  pia))))
@@ -89,3 +95,10 @@ PORTB writes propagate there immediately.  Returns BUS."
         (bus-pia-read-fn  bus) (lambda (addr) (pia-read pia addr))
         (bus-pia-write-fn bus) (lambda (addr val) (pia-write pia addr val)))
   bus)
+
+(defun attach-pia-input (pia input)
+  "Attach a host INPUT-STATE to PIA so PORTA reads reflect live joystick
+input.  Pass NIL to detach.  Returns PIA."
+  (declare (type pia pia))
+  (setf (pia-input pia) input)
+  pia)

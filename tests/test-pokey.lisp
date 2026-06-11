@@ -168,3 +168,23 @@ to put EVERYTHING on a 1-cycle divisor for the test)."
     (declare (ignore cpu))
     (setf (atari800-cl.pokey:pokey-irqst pok) #xAB)
     (is (= #xAB (atari800-cl.bus:bus-read bus #xD20E)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Host input delegation (Stage 2)
+
+(test pokey-pot-kbcode-skstat-reflect-attached-input
+  "With an INPUT-STATE attached, POT0-3 (offsets 0-3), KBCODE (9), and
+SKSTAT (15) reads come from live input; RANDOM/IRQST are unaffected."
+  (let ((pok (atari800-cl.pokey:make-pokey))
+        (in  (make-input-state)))
+    ;; Without input attached, POT reads are the $FF stub.
+    (is (= #xFF (atari800-cl.pokey:pokey-read pok #xD200)) "POT0 stub = $FF")
+    (atari800-cl.pokey:attach-pokey-input pok in)
+    (input-set-paddle in 0 123)
+    (input-set-key in #x2A)               ; pressed
+    (is (= 123 (atari800-cl.pokey:pokey-read pok #xD200)) "POT0 live = 123")
+    (is (= #xFF (atari800-cl.pokey:pokey-read pok #xD204)) "POT4 still stub")
+    (is (= #x2A (atari800-cl.pokey:pokey-read pok #xD209)) "KBCODE live")
+    (is (= #xFB (atari800-cl.pokey:pokey-read pok #xD20F)) "SKSTAT bit2 clear")
+    ;; IRQST (offset 14) is not an input register; still the POKEY latch.
+    (is (= #xFF (atari800-cl.pokey:pokey-read pok #xD20E)) "IRQST untouched")))

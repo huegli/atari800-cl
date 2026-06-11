@@ -94,15 +94,28 @@ Slots:
                              :initial-element 0)
               :type (simple-array (unsigned-byte 8) (32)))
   (read-regs  (%make-gtia-read-regs)
-              :type (simple-array (unsigned-byte 8) (32))))
+              :type (simple-array (unsigned-byte 8) (32)))
+  ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, the
+  ;; TRIG0..3 and CONSOL read offsets reflect live input instead of the
+  ;; static read-regs defaults.
+  (input nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public dispatch
 
 (defun gtia-read (gtia address)
-  "Return one byte from the read window (collision latches + triggers + CONSOL)."
+  "Return one byte from the read window (collision latches + triggers + CONSOL).
+When a host INPUT-STATE is attached, TRIG0..3 (offsets 16-19) and CONSOL
+(offset 31) come from live input; everything else from the read-regs array."
   (declare (type gtia gtia) (type (unsigned-byte 16) address))
-  (aref (gtia-read-regs gtia) (logand address #x1F)))
+  (let ((offset (logand address #x1F))
+        (input  (gtia-input gtia)))
+    (cond
+      ((and input (<= +r-trig0+ offset (+ +r-trig0+ 3)))
+       (atari800-cl.input:input-gtia-trig input (- offset +r-trig0+)))
+      ((and input (= offset +r-consol+))
+       (atari800-cl.input:input-gtia-consol input))
+      (t (aref (gtia-read-regs gtia) offset)))))
 
 (defun gtia-clear-collisions (gtia)
   "Reset the 16 collision-latch bytes (offsets 0-15) to zero.  Triggers,
@@ -215,3 +228,10 @@ route to it.  Returns BUS."
         (bus-gtia-read-fn  bus) (lambda (addr) (gtia-read gtia addr))
         (bus-gtia-write-fn bus) (lambda (addr val) (gtia-write gtia addr val)))
   bus)
+
+(defun attach-gtia-input (gtia input)
+  "Attach a host INPUT-STATE to GTIA so TRIG0..3 and CONSOL reads reflect
+live input.  Pass NIL to detach.  Returns GTIA."
+  (declare (type gtia gtia))
+  (setf (gtia-input gtia) input)
+  gtia)

@@ -108,7 +108,10 @@ Slots:
                 :type (simple-array fixnum (4)))
   (poly17-state #x1FFFF :type fixnum)
   (poly9-state  #x01FF  :type fixnum)
-  (cpu nil))
+  (cpu nil)
+  ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, POT0..3,
+  ;; KBCODE, and SKSTAT reads reflect live input instead of the stubs.
+  (input nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Channel-clock divisor
@@ -219,14 +222,22 @@ this cycle.  Also clocks both polynomial LFSRs once per call."
 (defun pokey-read (pokey address)
   "Read from the POKEY read window."
   (declare (type pokey pokey) (type (unsigned-byte 16) address))
-  (case (%offset address)
-    ((0 1 2 3 4 5 6 7) #xFF)            ; POT0..POT7 stubs
-    (8 #xFF)                            ; ALLPOT stub
-    (9 (pokey-kbcode pokey))            ; KBCODE
-    (10 (pokey-random pokey))           ; RANDOM
-    (14 (pokey-irqst pokey))            ; IRQST
-    (15 (pokey-skstat pokey))           ; SKSTAT
-    (t #xFF)))
+  (let ((offset (%offset address))
+        (input  (pokey-input pokey)))
+    (case offset
+      ((0 1 2 3)                         ; POT0..POT3 (live paddles or stub)
+       (if input (atari800-cl.input:input-pokey-pot input offset) #xFF))
+      ((4 5 6 7) #xFF)                   ; POT4..POT7 stubs (not modelled)
+      (8 #xFF)                           ; ALLPOT stub
+      (9 (if input                       ; KBCODE
+             (atari800-cl.input:input-pokey-kbcode input)
+             (pokey-kbcode pokey)))
+      (10 (pokey-random pokey))          ; RANDOM
+      (14 (pokey-irqst pokey))           ; IRQST
+      (15 (if input                      ; SKSTAT
+              (atari800-cl.input:input-pokey-skstat input)
+              (pokey-skstat pokey)))
+      (t #xFF))))
 
 (defun %reload-all-timers (pokey)
   "STIMER semantics: reload every timer counter from its AUDF and reset
@@ -298,3 +309,10 @@ supplied, POKEY stores the back-pointer so timer IRQs route correctly."
         (bus-pokey-read-fn  bus) (lambda (addr) (pokey-read pokey addr))
         (bus-pokey-write-fn bus) (lambda (addr val) (pokey-write pokey addr val)))
   bus)
+
+(defun attach-pokey-input (pokey input)
+  "Attach a host INPUT-STATE to POKEY so POT0..3, KBCODE, and SKSTAT reads
+reflect live input.  Pass NIL to detach.  Returns POKEY."
+  (declare (type pokey pokey))
+  (setf (pokey-input pokey) input)
+  pokey)

@@ -259,10 +259,12 @@
            #:pia-porta #:pia-ddra
            #:pia-portb #:pia-ddrb
            #:pia-mmu
+           #:pia-input
            #:pia-read
            #:pia-write
            #:reset-pia
-           #:attach-pia))
+           #:attach-pia
+           #:attach-pia-input))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.antic — Display list / DMA engine for the 800 XL
@@ -322,8 +324,10 @@
            #:gtia-write
            #:gtia-record-collision
            #:gtia-clear-collisions
+           #:gtia-input
            #:reset-gtia
            #:attach-gtia
+           #:attach-gtia-input
            ;; Register offsets (write side)
            #:+w-hposp0+ #:+w-hposm0+ #:+w-sizep0+ #:+w-sizem+
            #:+w-grafp0+ #:+w-grafm+
@@ -352,11 +356,13 @@
            #:pokey-timer-counts #:pokey-sub-counters
            #:pokey-poly17-state #:pokey-poly9-state
            #:pokey-kbcode
+           #:pokey-input
            #:pokey-tick
            #:pokey-read #:pokey-write
            #:pokey-random
            #:reset-pokey
            #:attach-pokey
+           #:attach-pokey-input
            #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+))
 
 ;;; ---------------------------------------------------------------------------

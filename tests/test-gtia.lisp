@@ -152,3 +152,23 @@
     (is (not (zerop (atari800-cl.bus:bus-read bus #xD000))))
     (atari800-cl.bus:bus-write bus #xD01E 0)
     (is (zerop (atari800-cl.bus:bus-read bus #xD000)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Host input delegation (Stage 2)
+
+(test gtia-trig-and-consol-reflect-attached-input
+  "With an INPUT-STATE attached, TRIG0/TRIG1 (offsets 16/17) and CONSOL
+(offset 31) reads come from live input; collision latches are unaffected."
+  (let ((g  (atari800-cl.gtia:make-gtia))
+        (in (make-input-state)))
+    ;; Defaults before attaching: TRIG0 = 1 (released), CONSOL = $07.
+    (is (= 1 (atari800-cl.gtia:gtia-read g #xD010)) "TRIG0 idle = 1")
+    (is (= #x07 (atari800-cl.gtia:gtia-read g #xD01F)) "CONSOL idle = $07")
+    (atari800-cl.gtia:attach-gtia-input g in)
+    (input-set-joystick in 0 :trigger t) ; fire on stick 0 -> TRIG0 = 0
+    (input-set-console in :select t)     ; SELECT -> CONSOL bit1 clear -> $05
+    (is (= 0 (atari800-cl.gtia:gtia-read g #xD010)) "TRIG0 live = 0")
+    (is (= 1 (atari800-cl.gtia:gtia-read g #xD011)) "TRIG1 still released")
+    (is (= #x05 (atari800-cl.gtia:gtia-read g #xD01F)) "CONSOL live = $05")
+    ;; A collision latch (offset 0) is not an input register: still from read-regs.
+    (is (= 0 (atari800-cl.gtia:gtia-read g #xD000)) "M0PF latch untouched")))
