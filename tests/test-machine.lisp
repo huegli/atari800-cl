@@ -252,6 +252,17 @@ thread (initially paused).  Stops the thread and joins it on exit."
          (setf (car ,stop) t)
          (join-thread ,th)))))
 
+(defun %wait-until (predicate &key (timeout 2.0) (step 0.005))
+  "Poll PREDICATE until it returns true or TIMEOUT seconds elapse.  Returns
+PREDICATE's last value (so tests assert on it without depending on a fixed
+sleep — robust against scheduler jitter on either implementation)."
+  (let ((deadline (+ (get-internal-real-time)
+                     (truncate (* timeout internal-time-units-per-second)))))
+    (loop for v = (funcall predicate)
+          when v return v
+          when (> (get-internal-real-time) deadline) return v
+          do (sleep step))))
+
 (test machine-run-frame-unchanged-signature
   "After the %run-clocks refactor, MACHINE-RUN-FRAME still runs exactly one
 frame and bumps FRAME-COUNT by one."
@@ -295,20 +306,22 @@ submitter (so a server can turn it into an error reply)."
 
 (test machine-run-loop-pause-resume-advances-frames
   "A paused loop runs no frames; resuming (running-p t) advances FRAME-COUNT;
-pausing again stops it."
+pausing again stops it.  Timing-robust: polls for the first frame rather
+than sleeping a fixed interval."
   (with-running-machine (m)
-    (sleep 0.05)
     (is (= 0 (atari800-cl.machine:atari-machine-frame-count m))
         "paused machine runs no frames")
+    ;; Resume; wait (bounded) for at least one frame to land.
     (atari800-cl.machine:machine-submit
      m (lambda (mach) (setf (atari800-cl.machine:atari-machine-running-p mach) t))
      :priority t)
-    (sleep 0.1)
-    (atari800-cl.machine:machine-submit
-     m (lambda (mach) (setf (atari800-cl.machine:atari-machine-running-p mach) nil))
-     :priority t)
-    (is (plusp (atari800-cl.machine:atari-machine-frame-count m))
-        "running advanced the frame count")))
+    (let ((advanced (%wait-until
+                     (lambda () (plusp (atari800-cl.machine:atari-machine-frame-count m)))
+                     :timeout 5.0)))
+      (atari800-cl.machine:machine-submit
+       m (lambda (mach) (setf (atari800-cl.machine:atari-machine-running-p mach) nil))
+       :priority t)
+      (is-true advanced "running advanced the frame count within 5s"))))
 
 (test attach-input-wires-all-chips
   "ATTACH-INPUT stores the input-state on the machine and every input chip;

@@ -31,6 +31,8 @@
                              (:file "pokey")
                              (:file "irq")
                              (:file "machine")
+                             (:file "transport")
+                             (:file "aesp")
                              (:file "main"))))
   :in-order-to ((test-op (test-op #:atari800-cl/tests))))
 
@@ -58,6 +60,7 @@
                              (:file "test-pokey")
                              (:file "test-machine")
                              (:file "test-input")
+                             (:file "test-aesp")
                              (:file "test-regressions"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!

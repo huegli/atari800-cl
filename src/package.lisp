@@ -426,6 +426,50 @@
            #:machine-pending-interrupts))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.transport — Socket transport (TCP via usocket; Unix via compat)
+
+(defpackage #:atari800-cl.transport
+  (:use #:cl #:atari800-cl.compat)
+  (:documentation "Socket transport for the protocol servers: binary TCP
+(usocket) and text Unix-domain (compat).")
+  (:export #:tcp-listen #:tcp-listener-port #:tcp-accept #:tcp-connect
+           #:tcp-stream #:tcp-close
+           #:unix-listen #:unix-accept #:unix-connect #:unix-close))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.aesp — AESP binary protocol (codec + 3-port server)
+;;;
+;;; 8-byte big-endian header (magic 0xAE50, version 1, 1-byte type, 4-byte
+;;; length) + payload.  The pure codec is unit-testable without sockets; the
+;;; server drives the machine via its command mailbox.
+
+(defpackage #:atari800-cl.aesp
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.transport)
+  (:documentation "AESP binary protocol codec and TCP server.")
+  (:export ;; Codec
+           #:aesp-protocol-error
+           #:encode-aesp-message
+           #:decode-aesp-header
+           #:read-aesp-message
+           #:write-aesp-message
+           #:+aesp-magic+ #:+aesp-version+ #:+aesp-header-size+
+           #:+aesp-max-payload+
+           ;; Message-type constants
+           #:+aesp-ping+ #:+aesp-pong+
+           #:+aesp-pause+ #:+aesp-resume+ #:+aesp-reset+
+           #:+aesp-status+ #:+aesp-info+ #:+aesp-ack+ #:+aesp-error+
+           #:+aesp-key-down+ #:+aesp-key-up+ #:+aesp-joystick+
+           #:+aesp-console-keys+ #:+aesp-paddle+
+           #:+aesp-frame-config+ #:+aesp-video-subscribe+ #:+aesp-video-unsubscribe+
+           #:+aesp-audio-config+ #:+aesp-audio-subscribe+ #:+aesp-audio-unsubscribe+
+           #:+aesp-err-server-busy+ #:+aesp-err-not-implemented+
+           ;; Server
+           #:aesp-server #:aesp-server-p
+           #:start-aesp-server #:stop-aesp-server
+           #:aesp-server-control-port #:aesp-server-video-port
+           #:aesp-server-audio-port))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl — Public facade
 ;;;
 ;;; This package :USE's only #:cl — it does NOT :USE the internal packages.
