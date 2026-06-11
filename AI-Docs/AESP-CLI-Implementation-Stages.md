@@ -173,7 +173,21 @@ both; spike findings written down. No risky product code committed yet.
 **Gate:** new register tests green; full suite green on both.
 **Independent of all socket work** — can run in parallel with Stage 3.
 
-## Stage 3 — Machine concurrency core (~1–2 days, HIGH RISK, commit alone)
+## Stage 3 — Machine concurrency core (~1–2 days, HIGH RISK, commit alone) — ✅ COMPLETE (2026-06-10)
+
+> **Status: done.** `atari-machine` gained `running-p`, `mailbox`, `input`,
+> `priority-pending-flag`. `machine-run-frame` was split into `%run-clocks
+> (machine n &key abort-pred)` (frame-granular abort hook, unused by the
+> default loop per Decision 1) + a one-line `machine-run-frame` — the
+> refactor is correctness-neutral, the prior 1304 checks did not move.
+> Added the `command-mailbox` + `machine-command` structs, the
+> `mailbox-full` condition, `mailbox-enqueue/-drain/-wait`, `machine-submit`
+> (post-and-block, re-signals thunk errors, soft-cap → `mailbox-full`),
+> `machine-run-loop` (drain → run-frame-or-park), and `attach-input` (wires
+> PIA/GTIA/POKEY). Condition-variable wrappers added to `compat`. New
+> machine-suite tests incl. threaded run-loop submit / pause-resume /
+> error-propagation, **green and stable on both runtimes (1320/1320; +16,
+> 3× repeat clean)**.
 
 **Goal:** the mailbox + run-loop the servers post commands to. The one
 stage that touches the emulator hot path and the existing tests.

@@ -61,6 +61,9 @@
            #:make-thread
            #:join-thread
            #:current-thread
+           #:make-condition-variable
+           #:condition-wait
+           #:condition-notify
            #:read-binary-file
            #:write-binary-file
            #:without-gc-warnings
@@ -397,11 +400,25 @@
            #:atari-machine-antic #:atari-machine-gtia
            #:atari-machine-pokey
            #:atari-machine-frame-count
+           #:atari-machine-running-p
+           #:atari-machine-input
+           #:atari-machine-mailbox
            #:machine-run-frame
            #:machine-cold-reset
            #:machine-install-roms
            #:load-rom-file
            #:+clocks-per-frame+
+           ;; Concurrency: mailbox + run loop + host input
+           #:%run-clocks
+           #:command-mailbox
+           #:make-command-mailbox
+           #:mailbox-enqueue
+           #:mailbox-drain
+           #:mailbox-wait
+           #:mailbox-full
+           #:machine-submit
+           #:machine-run-loop
+           #:attach-input
            ;; Debug / REPL instrumentation
            #:machine-trace-step
            #:machine-portb-state

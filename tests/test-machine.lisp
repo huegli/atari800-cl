@@ -233,3 +233,93 @@ byte; toggling bit 1 to 0 then reading $A100 returns the BASIC ROM byte."
       (atari800-cl.machine:machine-run-frame m)
       (is-true (cpu-pending-irq cpu)
                "pending-irq must stay asserted when I flag is set"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Concurrency core: mailbox, run loop, attach-input (Stage 3)
+
+(defmacro with-running-machine ((mvar) &body body)
+  "Bind MVAR to a fresh machine driven by a background MACHINE-RUN-LOOP
+thread (initially paused).  Stops the thread and joins it on exit."
+  (let ((stop (gensym "STOP")) (th (gensym "TH")))
+    `(let* ((,mvar (atari800-cl.machine:make-atari-machine))
+            (,stop (list nil))
+            (,th (make-thread
+                  (lambda ()
+                    (atari800-cl.machine:machine-run-loop
+                     ,mvar :stop-flag (lambda () (car ,stop))))
+                  :name "test-run-loop")))
+       (unwind-protect (progn ,@body)
+         (setf (car ,stop) t)
+         (join-thread ,th)))))
+
+(test machine-run-frame-unchanged-signature
+  "After the %run-clocks refactor, MACHINE-RUN-FRAME still runs exactly one
+frame and bumps FRAME-COUNT by one."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-run-frame m)
+    (is (= 1 (atari800-cl.machine:atari-machine-frame-count m)))))
+
+(test run-clocks-abort-pred-stops-at-scanline
+  "%RUN-CLOCKS with a truthy ABORT-PRED stops at the first scanline check
+(clock 114); with no predicate it runs the full count."
+  (let ((m (atari800-cl.machine:make-atari-machine)))
+    (is (= 114 (atari800-cl.machine:%run-clocks
+                m atari800-cl.machine:+clocks-per-frame+
+                :abort-pred (constantly t))))
+    (is (= atari800-cl.machine:+clocks-per-frame+
+           (atari800-cl.machine:%run-clocks
+            m atari800-cl.machine:+clocks-per-frame+)))))
+
+(test mailbox-soft-cap-replies-busy
+  "MAILBOX-ENQUEUE returns :OK until the soft cap, then :BUSY."
+  (let ((mb (atari800-cl.machine:make-command-mailbox :soft-cap 2)))
+    (flet ((dummy () (atari800-cl.machine::%make-machine-command
+                      :thunk (lambda (m) (declare (ignore m)) nil))))
+      (is (eq :ok   (atari800-cl.machine:mailbox-enqueue mb (dummy))))
+      (is (eq :ok   (atari800-cl.machine:mailbox-enqueue mb (dummy))))
+      (is (eq :busy (atari800-cl.machine:mailbox-enqueue mb (dummy)))))))
+
+(test machine-submit-runs-on-loop-and-returns-value
+  "A submitted command runs on the emulator thread and its value comes back."
+  (with-running-machine (m)
+    (is (= 42 (atari800-cl.machine:machine-submit
+               m (lambda (mach) (declare (ignore mach)) (+ 40 2)))))))
+
+(test machine-submit-propagates-errors
+  "An error signalled inside a command thunk is re-signalled to the
+submitter (so a server can turn it into an error reply)."
+  (with-running-machine (m)
+    (signals error
+      (atari800-cl.machine:machine-submit
+       m (lambda (mach) (declare (ignore mach)) (error "boom"))))))
+
+(test machine-run-loop-pause-resume-advances-frames
+  "A paused loop runs no frames; resuming (running-p t) advances FRAME-COUNT;
+pausing again stops it."
+  (with-running-machine (m)
+    (sleep 0.05)
+    (is (= 0 (atari800-cl.machine:atari-machine-frame-count m))
+        "paused machine runs no frames")
+    (atari800-cl.machine:machine-submit
+     m (lambda (mach) (setf (atari800-cl.machine:atari-machine-running-p mach) t))
+     :priority t)
+    (sleep 0.1)
+    (atari800-cl.machine:machine-submit
+     m (lambda (mach) (setf (atari800-cl.machine:atari-machine-running-p mach) nil))
+     :priority t)
+    (is (plusp (atari800-cl.machine:atari-machine-frame-count m))
+        "running advanced the frame count")))
+
+(test attach-input-wires-all-chips
+  "ATTACH-INPUT stores the input-state on the machine and every input chip;
+detaching with NIL clears them."
+  (let ((m  (atari800-cl.machine:make-atari-machine))
+        (in (make-input-state)))
+    (atari800-cl.machine:attach-input m in)
+    (is (eq in (atari800-cl.machine:atari-machine-input m)))
+    (is (eq in (atari800-cl.pia:pia-input     (atari800-cl.machine:atari-machine-pia   m))))
+    (is (eq in (atari800-cl.gtia:gtia-input   (atari800-cl.machine:atari-machine-gtia  m))))
+    (is (eq in (atari800-cl.pokey:pokey-input (atari800-cl.machine:atari-machine-pokey m))))
+    (atari800-cl.machine:attach-input m nil)
+    (is (null (atari800-cl.machine:atari-machine-input m)))
+    (is (null (atari800-cl.pia:pia-input (atari800-cl.machine:atari-machine-pia m))))))

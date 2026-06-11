@@ -144,6 +144,20 @@ a single helper so callers never need to know the spelling."
   "Return the current thread object."
   (bordeaux-threads:current-thread))
 
+(defun make-condition-variable (&optional (name "atari800-cl-condvar"))
+  "Create a condition variable with NAME (passed through to bordeaux-threads)."
+  (bordeaux-threads:make-condition-variable :name name))
+
+(defun condition-wait (condition-variable lock &key timeout)
+  "Atomically release LOCK and wait on CONDITION-VARIABLE, re-acquiring LOCK
+on wake.  Must be called with LOCK held.  With TIMEOUT (seconds), give up
+after that long.  Returns NIL if it timed out, non-NIL otherwise."
+  (bordeaux-threads:condition-wait condition-variable lock :timeout timeout))
+
+(defun condition-notify (condition-variable)
+  "Wake one thread waiting on CONDITION-VARIABLE."
+  (bordeaux-threads:condition-notify condition-variable))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Binary file I/O
 ;;;

@@ -16,6 +16,49 @@
 (defconstant +clocks-per-frame+ 29868
   "262 scanlines × 114 color clocks/scanline (NTSC).")
 
+;;; ---------------------------------------------------------------------------
+;;; Command mailbox
+;;;
+;;; The machine is owned by a single emulator thread (see MACHINE-RUN-LOOP).
+;;; Other threads — socket reader threads in the AESP/CLI servers — never
+;;; touch the machine directly; they post a MACHINE-COMMAND to the mailbox
+;;; and block until the emulator thread runs it and fills in the reply.  This
+;;; keeps all machine mutation single-threaded without a giant lock.
+
+(define-condition mailbox-full (error)
+  ((mailbox :initarg :mailbox :reader mailbox-full-mailbox))
+  (:report (lambda (c s)
+             (declare (ignore c))
+             (format s "Command mailbox is full (server busy).")))
+  (:documentation "Signalled by MACHINE-SUBMIT when the mailbox is over its
+soft cap; callers map this to a 'server busy' protocol reply."))
+
+(defstruct (machine-command (:constructor %make-machine-command))
+  "One unit of work posted to a machine's mailbox.
+
+THUNK is called on the emulator thread with the machine as its only
+argument.  Its value lands in RESULT (or a signalled error in ERROR); DONE
+is then set and CV notified so the submitting thread can collect the reply.
+PRIORITY marks pause/resume/reset/quit so they can be expedited."
+  (thunk    nil :type (or null function))
+  (priority nil)
+  (result   nil)
+  (error    nil)
+  (done     nil)
+  (lock     (make-lock "machine-command"))
+  (cv       (make-condition-variable "machine-command")))
+
+(defstruct (command-mailbox (:constructor make-command-mailbox))
+  "FIFO of pending MACHINE-COMMANDs guarded by LOCK; CV wakes a parked
+emulator thread when work arrives.  QUEUE is kept newest-first and reversed
+on drain.  SOFT-CAP bounds the backlog so a flood of commands replies
+'busy' instead of growing without limit."
+  (lock     (make-lock "command-mailbox"))
+  (cv       (make-condition-variable "command-mailbox"))
+  (queue    '())
+  (count    0    :type fixnum)
+  (soft-cap 1024 :type fixnum))
+
 (defstruct (atari-machine
             (:constructor %make-atari-machine))
   "Atari 800 XL machine.
@@ -28,7 +71,12 @@ Slots:
   ANTIC       — display-list / DMA engine.
   GTIA        — player/missile / collision latches.
   POKEY       — timers, IRQ, RNG, audio scaffolding.
-  FRAME-COUNT — frames elapsed since the machine was constructed."
+  FRAME-COUNT — frames elapsed since the machine was constructed.
+  RUNNING-P   — when true, MACHINE-RUN-LOOP free-runs frames; when false it
+                parks on the mailbox condvar (paused).
+  MAILBOX     — COMMAND-MAILBOX other threads post work to.
+  INPUT       — optional host INPUT-STATE wired into PIA/GTIA/POKEY.
+  PRIORITY-PENDING-FLAG — hint set when a high-priority command is queued."
   (cpu nil)
   (bus nil)
   (mmu nil)
@@ -36,7 +84,11 @@ Slots:
   (antic nil)
   (gtia nil)
   (pokey nil)
-  (frame-count 0 :type fixnum))
+  (frame-count 0 :type fixnum)
+  (running-p nil)
+  (mailbox (make-command-mailbox))
+  (input nil)
+  (priority-pending-flag nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Construction
@@ -173,18 +225,33 @@ Keys: :PORTB :OS-ROM-MAPPED :BASIC-ROM-MAPPED :SELFTEST-MAPPED."
 ;;; ---------------------------------------------------------------------------
 ;;; Frame scheduler
 
-(defun machine-run-frame (machine)
-  "Run one NTSC frame: 29,868 color clocks.  Pumps ANTIC + POKEY in
-lockstep with the CPU, services NMI/IRQ each clock, and increments
-FRAME-COUNT before returning MACHINE."
+(defun %run-clocks (machine n &key abort-pred)
+  "Run N NTSC color clocks on MACHINE, pumping ANTIC + POKEY in lockstep with
+the CPU and servicing NMI/IRQ each clock.  Returns the number of clocks
+actually run.
+
+If ABORT-PRED is supplied it is funcalled once per scanline (every 114
+clocks); a true result stops early and returns the clocks run so far.  The
+default run loop does NOT pass ABORT-PRED — pause/resume/reset are handled
+at frame boundaries (Decision 1: frame-granularity) — but the hook is here
+for a future scanline-granular abort.  CPU-BUDGET is intentionally local: an
+aborted partial run is discarded, not resumed, so no budget needs to carry
+across calls."
+  (declare (type atari-machine machine) (type fixnum n))
   (let* ((cpu   (atari-machine-cpu   machine))
          (bus   (atari-machine-bus   machine))
          (antic (atari-machine-antic machine))
          (pokey (atari-machine-pokey machine))
          (cpu-budget 0))
     (declare (type fixnum cpu-budget))
-    (dotimes (clock +clocks-per-frame+)
-      (declare (ignore clock))
+    (dotimes (clock n)
+      (declare (type fixnum clock))
+      ;; Frame-granular abort check (only when a predicate was supplied).
+      (when (and abort-pred
+                 (zerop (mod clock 114))
+                 (plusp clock)
+                 (funcall abort-pred))
+        (return-from %run-clocks clock))
       (let ((stolen (antic-tick antic cpu bus)))
         (declare (type fixnum stolen))
         (pokey-tick pokey cpu)
@@ -206,5 +273,111 @@ FRAME-COUNT before returning MACHINE."
             ;; halted and stop trying to step.
             (illegal-opcode ()
               (setf (cpu-halted cpu) t))))))
-    (incf (atari-machine-frame-count machine))
+    n))
+
+(defun machine-run-frame (machine)
+  "Run one NTSC frame: 29,868 color clocks.  Pumps ANTIC + POKEY in
+lockstep with the CPU, services NMI/IRQ each clock, and increments
+FRAME-COUNT before returning MACHINE."
+  (%run-clocks machine +clocks-per-frame+)
+  (incf (atari-machine-frame-count machine))
+  machine)
+
+;;; ---------------------------------------------------------------------------
+;;; Command mailbox plumbing + run loop
+
+(defun %run-command (machine cmd)
+  "Run CMD's thunk on the current (emulator) thread, capture its value or
+error, then mark it done and wake the submitter."
+  (handler-case
+      (setf (machine-command-result cmd)
+            (funcall (machine-command-thunk cmd) machine))
+    (error (e)
+      (setf (machine-command-error cmd) e)))
+  (with-lock ((machine-command-lock cmd))
+    (setf (machine-command-done cmd) t)
+    (condition-notify (machine-command-cv cmd))))
+
+(defun mailbox-enqueue (mailbox cmd)
+  "Append CMD to MAILBOX.  Returns :OK, or :BUSY when the backlog is at the
+soft cap (the caller should reply 'server busy' rather than block)."
+  (with-lock ((command-mailbox-lock mailbox))
+    (cond
+      ((>= (command-mailbox-count mailbox) (command-mailbox-soft-cap mailbox))
+       :busy)
+      (t (push cmd (command-mailbox-queue mailbox))
+         (incf (command-mailbox-count mailbox))
+         (condition-notify (command-mailbox-cv mailbox))
+         :ok))))
+
+(defun mailbox-drain (mailbox machine)
+  "Run every currently-queued command on the current (emulator) thread, in
+FIFO order.  Returns the number of commands run."
+  (let ((cmds (with-lock ((command-mailbox-lock mailbox))
+                (prog1 (nreverse (command-mailbox-queue mailbox))
+                  (setf (command-mailbox-queue mailbox) '()
+                        (command-mailbox-count mailbox) 0)))))
+    (dolist (cmd cmds)
+      (%run-command machine cmd))
+    (length cmds)))
+
+(defun mailbox-wait (mailbox &key (timeout 0.05))
+  "Block until a command is queued in MAILBOX or TIMEOUT seconds elapse."
+  (with-lock ((command-mailbox-lock mailbox))
+    (when (null (command-mailbox-queue mailbox))
+      (condition-wait (command-mailbox-cv mailbox)
+                      (command-mailbox-lock mailbox)
+                      :timeout timeout))))
+
+(defun machine-submit (machine thunk &key priority)
+  "Post THUNK to MACHINE's mailbox and block until the emulator thread runs
+it; return THUNK's value, or re-signal the error it raised.  THUNK is called
+with MACHINE as its only argument.  Signals MAILBOX-FULL if the mailbox is
+over its soft cap.  This is the only safe way for a non-emulator thread to
+touch the machine."
+  (declare (type atari-machine machine) (type function thunk))
+  (let ((mailbox (atari-machine-mailbox machine))
+        (cmd     (%make-machine-command :thunk thunk :priority priority)))
+    (ecase (mailbox-enqueue mailbox cmd)
+      (:busy (error 'mailbox-full :mailbox mailbox))
+      (:ok
+       (when priority
+         (setf (atari-machine-priority-pending-flag machine) t))
+       ;; Block until the emulator thread has run our command.
+       (with-lock ((machine-command-lock cmd))
+         (loop until (machine-command-done cmd)
+               do (condition-wait (machine-command-cv cmd)
+                                  (machine-command-lock cmd))))
+       (when (machine-command-error cmd)
+         (error (machine-command-error cmd)))
+       (machine-command-result cmd)))))
+
+(defun machine-run-loop (machine &key stop-flag)
+  "Own MACHINE on the current thread until STOP-FLAG (a thunk returning a
+generalized boolean) is true.  Each iteration drains the command mailbox,
+then: if RUNNING-P, runs one full frame; otherwise parks on the mailbox
+condvar (paused) until a command arrives or a short timeout elapses so
+STOP-FLAG is re-checked.  Returns MACHINE."
+  (declare (type atari-machine machine))
+  (let ((mailbox (atari-machine-mailbox machine)))
+    (loop
+      (when (and stop-flag (funcall stop-flag)) (return))
+      (mailbox-drain mailbox machine)
+      (setf (atari-machine-priority-pending-flag machine) nil)
+      (if (atari-machine-running-p machine)
+          (machine-run-frame machine)
+          (mailbox-wait mailbox)))
     machine))
+
+;;; ---------------------------------------------------------------------------
+;;; Host input
+
+(defun attach-input (machine input)
+  "Wire host INPUT-STATE into MACHINE's PIA, GTIA, and POKEY so their input
+registers reflect live input.  Pass NIL to detach.  Returns MACHINE."
+  (declare (type atari-machine machine))
+  (setf (atari-machine-input machine) input)
+  (attach-pia-input   (atari-machine-pia   machine) input)
+  (attach-gtia-input  (atari-machine-gtia  machine) input)
+  (attach-pokey-input (atari-machine-pokey machine) input)
+  machine)
