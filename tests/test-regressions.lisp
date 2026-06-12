@@ -121,3 +121,65 @@ clear DLI-ARMED, regardless of how many color clocks we tick after."
       (atari800-cl.machine:atari-machine-bus m) #xD302 #x00)
     (is (zerop (atari800-cl.bus:bus-read
                  (atari800-cl.machine:atari-machine-bus m) #xC000)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #6 — Acknowledging the last pending POKEY IRQ de-asserts
+;;; the CPU's IRQ line.
+;;;
+;;; %FIRE-TIMER-IRQ set CPU-PENDING-IRQ but nothing ever cleared it:
+;;; after the first timer IRQ the level-sensitive line stayed asserted
+;;; forever, so the CPU re-serviced a phantom interrupt every time the
+;;; I flag cleared — even though IRQST read back as "nothing pending".
+;;; The fix re-derives the line from (IRQEN AND (NOT IRQST)) on every
+;;; IRQEN write and on RESET-POKEY.
+
+(test pokey-irq-ack-deasserts-cpu-irq-line
+  "Writing IRQEN = 0 after a timer IRQ must drop CPU-PENDING-IRQ, and
+re-enabling the (now acknowledged) source must not re-assert it."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture :audctl #x40)
+    (atari800-cl.bus:bus-write bus #xD200 0)       ; AUDF1 = 0 — fires on first tick
+    (atari800-cl.bus:bus-write bus #xD20E #x01)    ; IRQEN: timer 1
+    (atari800-cl.bus:bus-write bus #xD209 0)       ; STIMER
+    (atari800-cl.pokey:pokey-tick pok cpu)
+    (is-true (cpu-pending-irq cpu)
+             "Timer 1 underflow must assert the IRQ line")
+    ;; Acknowledge by disabling the source.
+    (atari800-cl.bus:bus-write bus #xD20E 0)
+    (is-false (cpu-pending-irq cpu)
+              "Acknowledging the only pending source must de-assert the IRQ line")
+    ;; Re-enabling after the ack must NOT resurrect the old interrupt.
+    (atari800-cl.bus:bus-write bus #xD20E #x01)
+    (is-false (cpu-pending-irq cpu)
+              "Re-enabling an acknowledged source must not re-assert the line")))
+
+(test pokey-irq-line-stays-asserted-while-another-source-pending
+  "With two timers pending, acknowledging one must keep the line
+asserted; acknowledging the second must finally drop it."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture :audctl #x40)
+    (atari800-cl.bus:bus-write bus #xD200 0)       ; AUDF1 = 0 (1.79 MHz, divisor 1)
+    (atari800-cl.bus:bus-write bus #xD202 0)       ; AUDF2 = 0 (64 kHz, divisor 28)
+    (atari800-cl.bus:bus-write bus #xD20E #x03)    ; IRQEN: timers 1 + 2
+    (atari800-cl.bus:bus-write bus #xD209 0)       ; STIMER
+    (%tick-n-pokey pok cpu 28)                     ; tick 1 fires ch1; tick 28 fires ch2
+    (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok) #x03))
+        "Both timer IRQST bits must be pending (low) before the acks")
+    ;; Disable timer 2 only — timer 1 is still enabled AND pending.
+    (atari800-cl.bus:bus-write bus #xD20E #x01)
+    (is-true (cpu-pending-irq cpu)
+             "Line must stay asserted while timer 1 is still enabled + pending")
+    ;; Disable timer 1 as well — nothing enabled remains pending.
+    (atari800-cl.bus:bus-write bus #xD20E 0)
+    (is-false (cpu-pending-irq cpu)
+              "Line must drop once the last pending source is acknowledged")))
+
+(test pokey-reset-deasserts-cpu-irq-line
+  "RESET-POKEY clears IRQEN, so any IRQ POKEY was holding must drop."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture :audctl #x40)
+    (atari800-cl.bus:bus-write bus #xD200 0)
+    (atari800-cl.bus:bus-write bus #xD20E #x01)
+    (atari800-cl.bus:bus-write bus #xD209 0)
+    (atari800-cl.pokey:pokey-tick pok cpu)
+    (is-true (cpu-pending-irq cpu))
+    (atari800-cl.pokey:reset-pokey pok)
+    (is-false (cpu-pending-irq cpu)
+              "RESET-POKEY must release the IRQ line it was driving")))

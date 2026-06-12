@@ -186,6 +186,22 @@ the CPU's pending-IRQ line was actually asserted."
         (setf (cpu-pending-irq cpu) t))
       t)))
 
+(defun %sync-irq-line (pokey)
+  "Recompute the CPU's level-sensitive IRQ line from the IRQEN/IRQST pair.
+
+The 6502 IRQ pin is asserted exactly while some ENABLED source has its
+(active-low) IRQST bit pulled low, i.e. while (IRQEN AND (NOT IRQST))
+is non-zero.  This must run whenever IRQEN or IRQST changes: when the
+last pending source is acknowledged (or disabled) the line has to drop,
+otherwise the CPU re-services a phantom interrupt every time the I flag
+clears — even though IRQST reads back as 'nothing pending'."
+  (declare (type pokey pokey))
+  (let ((cpu (pokey-cpu pokey)))
+    (when cpu
+      (set-irq-line cpu
+                    (not (zerop (logand (pokey-irqen pokey)
+                                        (logandc2 #xFF (pokey-irqst pokey)))))))))
+
 (defun pokey-tick (pokey cpu)
   "Advance POKEY by one CPU cycle.  Returns T if any timer raised an IRQ
 this cycle.  Also clocks both polynomial LFSRs once per call."
@@ -253,7 +269,10 @@ each channel's sub-divider to a fresh starting value."
 Side effects:
   STIMER  ($D209) — any write reloads all four timer counters from AUDFx.
   IRQEN   ($D20E) — additionally restores latched IRQST bits to 1 for any
-                    IRQ being disabled, mirroring real-hardware acknowledge."
+                    IRQ being disabled, mirroring real-hardware acknowledge,
+                    then re-derives the CPU's IRQ line from the new
+                    IRQEN/IRQST state (de-asserting it when nothing
+                    enabled remains pending)."
   (declare (type pokey pokey) (type (unsigned-byte 16) address)
            (type (unsigned-byte 8) value))
   (let ((v (logand value #xFF))
@@ -274,11 +293,14 @@ Side effects:
       (13 nil)                                       ; SEROUT stub
       (14
        ;; IRQEN write — set the mask AND restore IRQST bits for any bit
-       ;; turning off (acknowledge), per the prompt's semantics.
+       ;; turning off (acknowledge), per the prompt's semantics.  Then
+       ;; re-derive the CPU's IRQ line: if the write acknowledged the
+       ;; last enabled+pending source, the level-sensitive line drops.
        (setf (pokey-irqen pokey) v
              (pokey-irqst pokey)
              (logior (pokey-irqst pokey)
-                     (logand #xFF (logandc2 #xFF v)))))
+                     (logand #xFF (logandc2 #xFF v))))
+       (%sync-irq-line pokey))
       (15 (setf (pokey-skctl pokey) v))
       (t nil))))
 
@@ -298,6 +320,8 @@ Side effects:
         (pokey-kbcode pokey) 0
         (pokey-poly17-state pokey) #x1FFFF
         (pokey-poly9-state  pokey) #x01FF)
+  ;; IRQEN is now 0, so this de-asserts any IRQ POKEY was holding.
+  (%sync-irq-line pokey)
   pokey)
 
 (defun attach-pokey (bus pokey &optional cpu)
