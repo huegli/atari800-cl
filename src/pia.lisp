@@ -54,10 +54,10 @@ Slots:
 (defun %offset (address)
   "Decode the two-bit PIA register selector from a bus address."
   (declare (type u16 address))
-  (logand address #x03))
+  (ldb (byte 2 0) address))
 
 (defun pia-read (pia address)
-  "Read one of the four PIA registers selected by (ADDRESS AND $03).
+  "Read one of the four PIA registers selected by the low two address bits.
 The chip mirrors across the entire $D300-$D3FF range, so any address
 in that page is valid."
   (declare (type pia pia) (type u16 address))
@@ -75,7 +75,7 @@ in that page is valid."
 propagates to the MMU via MMU-WRITE-PORTB so the new bank mapping
 takes effect on the next bus access."
   (declare (type pia pia) (type u16 address) (type u8 value))
-  (let ((v (logand value #xFF)))
+  (let ((v (ldb (byte 8 0) value)))
     (ecase (%offset address)
       ;; PORTA is an input on the 800 XL; we update the latch anyway
       ;; (so a debugger can inspect it) but it has no external effect.

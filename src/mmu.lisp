@@ -41,13 +41,13 @@ Slots:
   "Return T if OS ROM is currently mapped at $C000-$CFFF and $D800-$FFFF.
 On the 800 XL, PORTB bit 0 = 1 enables the OS ROM overlay."
   (declare (type mmu mmu))
-  (not (zerop (logand (mmu-portb mmu) +portb-os-rom-mask+))))
+  (logtest (mmu-portb mmu) +portb-os-rom-mask+))
 
 (defun basic-rom-mapped-p (mmu)
   "Return T if BASIC ROM is currently mapped at $A000-$BFFF.
 PORTB bit 1 is inverted: BASIC is enabled when the bit is CLEAR."
   (declare (type mmu mmu))
-  (zerop (logand (mmu-portb mmu) +portb-basic-rom-mask+)))
+  (not (logtest (mmu-portb mmu) +portb-basic-rom-mask+)))
 
 (defun selftest-mapped-p (mmu)
   "Return T if the self-test ROM is mapped at $5000-$57FF.
@@ -55,13 +55,13 @@ PORTB bit 7 is inverted (0 = enabled).  Self-test code is part of the
 OS ROM image, so it can only appear when OS ROM is also enabled."
   (declare (type mmu mmu))
   (and (os-rom-mapped-p mmu)
-       (zerop (logand (mmu-portb mmu) +portb-selftest-mask+))))
+       (not (logtest (mmu-portb mmu) +portb-selftest-mask+))))
 
 (defun mmu-write-portb (mmu value)
   "Update PORTB.  Called by the PIA when software writes $D302; the new
 banking takes effect on the very next bus access.  Returns MMU."
   (declare (type mmu mmu) (type u8 value))
-  (setf (mmu-portb mmu) (logand value #xFF))
+  (setf (mmu-portb mmu) (ldb (byte 8 0) value))
   mmu)
 
 (defun reset-mmu (mmu)

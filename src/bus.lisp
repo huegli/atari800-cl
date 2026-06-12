@@ -115,7 +115,7 @@ Slots:
 (defun bus-poke-ram (bus address value)
   "Write directly to the 64K RAM backing store, ignoring the memory map."
   (declare (type bus bus) (type u16 address) (type u8 value))
-  (setf (aref (bus-ram bus) address) (logand value #xFF)))
+  (setf (aref (bus-ram bus) address) (ldb (byte 8 0) value)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ROM / MMU wiring helpers
@@ -200,15 +200,16 @@ RAM under any currently-mapped ROM) lands in the 64K RAM array."
   (declare (type bus bus) (type u16 address) (type u8 value))
   (cond
     ((<= +io-base+ address +io-end+)
-     (io-write bus address (logand value #xFF)))
+     (io-write bus address (ldb (byte 8 0) value)))
     (t
-     (setf (aref (bus-ram bus) address) (logand value #xFF)))))
+     (setf (aref (bus-ram bus) address) (ldb (byte 8 0) value)))))
 
 (defun bus-read16 (bus address)
   "Read a little-endian 16-bit word.  ADDRESS+1 wraps within 64K."
   (declare (type bus bus) (type u16 address))
-  (logior (bus-read bus address)
-          (ash (bus-read bus (logand (1+ address) #xFFFF)) 8)))
+  (let ((lo (bus-read bus address))
+        (hi (bus-read bus (ldb (byte 16 0) (1+ address)))))
+    (dpb hi (byte 8 8) lo)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; I/O sub-dispatch (one switch over the high byte of the I/O page).

@@ -193,7 +193,7 @@ integers 0..255."
             (dotimes (i count)
               (when (plusp i) (write-char #\Space s))
               (format s "~2,'0X" (atari800-cl.bus:bus-peek-ram
-                                  bus (logand (+ addr i) #xFFFF))))))))))
+                                  bus (ldb (byte 16 0) (+ addr i)))))))))))
 
 (defun %verb-write (server args)
   (unless (>= (length args) 2)
@@ -204,7 +204,7 @@ integers 0..255."
       (lambda (m)
         (let ((bus (atari-machine-bus m)))
           (loop for b in bytes for i from 0
-                do (atari800-cl.bus:bus-poke-ram bus (logand (+ addr i) #xFFFF) b))
+                do (atari800-cl.bus:bus-poke-ram bus (ldb (byte 16 0) (+ addr i)) b))
           (format nil "OK:wrote ~D" (length bytes)))))))
 
 (defun %verb-fill (server args)
@@ -218,7 +218,7 @@ integers 0..255."
       (lambda (m)
         (let ((bus (atari-machine-bus m)) (n 0))
           (loop for a from start to end
-                do (atari800-cl.bus:bus-poke-ram bus (logand a #xFFFF) val) (incf n))
+                do (atari800-cl.bus:bus-poke-ram bus (ldb (byte 16 0) a) val) (incf n))
           (format nil "OK:filled ~D" n))))))
 
 (defun %verb-registers (server args)
@@ -229,12 +229,12 @@ integers 0..255."
             (let ((cpu (atari-machine-cpu m)))
               (dolist (a assigns)
                 (ecase (car a)
-                  (:a  (setf (atari800-cl.cpu:cpu-a cpu)     (logand (cdr a) #xFF)))
-                  (:x  (setf (atari800-cl.cpu:cpu-x cpu)     (logand (cdr a) #xFF)))
-                  (:y  (setf (atari800-cl.cpu:cpu-y cpu)     (logand (cdr a) #xFF)))
-                  (:sp (setf (atari800-cl.cpu:cpu-sp cpu)    (logand (cdr a) #xFF)))
-                  (:p  (setf (atari800-cl.cpu:cpu-flags cpu) (logand (cdr a) #xFF)))
-                  (:pc (setf (atari800-cl.cpu:cpu-pc cpu)    (logand (cdr a) #xFFFF)))))
+                  (:a  (setf (atari800-cl.cpu:cpu-a cpu)     (ldb (byte 8 0) (cdr a))))
+                  (:x  (setf (atari800-cl.cpu:cpu-x cpu)     (ldb (byte 8 0) (cdr a))))
+                  (:y  (setf (atari800-cl.cpu:cpu-y cpu)     (ldb (byte 8 0) (cdr a))))
+                  (:sp (setf (atari800-cl.cpu:cpu-sp cpu)    (ldb (byte 8 0) (cdr a))))
+                  (:p  (setf (atari800-cl.cpu:cpu-flags cpu) (ldb (byte 8 0) (cdr a))))
+                  (:pc (setf (atari800-cl.cpu:cpu-pc cpu)    (ldb (byte 16 0) (cdr a))))))
               (%registers-string cpu)))))
       (%with-machine server (lambda (m) (%registers-string (atari-machine-cpu m))))))
 

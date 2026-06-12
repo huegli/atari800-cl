@@ -128,14 +128,14 @@ Slots:
 (defun %dl-current-address (antic)
   "Compute the absolute bus address of the next DL byte to fetch."
   (declare (type antic antic))
-  (logand (+ (antic-dlist-pointer antic) (antic-dl-offset antic)) #xFFFF))
+  (ldb (byte 16 0) (+ (antic-dlist-pointer antic) (antic-dl-offset antic))))
 
 (defun mode-line-scanlines (mode-byte)
   "Return the number of scanlines a display-list mode line occupies."
   (declare (type (unsigned-byte 8) mode-byte))
-  (let ((mode (logand mode-byte #x0F)))
+  (let ((mode (ldb (byte 4 0) mode-byte)))
     (case mode
-      (0  (1+ (ash (logand mode-byte #x70) -4)))  ; mode 0: (N+1) blank lines
+      (0  (1+ (ldb (byte 3 4) mode-byte)))        ; mode 0: (N+1) blank lines
       (1  0)                                       ; JMP / JVB
       ((2 4 6 8) 8)
       (3  10)
@@ -149,8 +149,8 @@ Slots:
   "Per-scanline cycles stolen by P/M DMA given DMACTL.
 Bit 2 enables 1-cycle missile DMA; bit 3 enables 4-cycle player DMA."
   (declare (type (unsigned-byte 8) dmactl))
-  (+ (if (zerop (logand dmactl +dmactl-missile-mask+)) 0 1)
-     (if (zerop (logand dmactl +dmactl-player-mask+))  0 4)))
+  (+ (if (logtest dmactl +dmactl-missile-mask+) 1 0)
+     (if (logtest dmactl +dmactl-player-mask+)  4 0)))
 
 (declaim (inline %scanline-steal))
 
@@ -167,12 +167,12 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
   (declare (type antic antic))
   (let* ((bus  (antic-bus antic))
          (inst (atari800-cl.bus:bus-read bus (%dl-current-address antic)))
-         (mode (logand inst #x0F))
-         (lms? (and (not (zerop (logand inst #x40))) (>= mode 2)))
-         (dli? (not (zerop (logand inst #x80)))))
+         (mode (ldb (byte 4 0) inst))
+         (lms-p (and (logtest inst #x40) (>= mode 2)))
+         (dli-p (logtest inst #x80)))
     (incf (antic-dl-offset antic))
     (setf (antic-current-mode antic) inst
-          (antic-dli-armed antic) dli?)
+          (antic-dli-armed antic) dli-p)
     (cond
       ((= mode 1)
        ;; JMP / JVB.  Read two bytes for the new DL address, then either
@@ -181,13 +181,13 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
          (incf (antic-dl-offset antic))
          (let ((hi (atari800-cl.bus:bus-read bus (%dl-current-address antic))))
            (incf (antic-dl-offset antic))
-           (setf (antic-dlist-pointer antic) (logior lo (ash hi 8))
+           (setf (antic-dlist-pointer antic) (dpb hi (byte 8 8) lo)
                  (antic-dl-offset antic) 0
                  (antic-mode-scanlines-remaining antic) 0)
-           (when (not (zerop (logand inst #x40)))
+           (when (logtest inst #x40)
              (setf (antic-jvb-wait antic) t)))))
       (t
-       (when lms?
+       (when lms-p
          ;; Skip the two-byte LMS load-memory-scan address (we don't
          ;; model screen-data fetches).
          (incf (antic-dl-offset antic) 2))
@@ -235,15 +235,15 @@ are all serviced at color-clock 0 as well."
       ;; VBI fires on entry to scanline 248.
       (when (= (antic-scanline antic) +vbi-scanline+)
         (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-vbi+))
-        (when (not (zerop (logand (antic-nmien antic) +nmi-vbi+)))
+        (when (logtest (antic-nmien antic) +nmi-vbi+)
           (%raise-nmi antic))
         ;; A JVB instruction parks ANTIC until VBLANK; we release it now.
         (setf (antic-jvb-wait antic) nil
               (antic-mode-scanlines-remaining antic) 0
               ;; Re-latch DL pointer from the shadow registers.
               (antic-dlist-pointer antic)
-              (logior (aref (antic-registers antic) +reg-dlistl+)
-                      (ash (aref (antic-registers antic) +reg-dlisth+) 8))
+              (dpb (aref (antic-registers antic) +reg-dlisth+) (byte 8 8)
+                   (aref (antic-registers antic) +reg-dlistl+))
               (antic-dl-offset antic) 0))
       ;; If a new mode line is needed, fetch the next DL instruction.
       (when (and (zerop (antic-mode-scanlines-remaining antic))
@@ -256,7 +256,7 @@ are all serviced at color-clock 0 as well."
       (when (and (antic-dli-armed antic)
                  (= (antic-mode-scanlines-remaining antic) 1))
         (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-dli+))
-        (when (not (zerop (logand (antic-nmien antic) +nmi-dli+)))
+        (when (logtest (antic-nmien antic) +nmi-dli+)
           (%raise-nmi antic))
         (setf (antic-dli-armed antic) nil))
       ;; Refresh + P/M DMA steals for this line.
@@ -283,9 +283,10 @@ are all serviced at color-clock 0 as well."
   $D40B (VCOUNT) — returns SCANLINE >> 1 (ANTIC's vertical-line counter)
   $D40F (NMIST)  — returns the NMI status latch"
   (declare (type antic antic) (type (unsigned-byte 16) address))
-  (let ((offset (logand address #x1F)))
+  (let ((offset (ldb (byte 5 0) address)))
     (case offset
-      (#.+reg-vcount+ (logand (ash (antic-scanline antic) -1) #xFF))
+      ;; (byte 8 1) grabs bits 1-8 of the 9-bit counter: SCANLINE >> 1.
+      (#.+reg-vcount+ (ldb (byte 8 1) (antic-scanline antic)))
       (#.+reg-nmires+ (antic-nmist antic))
       (t (aref (antic-registers antic) offset)))))
 
@@ -294,19 +295,17 @@ are all serviced at color-clock 0 as well."
 their shadow slots; everything else is just latched into the register file."
   (declare (type antic antic) (type (unsigned-byte 16) address)
            (type (unsigned-byte 8) value))
-  (let ((offset (logand address #x1F))
-        (v (logand value #xFF)))
+  (let ((offset (ldb (byte 5 0) address))
+        (v (ldb (byte 8 0) value)))
     (setf (aref (antic-registers antic) offset) v)
     (case offset
       (#.+reg-dmactl+ (setf (antic-dmactl antic) v))
       (#.+reg-dlistl+ (setf (antic-dlist-pointer antic)
-                            (logior v (logand (antic-dlist-pointer antic)
-                                              #xFF00))
+                            (dpb v (byte 8 0) (antic-dlist-pointer antic))
                             (antic-dl-offset antic) 0
                             (antic-mode-scanlines-remaining antic) 0))
       (#.+reg-dlisth+ (setf (antic-dlist-pointer antic)
-                            (logior (logand (antic-dlist-pointer antic) #xFF)
-                                    (ash v 8))
+                            (dpb v (byte 8 8) (antic-dlist-pointer antic))
                             (antic-dl-offset antic) 0
                             (antic-mode-scanlines-remaining antic) 0))
       (#.+reg-nmien+ (setf (antic-nmien antic) v))

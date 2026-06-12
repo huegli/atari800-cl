@@ -19,9 +19,18 @@
 ;;;;   LOGXOR  — bitwise exclusive OR  (like ^ in C)
 ;;;;   LOGANDC2 — AND first arg with complement of second: (A & ~B)
 ;;;;              Less common than LOGAND, but avoids a separate LOGNOT call.
+;;;;   LOGTEST — true when two integers share any set bits; the idiomatic
+;;;;             spelling of (not (zerop (logand x mask)))
 ;;;;   ASH     — arithmetic shift; positive count shifts left, negative right
 ;;;;   ZEROP   — returns T if the number is zero
 ;;;;   1+, 1-  — increment / decrement by one (purely arithmetic, no mutation)
+;;;;
+;;;; Byte-field operators (the CL-native way to slice integers):
+;;;;   BYTE — builds a field descriptor: (BYTE size position)
+;;;;   LDB  — extracts a field: (ldb (byte 8 8) w) is the high byte of W;
+;;;;          (ldb (byte 8 0) x) doubles as "wrap to 8 bits"
+;;;;   DPB  — deposits a field: (dpb hi (byte 8 8) lo) assembles a 16-bit
+;;;;          little-endian word from two bytes
 ;;;;
 ;;;; FUNCALL calls a function stored in a variable.  In CL, functions and
 ;;;; values live in separate namespaces (Lisp-2), so to call a function
@@ -61,8 +70,8 @@
 ;;; Status-register flag bits (NV-BDIZC)
 ;;;
 ;;; The 6502 packs eight flags into a single byte.  Each constant below
-;;; is a single-bit mask.  To test whether a flag is set, we LOGAND the
-;;; flags register with the mask and check for non-zero.
+;;; is a single-bit mask.  To test whether a flag is set, we LOGTEST the
+;;; flags register against the mask.
 ;;;
 ;;; Bit layout (MSB to LSB):
 ;;;   7  6  5  4  3  2  1  0
@@ -119,8 +128,8 @@ Slots:
 ;;; Bus access helpers
 ;;;
 ;;; These thin wrappers call the bus-read/bus-write closures stored in the
-;;; CPU struct.  The LOGAND masks ensure addresses stay within 16 bits and
-;;; values within 8 bits, even if arithmetic overflows.
+;;; CPU struct.  The LDB field extractions wrap addresses to 16 bits and
+;;; values to 8 bits, even if arithmetic overflows.
 
 (declaim (inline cpu-read-byte cpu-write-byte))
 
@@ -128,22 +137,21 @@ Slots:
   (declare (type cpu cpu) (type u16 address))
   ;; FUNCALL is needed because CPU-BUS-READ returns a function object,
   ;; and CL requires FUNCALL to invoke a value in the "variable" namespace.
-  (funcall (cpu-bus-read cpu) (logand address #xFFFF)))
+  (funcall (cpu-bus-read cpu) (ldb (byte 16 0) address)))
 
 (defun cpu-write-byte (cpu address value)
   (declare (type cpu cpu) (type u16 address) (type u8 value))
   (funcall (cpu-bus-write cpu)
-           (logand address #xFFFF)
-           (logand value #xFF)))
+           (ldb (byte 16 0) address)
+           (ldb (byte 8 0) value)))
 
 (defun cpu-read-word (cpu address)
   "Read a little-endian 16-bit word: low byte at ADDRESS, high byte at ADDRESS+1."
   (declare (type cpu cpu) (type u16 address))
   (let ((lo (cpu-read-byte cpu address))
-        (hi (cpu-read-byte cpu (logand (1+ address) #xFFFF))))
-    ;; ASH shifts HI left by 8 bits, then LOGIOR combines it with LO
-    ;; to form the 16-bit value.
-    (logior lo (ash hi 8))))
+        (hi (cpu-read-byte cpu (ldb (byte 16 0) (1+ address)))))
+    ;; DPB deposits HI into bits 8-15 of LO, forming the 16-bit word.
+    (dpb hi (byte 8 8) lo)))
 
 (defun attach-memory-bus (cpu memory)
   "Wire a MEMORY object's MEM-READ/MEM-WRITE into CPU's bus hooks.
@@ -172,21 +180,20 @@ the details of the memory implementation."
 (defun flag-set-p (cpu mask)
   "Return T if the flag bit(s) in MASK are set in the CPU's flags register."
   (declare (type cpu cpu) (type u8 mask))
-  ;; LOGAND extracts the bit; ZEROP tests if it's zero; NOT inverts.
-  (not (zerop (logand (cpu-flags cpu) mask))))
+  ;; LOGTEST is true when the two integers share any set bits.
+  (logtest (cpu-flags cpu) mask))
 
 (defun set-flag (cpu mask)
   "Set the flag bit(s) indicated by MASK to 1."
   (declare (type cpu cpu) (type u8 mask))
-  ;; LOGIOR sets the bit(s) to 1.  The outer LOGAND #xFF keeps the
-  ;; result within 8 bits (defensive — CL integers are arbitrary precision).
-  (setf (cpu-flags cpu) (logand #xFF (logior (cpu-flags cpu) mask))))
+  ;; LOGIOR of two bytes cannot exceed 8 bits, so no re-masking is needed.
+  (setf (cpu-flags cpu) (logior (cpu-flags cpu) mask)))
 
 (defun clear-flag (cpu mask)
   "Clear the flag bit(s) indicated by MASK to 0."
   (declare (type cpu cpu) (type u8 mask))
   ;; LOGANDC2 computes (flags AND (NOT mask)), i.e. clears just those bits.
-  (setf (cpu-flags cpu) (logand #xFF (logandc2 (cpu-flags cpu) mask))))
+  (setf (cpu-flags cpu) (logandc2 (cpu-flags cpu) mask)))
 
 (defun set-flag-to (cpu mask bool)
   "Set flag bit(s) to 1 if BOOL is true, 0 otherwise."
@@ -197,9 +204,9 @@ the details of the memory implementation."
 This is called after most ALU operations to update the Zero and Negative
 flags based on the result."
   (declare (type cpu cpu))
-  (let ((v (logand value #xFF)))        ; mask to 8 bits
-    (set-flag-to cpu +flag-z+ (zerop v))                        ; Z=1 if result is 0
-    (set-flag-to cpu +flag-n+ (not (zerop (logand v #x80))))    ; N=1 if bit 7 is set
+  (let ((v (ldb (byte 8 0) value)))     ; wrap to 8 bits
+    (set-flag-to cpu +flag-z+ (zerop v))               ; Z=1 if result is 0
+    (set-flag-to cpu +flag-n+ (logtest v #x80))        ; N=1 if bit 7 is set
     v))
 
 (defun status-byte-for-push (cpu &key (b-flag t))
@@ -209,15 +216,14 @@ instructions, but cleared to 0 for hardware interrupts (IRQ/NMI)."
   (let ((s (logior (cpu-flags cpu) +flag-u+)))  ; always set U
     (if b-flag
         (logior s +flag-b+)                     ; set B for PHP/BRK
-        ;; LOGANDC2: clear B bit — computes (S AND (NOT +FLAG-B+))
-        (logand s (logandc2 #xFF +flag-b+)))))
+        (logandc2 s +flag-b+))))                ; clear B for IRQ/NMI
 
 (defun status-byte-from-pull (byte)
   "Reconstruct the flags register from a byte pulled off the stack.
 Always forces U=1 and B=0, because the B flag only exists on the
 stack — it is not a real register bit."
-  (logand (logior byte +flag-u+)               ; set U
-          (logandc2 #xFF +flag-b+)))            ; clear B
+  (logandc2 (logior byte +flag-u+)             ; set U ...
+            +flag-b+))                           ; ... and clear B
 
 ;;; ---------------------------------------------------------------------------
 ;;; Stack helpers (page $0100, post-decrement on push, pre-increment on pull)
@@ -235,28 +241,28 @@ stack — it is not a real register bit."
   (declare (type cpu cpu) (type u8 value))
   ;; LOGIOR #x0100 puts the 8-bit SP into the $0100 page.
   (cpu-write-byte cpu (logior #x0100 (cpu-sp cpu)) value)
-  ;; 1- subtracts 1; LOGAND #xFF wraps around within 0–255.
-  (setf (cpu-sp cpu) (logand (1- (cpu-sp cpu)) #xFF)))
+  ;; LDB of (byte 8 0) wraps the decrement within 0-255.
+  (setf (cpu-sp cpu) (ldb (byte 8 0) (1- (cpu-sp cpu)))))
 
 (defun pull-byte (cpu)
   "Pull a byte from the 6502 stack: increment SP, then read at $0100+SP."
   (declare (type cpu cpu))
-  (setf (cpu-sp cpu) (logand (1+ (cpu-sp cpu)) #xFF))
+  (setf (cpu-sp cpu) (ldb (byte 8 0) (1+ (cpu-sp cpu))))
   (cpu-read-byte cpu (logior #x0100 (cpu-sp cpu))))
 
 (defun push-word (cpu word)
   "Push a 16-bit word onto the stack, high byte first (as the 6502 does)."
   (declare (type cpu cpu) (type u16 word))
-  ;; ASH -8 shifts right by 8 to extract the high byte.
-  (push-byte cpu (logand (ash word -8) #xFF))
-  (push-byte cpu (logand word #xFF)))
+  ;; LDB extracts each half: (byte 8 8) is the high byte, (byte 8 0) the low.
+  (push-byte cpu (ldb (byte 8 8) word))
+  (push-byte cpu (ldb (byte 8 0) word)))
 
 (defun pull-word (cpu)
   "Pull a 16-bit word: low byte first (since the 6502 pushed high byte first)."
   (declare (type cpu cpu))
   (let ((lo (pull-byte cpu))
         (hi (pull-byte cpu)))
-    (logior lo (ash hi 8))))
+    (dpb hi (byte 8 8) lo)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Reset / IRQ / NMI
@@ -283,7 +289,7 @@ two-argument call shape matches the original scaffold API."
   (let* ((lo (cpu-read-byte cpu +reset-vector+))
          (hi (cpu-read-byte cpu (1+ +reset-vector+))))
     ;; SETF can set multiple places at once.  Each pair is (PLACE VALUE).
-    (setf (cpu-pc cpu)        (logior lo (ash hi 8))
+    (setf (cpu-pc cpu)        (dpb hi (byte 8 8) lo)
           (cpu-a  cpu)        0
           (cpu-x  cpu)        0
           (cpu-y  cpu)        0
@@ -342,7 +348,7 @@ two-argument call shape matches the original scaffold API."
   "Fetch the byte at PC and advance PC by one."
   (declare (type cpu cpu))
   (let ((b (cpu-read-byte cpu (cpu-pc cpu))))
-    (setf (cpu-pc cpu) (logand (1+ (cpu-pc cpu)) #xFFFF))
+    (setf (cpu-pc cpu) (ldb (byte 16 0) (1+ (cpu-pc cpu))))
     b))
 
 (defun read-pc-word (cpu)
@@ -350,12 +356,12 @@ two-argument call shape matches the original scaffold API."
   (declare (type cpu cpu))
   (let ((lo (read-pc-byte cpu))
         (hi (read-pc-byte cpu)))
-    (logior lo (ash hi 8))))
+    (dpb hi (byte 8 8) lo)))
 
 (defun page-crossed-p (base offset-addr)
   "Return T if BASE and OFFSET-ADDR are on different 256-byte pages.
 A page boundary cross adds an extra cycle on certain 6502 instructions."
-  (/= (logand base #xFF00) (logand offset-addr #xFF00)))
+  (/= (ldb (byte 8 8) base) (ldb (byte 8 8) offset-addr)))
 
 ;;; --- Addressing modes ---
 ;;; Each returns (VALUES effective-address page-crossed-p).
@@ -363,7 +369,7 @@ A page boundary cross adds an extra cycle on certain 6502 instructions."
 (defun addr-immediate (cpu)
   "Immediate: the operand IS the byte at PC."
   (let ((addr (cpu-pc cpu)))
-    (setf (cpu-pc cpu) (logand (1+ addr) #xFFFF))
+    (setf (cpu-pc cpu) (ldb (byte 16 0) (1+ addr)))
     (values addr nil)))
 
 (defun addr-zero-page (cpu)
@@ -372,11 +378,11 @@ A page boundary cross adds an extra cycle on certain 6502 instructions."
 
 (defun addr-zero-page-x (cpu)
   "Zero page,X: (operand + X) wrapped to 8 bits (stays in zero page)."
-  (values (logand (+ (read-pc-byte cpu) (cpu-x cpu)) #xFF) nil))
+  (values (ldb (byte 8 0) (+ (read-pc-byte cpu) (cpu-x cpu))) nil))
 
 (defun addr-zero-page-y (cpu)
   "Zero page,Y: (operand + Y) wrapped to 8 bits (stays in zero page)."
-  (values (logand (+ (read-pc-byte cpu) (cpu-y cpu)) #xFF) nil))
+  (values (ldb (byte 8 0) (+ (read-pc-byte cpu) (cpu-y cpu))) nil))
 
 (defun addr-absolute (cpu)
   "Absolute: a full 16-bit address follows the opcode."
@@ -385,13 +391,13 @@ A page boundary cross adds an extra cycle on certain 6502 instructions."
 (defun addr-absolute-x (cpu)
   "Absolute,X: 16-bit base + X register.  Reports page cross."
   (let* ((base (read-pc-word cpu))
-         (addr (logand (+ base (cpu-x cpu)) #xFFFF)))
+         (addr (ldb (byte 16 0) (+ base (cpu-x cpu)))))
     (values addr (page-crossed-p base addr))))
 
 (defun addr-absolute-y (cpu)
   "Absolute,Y: 16-bit base + Y register.  Reports page cross."
   (let* ((base (read-pc-word cpu))
-         (addr (logand (+ base (cpu-y cpu)) #xFFFF)))
+         (addr (ldb (byte 16 0) (+ base (cpu-y cpu)))))
     (values addr (page-crossed-p base addr))))
 
 (defun addr-indirect (cpu)
@@ -402,29 +408,29 @@ the high byte of the target is read from $xx00 (same page) instead of $xx00+$100
 byte from $1000, NOT $1100."
   (let* ((ptr (read-pc-word cpu))
          (lo  (cpu-read-byte cpu ptr))
-         ;; Wrap within the same page: only the low byte of ptr is incremented.
-         (hi-addr (logior (logand ptr #xFF00)
-                          (logand (1+ ptr) #x00FF)))
+         ;; Wrap within the same page: DPB replaces only the low byte of
+         ;; PTR with the incremented value, leaving the page byte alone.
+         (hi-addr (dpb (1+ ptr) (byte 8 0) ptr))
          (hi  (cpu-read-byte cpu hi-addr)))
-    (values (logior lo (ash hi 8)) nil)))
+    (values (dpb hi (byte 8 8) lo) nil)))
 
 (defun addr-indexed-indirect (cpu)
   "(zp,X): add X to the zero-page operand (wrapping to 8 bits), then read a
 16-bit pointer from that zero-page location.  The pointer fetch also wraps
 within zero page."
-  (let* ((zp  (logand (+ (read-pc-byte cpu) (cpu-x cpu)) #xFF))
+  (let* ((zp  (ldb (byte 8 0) (+ (read-pc-byte cpu) (cpu-x cpu))))
          (lo  (cpu-read-byte cpu zp))
-         (hi  (cpu-read-byte cpu (logand (1+ zp) #xFF))))
-    (values (logior lo (ash hi 8)) nil)))
+         (hi  (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp)))))
+    (values (dpb hi (byte 8 8) lo) nil)))
 
 (defun addr-indirect-indexed (cpu)
   "(zp),Y: read a 16-bit pointer from the zero-page operand (with wrap),
 then add Y to get the effective address.  Reports page cross."
   (let* ((zp   (read-pc-byte cpu))
          (lo   (cpu-read-byte cpu zp))
-         (hi   (cpu-read-byte cpu (logand (1+ zp) #xFF)))
-         (base (logior lo (ash hi 8)))
-         (addr (logand (+ base (cpu-y cpu)) #xFFFF)))
+         (hi   (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp))))
+         (base (dpb hi (byte 8 8) lo))
+         (addr (ldb (byte 16 0) (+ base (cpu-y cpu)))))
     (values addr (page-crossed-p base addr))))
 
 (defun addr-relative (cpu)
@@ -434,7 +440,7 @@ byte has been consumed)."
   (let* ((off (read-pc-byte cpu))
          ;; Convert unsigned byte to signed: values >= #x80 are negative.
          (s   (if (>= off #x80) (- off #x100) off)))
-    (values (logand (+ (cpu-pc cpu) s) #xFFFF) nil)))
+    (values (ldb (byte 16 0) (+ (cpu-pc cpu) s)) nil)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Fetch / decode / dispatch

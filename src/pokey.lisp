@@ -124,11 +124,11 @@ Slots:
   (let ((ac (pokey-audctl pokey)))
     (cond
       ;; Channel 1 (index 0) on 1.79 MHz when AUDCTL bit 6 set.
-      ((and (= ch 0) (not (zerop (logand ac #x40)))) 1)
+      ((and (= ch 0) (logtest ac #x40)) 1)
       ;; Channel 3 (index 2) on 1.79 MHz when AUDCTL bit 5 set.
-      ((and (= ch 2) (not (zerop (logand ac #x20)))) 1)
+      ((and (= ch 2) (logtest ac #x20)) 1)
       ;; 15 kHz instead of 64 kHz when AUDCTL bit 0 set.
-      ((not (zerop (logand ac #x01))) +pokey-15khz-divisor+)
+      ((logtest ac #x01) +pokey-15khz-divisor+)
       ;; Default: 64 kHz.
       (t +pokey-64khz-divisor+))))
 
@@ -153,21 +153,21 @@ of the Atari polys (sufficient for the prompt's tests).
    9-bit poly taps: bit 0 XOR bit 4"
   (declare (type pokey pokey))
   (let* ((p17 (pokey-poly17-state pokey))
-         (fb17 (logand 1 (logxor p17 (ash p17 -5))))
-         (n17 (logior (ash p17 -1) (ash fb17 16)))
+         (fb17 (logxor (ldb (byte 1 0) p17) (ldb (byte 1 5) p17)))
+         (n17 (dpb fb17 (byte 1 16) (ash p17 -1)))
          (p9 (pokey-poly9-state pokey))
-         (fb9 (logand 1 (logxor p9 (ash p9 -4))))
-         (n9 (logior (ash p9 -1) (ash fb9 8))))
-    (setf (pokey-poly17-state pokey) (logand n17 #x1FFFF)
-          (pokey-poly9-state  pokey) (logand n9  #x1FF))))
+         (fb9 (logxor (ldb (byte 1 0) p9) (ldb (byte 1 4) p9)))
+         (n9 (dpb fb9 (byte 1 8) (ash p9 -1))))
+    (setf (pokey-poly17-state pokey) n17
+          (pokey-poly9-state  pokey) n9)))
 
 (defun pokey-random (pokey)
   "Return the current RANDOM register value.  AUDCTL bit 7 picks the
 9-bit LFSR; otherwise the low 8 bits of the 17-bit LFSR are returned."
   (declare (type pokey pokey))
-  (if (zerop (logand (pokey-audctl pokey) #x80))
-      (logand (pokey-poly17-state pokey) #xFF)
-      (logand (pokey-poly9-state  pokey) #xFF)))
+  (if (logtest (pokey-audctl pokey) #x80)
+      (ldb (byte 8 0) (pokey-poly9-state  pokey))
+      (ldb (byte 8 0) (pokey-poly17-state pokey))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tick
@@ -177,11 +177,11 @@ of the Atari polys (sufficient for the prompt's tests).
 the CPU's pending-IRQ line was actually asserted."
   (declare (type pokey pokey) (type fixnum ch))
   (let ((bit (%irq-bit-for-channel ch)))
-    (when (and (not (zerop bit))
-               (not (zerop (logand (pokey-irqen pokey) bit))))
+    (when (and (plusp bit)
+               (logtest (pokey-irqen pokey) bit))
       ;; IRQST is active-low: clear the bit to indicate "pending".
       (setf (pokey-irqst pokey)
-            (logand #xFF (logandc2 (pokey-irqst pokey) bit)))
+            (logandc2 (pokey-irqst pokey) bit))
       (when cpu
         (setf (cpu-pending-irq cpu) t))
       t)))
@@ -199,8 +199,8 @@ clears — even though IRQST reads back as 'nothing pending'."
   (let ((cpu (pokey-cpu pokey)))
     (when cpu
       (set-irq-line cpu
-                    (not (zerop (logand (pokey-irqen pokey)
-                                        (logandc2 #xFF (pokey-irqst pokey)))))))))
+                    (logtest (pokey-irqen pokey)
+                             (logandc2 #xFF (pokey-irqst pokey)))))))
 
 (defun pokey-tick (pokey cpu)
   "Advance POKEY by one CPU cycle.  Returns T if any timer raised an IRQ
@@ -233,7 +233,7 @@ this cycle.  Also clocks both polynomial LFSRs once per call."
 
 (defun %offset (address)
   (declare (type (unsigned-byte 16) address))
-  (logand address #x0F))
+  (ldb (byte 4 0) address))
 
 (defun pokey-read (pokey address)
   "Read from the POKEY read window."
@@ -275,7 +275,7 @@ Side effects:
                     enabled remains pending)."
   (declare (type pokey pokey) (type (unsigned-byte 16) address)
            (type (unsigned-byte 8) value))
-  (let ((v (logand value #xFF))
+  (let ((v (ldb (byte 8 0) value))
         (offset (%offset address)))
     (case offset
       ;; AUDF / AUDC arrays
@@ -298,8 +298,7 @@ Side effects:
        ;; last enabled+pending source, the level-sensitive line drops.
        (setf (pokey-irqen pokey) v
              (pokey-irqst pokey)
-             (logior (pokey-irqst pokey)
-                     (logand #xFF (logandc2 #xFF v))))
+             (logior (pokey-irqst pokey) (logandc2 #xFF v)))
        (%sync-irq-line pokey))
       (15 (setf (pokey-skctl pokey) v))
       (t nil))))

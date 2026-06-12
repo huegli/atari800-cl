@@ -81,14 +81,14 @@ Slots (all integers are register-ready bytes in their native encoding):
   "Set paddle N (0..3) to VALUE (clamped to a byte, 0..228 meaningful)."
   (declare (type input-state input) (type (integer 0 3) n))
   (with-lock ((input-state-lock input))
-    (setf (aref (input-state-pot input) n) (logand value #xFF)))
+    (setf (aref (input-state-pot input) n) (ldb (byte 8 0) value)))
   input)
 
 (defun input-set-key (input kbcode &optional (pressed t))
   "Latch KBCODE as the last key and set the held/released state."
   (declare (type input-state input))
   (with-lock ((input-state-lock input))
-    (setf (input-state-kbcode input) (logand kbcode #xFF)
+    (setf (input-state-kbcode input) (ldb (byte 8 0) kbcode)
           (input-state-key-pressed input) pressed))
   input)
 
@@ -99,8 +99,8 @@ Slots (all integers are register-ready bytes in their native encoding):
   "PORTA byte: stick 0 in the low nibble, stick 1 in the high nibble."
   (declare (type input-state input))
   (with-lock ((input-state-lock input))
-    (logior (aref (input-state-joy input) 0)
-            (ash (aref (input-state-joy input) 1) 4))))
+    (dpb (aref (input-state-joy input) 1) (byte 4 4)
+         (aref (input-state-joy input) 0))))
 
 (defun input-gtia-trig (input n)
   "TRIG<N> (0 = fire pressed, 1 = released)."

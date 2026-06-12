@@ -80,14 +80,14 @@
 (defun do-dec-byte (value cpu)
   "Decrement VALUE, mask to 8 bits, update Z/N; return the new byte.
 Used by DCP.  Same signature shape as DO-ASL/DO-LSR/etc."
-  (let ((r (logand (1- value) #xFF)))
+  (let ((r (ldb (byte 8 0) (1- value))))
     (update-zn cpu r)
     r))
 
 (defun do-inc-byte (value cpu)
   "Increment VALUE, mask to 8 bits, update Z/N; return the new byte.
 Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
-  (let ((r (logand (1+ value) #xFF)))
+  (let ((r (ldb (byte 8 0) (1+ value))))
     (update-zn cpu r)
     r))
 
@@ -194,12 +194,12 @@ Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
              (let ((tag (intern (format nil "LAX-~A" (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (val xp?) (read-via cpu #',mode)
-                    (declare (ignorable xp?))
+                  (multiple-value-bind (val crossed-p) (read-via cpu #',mode)
+                    (declare (ignorable crossed-p))
                     (setf (cpu-a cpu) val
                           (cpu-x cpu) val)
                     (update-zn cpu val)
-                    (+ ,base ,(if page-cross '(if xp? 1 0) 0)))))))
+                    (+ ,base ,(if page-cross '(if crossed-p 1 0) 0)))))))
   (lax #xA3 addr-indexed-indirect  6)
   (lax #xA7 addr-zero-page         3)
   (lax #xAF addr-absolute          4)
@@ -242,7 +242,7 @@ We implement the consistent A = X = imm (see file header)."
   (multiple-value-bind (val) (read-via cpu #'addr-immediate)
     (let ((r (logand (cpu-a cpu) val)))
       (setf (cpu-a cpu) (update-zn cpu r))
-      (set-flag-to cpu +flag-c+ (not (zerop (logand r #x80)))))))
+      (set-flag-to cpu +flag-c+ (logtest r #x80)))))
 
 (defopcode #x0B anc-0B (cpu) (%anc cpu) 2)
 (defopcode #x2B anc-2B (cpu) (%anc cpu) 2)   ; same instruction, separate opcode
@@ -267,16 +267,14 @@ exercise BCD via this opcode)."
   (multiple-value-bind (val) (read-via cpu #'addr-immediate)
     (let* ((tmp (logand (cpu-a cpu) val))
            (cin (if (flag-set-p cpu +flag-c+) #x80 0))
-           (r   (logand (logior (ash tmp -1) cin) #xFF)))
+           (r   (ldb (byte 8 0) (logior (ash tmp -1) cin))))
       (setf (cpu-a cpu) r)
       (set-flag-to cpu +flag-z+ (zerop r))
-      (set-flag-to cpu +flag-n+ (not (zerop (logand r #x80))))
-      (set-flag-to cpu +flag-c+ (not (zerop (logand r #x40))))
-      ;; Bit6 at position 6, bit5 shifted up to position 6 → XOR is 0x40
-      ;; precisely when they differ.
+      (set-flag-to cpu +flag-n+ (logtest r #x80))
+      (set-flag-to cpu +flag-c+ (logtest r #x40))
+      ;; V is set precisely when bits 6 and 5 of the result differ.
       (set-flag-to cpu +flag-v+
-                   (not (zerop (logxor (logand r #x40)
-                                       (ash (logand r #x20) 1)))))))
+                   (/= (ldb (byte 1 6) r) (ldb (byte 1 5) r)))))
   2)
 
 (defopcode #x8B xaa (cpu)
@@ -294,18 +292,18 @@ Carry-in is NOT consulted (unlike SBC)."
     (let* ((ax   (logand (cpu-a cpu) (cpu-x cpu)))
            (diff (- ax val)))
       (set-flag-to cpu +flag-c+ (>= ax val))
-      (setf (cpu-x cpu) (update-zn cpu (logand diff #xFF)))))
+      (setf (cpu-x cpu) (update-zn cpu diff))))
   2)
 
 (defopcode #xBB las (cpu)
   "LAS abs,Y:  A = X = SP = (M AND SP); update Z/N.  +1 cycle on page cross."
-  (multiple-value-bind (val xp?) (read-via cpu #'addr-absolute-y)
+  (multiple-value-bind (val crossed-p) (read-via cpu #'addr-absolute-y)
     (let ((r (logand val (cpu-sp cpu))))
       (setf (cpu-a cpu) r
             (cpu-x cpu) r
             (cpu-sp cpu) r)
       (update-zn cpu r))
-    (+ 4 (if xp? 1 0))))
+    (+ 4 (if crossed-p 1 0))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Unstable high-byte store variants — AHX/SHA, SHX, SHY, TAS/SHS.
@@ -321,12 +319,12 @@ Carry-in is NOT consulted (unlike SBC)."
 (defun %high+1 (base)
   "Compute (high-byte-of BASE + 1) masked to 8 bits.  Helper for unstable stores."
   (declare (type u16 base))
-  (logand (1+ (ash base -8)) #xFF))
+  (ldb (byte 8 0) (1+ (ldb (byte 8 8) base))))
 
 (defopcode #x9C shy (cpu)
   "SHY abs,X — UNSTABLE.  M[base+X] = Y AND (high(base)+1)."
   (let* ((base   (read-pc-word cpu))
-         (addr   (logand (+ base (cpu-x cpu)) #xFFFF))
+         (addr   (ldb (byte 16 0) (+ base (cpu-x cpu))))
          (mask   (%high+1 base))
          (value  (logand (cpu-y cpu) mask)))
     (cpu-write-byte cpu addr value))
@@ -335,7 +333,7 @@ Carry-in is NOT consulted (unlike SBC)."
 (defopcode #x9E shx (cpu)
   "SHX abs,Y — UNSTABLE.  M[base+Y] = X AND (high(base)+1)."
   (let* ((base   (read-pc-word cpu))
-         (addr   (logand (+ base (cpu-y cpu)) #xFFFF))
+         (addr   (ldb (byte 16 0) (+ base (cpu-y cpu))))
          (mask   (%high+1 base))
          (value  (logand (cpu-x cpu) mask)))
     (cpu-write-byte cpu addr value))
@@ -344,7 +342,7 @@ Carry-in is NOT consulted (unlike SBC)."
 (defopcode #x9F ahx-aby (cpu)
   "AHX / SHA abs,Y — UNSTABLE.  M[base+Y] = A AND X AND (high(base)+1)."
   (let* ((base   (read-pc-word cpu))
-         (addr   (logand (+ base (cpu-y cpu)) #xFFFF))
+         (addr   (ldb (byte 16 0) (+ base (cpu-y cpu))))
          (mask   (%high+1 base))
          (value  (logand (cpu-a cpu) (cpu-x cpu) mask)))
     (cpu-write-byte cpu addr value))
@@ -355,10 +353,10 @@ Carry-in is NOT consulted (unlike SBC)."
 where BASE is the 16-bit pointer read from zero page."
   (let* ((zp    (read-pc-byte cpu))
          (lo    (cpu-read-byte cpu zp))
-         (hi    (cpu-read-byte cpu (logand (1+ zp) #xFF)))
-         (base  (logior lo (ash hi 8)))
-         (addr  (logand (+ base (cpu-y cpu)) #xFFFF))
-         (mask  (logand (1+ hi) #xFF))
+         (hi    (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp))))
+         (base  (dpb hi (byte 8 8) lo))
+         (addr  (ldb (byte 16 0) (+ base (cpu-y cpu))))
+         (mask  (ldb (byte 8 0) (1+ hi)))
          (value (logand (cpu-a cpu) (cpu-x cpu) mask)))
     (cpu-write-byte cpu addr value))
   6)
@@ -366,7 +364,7 @@ where BASE is the 16-bit pointer read from zero page."
 (defopcode #x9B tas (cpu)
   "TAS / SHS abs,Y — UNSTABLE.  SP = A AND X; M[base+Y] = SP AND (high(base)+1)."
   (let* ((base    (read-pc-word cpu))
-         (addr    (logand (+ base (cpu-y cpu)) #xFFFF))
+         (addr    (ldb (byte 16 0) (+ base (cpu-y cpu))))
          (new-sp  (logand (cpu-a cpu) (cpu-x cpu)))
          (mask    (%high+1 base))
          (value   (logand new-sp mask)))
@@ -448,9 +446,9 @@ where BASE is the 16-bit pointer read from zero page."
        (let ((tag (intern (format nil "NOP-ABX-~2,'0X" op)
                           :atari800-cl.cpu)))
          `(defopcode ,op ,tag (cpu)
-            (multiple-value-bind (addr xp?) (addr-absolute-x cpu)
+            (multiple-value-bind (addr crossed-p) (addr-absolute-x cpu)
               (cpu-read-byte cpu addr)
-              (+ 4 (if xp? 1 0)))))))
+              (+ 4 (if crossed-p 1 0)))))))
   (nop-abx #x1C) (nop-abx #x3C) (nop-abx #x5C)
   (nop-abx #x7C) (nop-abx #xDC) (nop-abx #xFC))
 
@@ -471,7 +469,7 @@ where BASE is the 16-bit pointer read from zero page."
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
                   (setf (cpu-halted cpu) t)
-                  (let ((pc-of-kil (logand (1- (cpu-pc cpu)) #xFFFF)))
+                  (let ((pc-of-kil (ldb (byte 16 0) (1- (cpu-pc cpu)))))
                     (setf (cpu-pc cpu) pc-of-kil)
                     (error 'illegal-opcode
                            :opcode ,op

@@ -38,9 +38,9 @@
 ;;;; MULTIPLE-VALUE-BIND receives multiple return values from a function.
 ;;;; For example, the addressing-mode functions return two values
 ;;;; (address, page-crossed-p), and we bind both with:
-;;;;   (multiple-value-bind (addr xpage?) (addr-absolute-x cpu) ...)
+;;;;   (multiple-value-bind (addr xpage-p) (addr-absolute-x cpu) ...)
 ;;;;
-;;;; (DECLARE (IGNORABLE XP?)) tells the compiler not to warn if XP?
+;;;; (DECLARE (IGNORABLE CROSSED-P)) tells the compiler not to warn if CROSSED-P
 ;;;; is unused.  This is needed because the macro generates the same
 ;;;; MULTIPLE-VALUE-BIND for all addressing modes, but not all modes
 ;;;; produce a meaningful page-cross value.
@@ -72,8 +72,8 @@
 MODE is a function like #'ADDR-ABSOLUTE-X.  We call it to get the effective
 address, then read the byte at that address."
   ;; FUNCALL is needed because MODE is a function passed as a value.
-  (multiple-value-bind (addr xpage?) (funcall mode cpu)
-    (values (cpu-read-byte cpu addr) xpage? addr)))
+  (multiple-value-bind (addr xpage-p) (funcall mode cpu)
+    (values (cpu-read-byte cpu addr) xpage-p addr)))
 
 ;;; --- ADC (Add with Carry) ---
 ;;;
@@ -91,39 +91,37 @@ address, then read the byte at that address."
     (cond
       ;; BCD (decimal) mode
       ((flag-set-p cpu +flag-d+)
-       (let* ((bin (logand (+ a value c) #xFF))   ; binary sum for Z flag
+       (let* ((bin (ldb (byte 8 0) (+ a value c)))  ; binary sum for Z flag
               ;; Low nibble: add the two low nibbles and carry
-              (lo  (+ (logand a #x0F) (logand value #x0F) c))
+              (lo  (+ (ldb (byte 4 0) a) (ldb (byte 4 0) value) c))
               (lo-carry (if (> lo 9) 1 0))         ; decimal carry from low nibble
-              (lo-final (logand (if (> lo 9) (+ lo 6) lo) #x0F))  ; BCD correction
+              (lo-final (ldb (byte 4 0) (if (> lo 9) (+ lo 6) lo)))  ; BCD correction
               ;; High nibble: add the two high nibbles and carry from low
-              (hi  (+ (ash a -4) (ash value -4) lo-carry))
+              (hi  (+ (ldb (byte 4 4) a) (ldb (byte 4 4) value) lo-carry))
               (hi-carry (if (> hi 9) 1 0))
-              (hi-final (logand (if (> hi 9) (+ hi 6) hi) #x0F))
-              (result (logior (ash hi-final 4) lo-final))
+              (hi-final (ldb (byte 4 0) (if (> hi 9) (+ hi 6) hi)))
+              (result (dpb hi-final (byte 4 4) lo-final))
               ;; N and V come from the high nibble's pre-correction sign.
-              (signed-hi (logand (ash (+ (logand a #xF0)
-                                         (logand value #xF0)
-                                         (ash lo-carry 4))
-                                      0)
-                                 #xFF)))
+              (signed-hi (ldb (byte 8 0) (+ (logand a #xF0)
+                                            (logand value #xF0)
+                                            (ash lo-carry 4)))))
          (set-flag-to cpu +flag-z+ (zerop bin))
-         (set-flag-to cpu +flag-n+ (not (zerop (logand signed-hi #x80))))
+         (set-flag-to cpu +flag-n+ (logtest signed-hi #x80))
          (set-flag-to cpu +flag-v+
                       ;; Overflow: operands have same sign, result has different sign
-                      (and (zerop (logand (logxor a value) #x80))
-                           (not (zerop (logand (logxor a signed-hi) #x80)))))
+                      (and (not (logtest (logxor a value) #x80))
+                           (logtest (logxor a signed-hi) #x80)))
          (set-flag-to cpu +flag-c+ (= 1 hi-carry))
          (setf (cpu-a cpu) result)))
       ;; Binary (normal) mode
       (t
        (let* ((sum (+ a value c))
-              (result (logand sum #xFF)))     ; mask to 8 bits
+              (result (ldb (byte 8 0) sum)))  ; wrap to 8 bits
          (set-flag-to cpu +flag-c+ (> sum #xFF))   ; carry if sum > 255
          (set-flag-to cpu +flag-v+
                       ;; Overflow: same-sign operands produce different-sign result
-                      (and (zerop (logand (logxor a value) #x80))
-                           (not (zerop (logand (logxor a result) #x80)))))
+                      (and (not (logtest (logxor a value) #x80))
+                           (logtest (logxor a result) #x80)))
          (update-zn cpu result)
          (setf (cpu-a cpu) result))))))
 
@@ -141,31 +139,30 @@ address, then read the byte at that address."
       ((flag-set-p cpu +flag-d+)
        ;; NMOS BCD subtraction: flags Z/N/V/C are set from the binary
        ;; calculation; only the result digits are decimal-corrected.
-       (let* ((bin (logand (- a value (- 1 c)) #xFFFF))
-              (binary-result (logand bin #xFF)))
-         (set-flag-to cpu +flag-c+ (zerop (logand bin #x100)))
+       (let* ((bin (ldb (byte 16 0) (- a value (- 1 c))))
+              (binary-result (ldb (byte 8 0) bin)))
+         (set-flag-to cpu +flag-c+ (not (logtest bin #x100)))
          (set-flag-to cpu +flag-v+
-                      (and (not (zerop (logand (logxor a value) #x80)))
-                           (not (zerop (logand (logxor a binary-result) #x80)))))
+                      (and (logtest (logxor a value) #x80)
+                           (logtest (logxor a binary-result) #x80)))
          (update-zn cpu binary-result)
          ;; Decimal correction of the result digits
-         (let* ((lo (- (logand a #x0F) (logand value #x0F) (- 1 c)))
+         (let* ((lo (- (ldb (byte 4 0) a) (ldb (byte 4 0) value) (- 1 c)))
                 (hi (- (logand a #xF0) (logand value #xF0)))
                 (lo2 (if (minusp lo) (- lo 6) lo))        ; MINUSP tests < 0
                 (hi2 (if (minusp lo) (- hi #x10) hi))     ; borrow from low nibble
                 (hi3 (if (minusp hi2) (- hi2 #x60) hi2))  ; borrow from high nibble
-                (result (logand (logior (logand lo2 #x0F)
-                                        (logand hi3 #xF0))
-                                #xFF)))
+                (result (ldb (byte 8 0) (logior (ldb (byte 4 0) lo2)
+                                                (logand hi3 #xF0)))))
            (setf (cpu-a cpu) result))))
       ;; Binary (normal) mode
       (t
        (let* ((diff (- a value (- 1 c)))
-              (result (logand diff #xFF)))
+              (result (ldb (byte 8 0) diff)))
          (set-flag-to cpu +flag-c+ (>= diff 0))     ; C=1 if no borrow
          (set-flag-to cpu +flag-v+
-                      (and (not (zerop (logand (logxor a value) #x80)))
-                           (not (zerop (logand (logxor a result) #x80)))))
+                      (and (logtest (logxor a value) #x80)
+                           (logtest (logxor a result) #x80)))
          (update-zn cpu result)
          (setf (cpu-a cpu) result))))))
 
@@ -173,9 +170,9 @@ address, then read the byte at that address."
 
 (defun do-cmp (cpu reg-value mem-value)
   "Compare REG-VALUE with MEM-VALUE: set C if reg >= mem, update Z and N."
-  (let ((diff (- reg-value mem-value)))
-    (set-flag-to cpu +flag-c+ (>= reg-value mem-value))
-    (update-zn cpu (logand diff #xFF))))
+  (set-flag-to cpu +flag-c+ (>= reg-value mem-value))
+  ;; UPDATE-ZN wraps its argument to 8 bits itself.
+  (update-zn cpu (- reg-value mem-value)))
 
 ;;; --- Shifts and rotates ---
 ;;;
@@ -184,25 +181,25 @@ address, then read the byte at that address."
 
 (defun do-asl (value cpu)
   "Arithmetic Shift Left: shift VALUE left by 1, old bit 7 goes to Carry."
-  (let* ((c (not (zerop (logand value #x80))))     ; old bit 7 becomes carry
-         (r (logand (ash value 1) #xFF)))           ; shift left, mask to 8 bits
+  (let* ((c (logtest value #x80))                  ; old bit 7 becomes carry
+         (r (ldb (byte 8 0) (ash value 1))))        ; shift left, wrap to 8 bits
     (set-flag-to cpu +flag-c+ c)
     (update-zn cpu r)
     r))
 
 (defun do-lsr (value cpu)
   "Logical Shift Right: shift VALUE right by 1, old bit 0 goes to Carry."
-  (let* ((c (not (zerop (logand value #x01))))     ; old bit 0 becomes carry
-         (r (logand (ash value -1) #xFF)))          ; shift right, mask to 8 bits
+  (let* ((c (logtest value #x01))                  ; old bit 0 becomes carry
+         (r (ldb (byte 8 0) (ash value -1))))       ; shift right, wrap to 8 bits
     (set-flag-to cpu +flag-c+ c)
     (update-zn cpu r)
     r))
 
 (defun do-rol (value cpu)
   "Rotate Left: shift left, old Carry enters bit 0, old bit 7 exits to Carry."
-  (let* ((cin (if (flag-set-p cpu +flag-c+) 1 0))   ; current carry becomes bit 0
-         (cout (not (zerop (logand value #x80))))   ; old bit 7 becomes new carry
-         (r (logand (logior (ash value 1) cin) #xFF)))
+  (let* ((cin (if (flag-set-p cpu +flag-c+) 1 0))  ; current carry becomes bit 0
+         (cout (logtest value #x80))                ; old bit 7 becomes new carry
+         (r (ldb (byte 8 0) (logior (ash value 1) cin))))
     (set-flag-to cpu +flag-c+ cout)
     (update-zn cpu r)
     r))
@@ -210,8 +207,8 @@ address, then read the byte at that address."
 (defun do-ror (value cpu)
   "Rotate Right: shift right, old Carry enters bit 7, old bit 0 exits to Carry."
   (let* ((cin (if (flag-set-p cpu +flag-c+) #x80 0)) ; current carry becomes bit 7
-         (cout (not (zerop (logand value #x01))))    ; old bit 0 becomes new carry
-         (r (logand (logior (ash value -1) cin) #xFF)))
+         (cout (logtest value #x01))                  ; old bit 0 becomes new carry
+         (r (ldb (byte 8 0) (logior (ash value -1) cin))))
     (set-flag-to cpu +flag-c+ cout)
     (update-zn cpu r)
     r))
@@ -345,12 +342,12 @@ Used by the family macrolets to auto-generate descriptive function names."
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (val xp?) (read-via cpu #',mode)
-                    (declare (ignorable xp?))
+                  (multiple-value-bind (val crossed-p) (read-via cpu #',mode)
+                    (declare (ignorable crossed-p))
                     ;; Set the target register and update Z/N flags
                     (setf (,reg cpu) (update-zn cpu val))
                     ;; Return cycle count, adding 1 if page crossed
-                    (+ ,base ,(if page-cross '(if xp? 1 0) 0)))))))
+                    (+ ,base ,(if page-cross '(if crossed-p 1 0) 0)))))))
   ;; LDA — Load Accumulator (8 addressing modes)
   (load-op "LDA" cpu-a #xA9 addr-immediate         2)
   (load-op "LDA" cpu-a #xA5 addr-zero-page         3)
@@ -448,11 +445,11 @@ Used by the family macrolets to auto-generate descriptive function names."
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (val xp?) (read-via cpu #',mode)
-                    (declare (ignorable xp?))
+                  (multiple-value-bind (val crossed-p) (read-via cpu #',mode)
+                    (declare (ignorable crossed-p))
                     (setf (cpu-a cpu)
                           (update-zn cpu (,reduce (cpu-a cpu) val)))
-                    (+ ,base ,(if page-cross '(if xp? 1 0) 0)))))))
+                    (+ ,base ,(if page-cross '(if crossed-p 1 0) 0)))))))
   ;; AND — bitwise AND with accumulator
   (logical "AND" #x29 addr-immediate         2 logand)
   (logical "AND" #x25 addr-zero-page         3 logand)
@@ -490,9 +487,9 @@ Used by the family macrolets to auto-generate descriptive function names."
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
                   (multiple-value-bind (val) (read-via cpu #',mode)
-                    (set-flag-to cpu +flag-z+ (zerop (logand (cpu-a cpu) val)))
-                    (set-flag-to cpu +flag-n+ (not (zerop (logand val #x80))))
-                    (set-flag-to cpu +flag-v+ (not (zerop (logand val #x40))))
+                    (set-flag-to cpu +flag-z+ (not (logtest (cpu-a cpu) val)))
+                    (set-flag-to cpu +flag-n+ (logtest val #x80))
+                    (set-flag-to cpu +flag-v+ (logtest val #x40))
                     ,base)))))
   (bit-op #x24 addr-zero-page  3)
   (bit-op #x2C addr-absolute   4))
@@ -509,10 +506,10 @@ Used by the family macrolets to auto-generate descriptive function names."
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (val xp?) (read-via cpu #',mode)
-                    (declare (ignorable xp?))
+                  (multiple-value-bind (val crossed-p) (read-via cpu #',mode)
+                    (declare (ignorable crossed-p))
                     (,doer cpu val)
-                    (+ ,base ,(if page-cross '(if xp? 1 0) 0)))))))
+                    (+ ,base ,(if page-cross '(if crossed-p 1 0) 0)))))))
   ;; ADC — Add with Carry
   (arith "ADC" do-adc #x69 addr-immediate         2)
   (arith "ADC" do-adc #x65 addr-zero-page         3)
@@ -544,10 +541,10 @@ Used by the family macrolets to auto-generate descriptive function names."
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (val xp?) (read-via cpu #',mode)
-                    (declare (ignorable xp?))
+                  (multiple-value-bind (val crossed-p) (read-via cpu #',mode)
+                    (declare (ignorable crossed-p))
                     (do-cmp cpu (,reg cpu) val)
-                    (+ ,base ,(if page-cross '(if xp? 1 0) 0)))))))
+                    (+ ,base ,(if page-cross '(if crossed-p 1 0) 0)))))))
   ;; CMP — Compare with Accumulator
   (cmp-op "CMP" cpu-a #xC9 addr-immediate         2)
   (cmp-op "CMP" cpu-a #xC5 addr-zero-page         3)
@@ -580,8 +577,8 @@ Used by the family macrolets to auto-generate descriptive function names."
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
                   (multiple-value-bind (addr) (,mode cpu)
-                    (let ((v (logand (+ (cpu-read-byte cpu addr) ,delta)
-                                     #xFF)))
+                    (let ((v (ldb (byte 8 0)
+                                  (+ (cpu-read-byte cpu addr) ,delta))))
                       (cpu-write-byte cpu addr v)
                       (update-zn cpu v))
                     ,base)))))
@@ -684,7 +681,7 @@ value found there.  Includes the NMOS page-wrap bug (see ADDR-INDIRECT)."
 JSR instruction), then jump to the target address.  RTS will pull this
 address and add 1 to resume after the JSR."
   (let* ((target (read-pc-word cpu))
-         (return-addr (logand (1- (cpu-pc cpu)) #xFFFF)))
+         (return-addr (ldb (byte 16 0) (1- (cpu-pc cpu)))))
     (push-word cpu return-addr)
     (setf (cpu-pc cpu) target))
   6)
@@ -693,7 +690,7 @@ address and add 1 to resume after the JSR."
   "RTS: pull the return address from the stack (pushed by JSR) and add 1
 to get the actual resume address."
   (let ((addr (pull-word cpu)))
-    (setf (cpu-pc cpu) (logand (1+ addr) #xFFFF)))
+    (setf (cpu-pc cpu) (ldb (byte 16 0) (1+ addr))))
   6)
 
 (defopcode #x40 rti (cpu)
@@ -707,7 +704,7 @@ from the stack (in that order — opposite of how the interrupt pushed them)."
   "BRK: software interrupt.  Pushes PC+1 (not PC+2 — the byte after BRK
 is a 'signature' byte that the handler can inspect), pushes status with B=1,
 sets I flag, and vectors through $FFFE (same as IRQ)."
-  (let ((return-pc (logand (1+ (cpu-pc cpu)) #xFFFF)))
+  (let ((return-pc (ldb (byte 16 0) (1+ (cpu-pc cpu)))))
     (push-word cpu return-pc)
     (push-byte cpu (status-byte-for-push cpu :b-flag t))
     (set-flag cpu +flag-i+)

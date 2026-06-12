@@ -108,7 +108,7 @@ Slots:
 When a host INPUT-STATE is attached, TRIG0..3 (offsets 16-19) and CONSOL
 (offset 31) come from live input; everything else from the read-regs array."
   (declare (type gtia gtia) (type (unsigned-byte 16) address))
-  (let ((offset (logand address #x1F))
+  (let ((offset (ldb (byte 5 0) address))
         (input  (gtia-input gtia)))
     (cond
       ((and input (<= +r-trig0+ offset (+ +r-trig0+ 3)))
@@ -131,8 +131,8 @@ PAL, and CONSOL are NOT touched."
   HITCLR (offset $1E) — clears all collision latches on any write."
   (declare (type gtia gtia) (type (unsigned-byte 16) address)
            (type (unsigned-byte 8) value))
-  (let ((offset (logand address #x1F))
-        (v (logand value #xFF)))
+  (let ((offset (ldb (byte 5 0) address))
+        (v (ldb (byte 8 0) value)))
     (setf (aref (gtia-write-regs gtia) offset) v)
     (when (= offset +w-hitclr+)
       (gtia-clear-collisions gtia))))
@@ -173,8 +173,9 @@ Returns (VALUES NIL NIL) for unknown keywords."
 (defun %or-bit (gtia offset bit)
   (declare (type gtia gtia) (type fixnum offset bit))
   (let ((r (gtia-read-regs gtia)))
+    ;; BIT is at most 3 here, so the OR stays within one byte.
     (setf (aref r offset)
-          (logand #xFF (logior (aref r offset) (ash 1 bit))))))
+          (logior (aref r offset) (ash 1 bit)))))
 
 (defun gtia-record-collision (gtia obj-a obj-b)
   "Record a collision between two objects.  Each is one of the keywords

@@ -90,11 +90,11 @@ if the payload exceeds +AESP-MAX-PAYLOAD+."
       (setf (aref buf 0) #xAE
             (aref buf 1) #x50
             (aref buf 2) +aesp-version+
-            (aref buf 3) (logand type #xFF)
-            (aref buf 4) (logand (ash len -24) #xFF)
-            (aref buf 5) (logand (ash len -16) #xFF)
-            (aref buf 6) (logand (ash len -8)  #xFF)
-            (aref buf 7) (logand len           #xFF))
+            (aref buf 3) (ldb (byte 8 0) type)
+            (aref buf 4) (ldb (byte 8 24) len)
+            (aref buf 5) (ldb (byte 8 16) len)
+            (aref buf 6) (ldb (byte 8 8)  len)
+            (aref buf 7) (ldb (byte 8 0)  len))
       (replace buf pl :start1 +aesp-header-size+)
       buf)))
 
@@ -103,7 +103,7 @@ if the payload exceeds +AESP-MAX-PAYLOAD+."
 length).  Signals AESP-PROTOCOL-ERROR on bad magic, version, or oversize."
   (unless (>= (length header) +aesp-header-size+)
     (error 'aesp-protocol-error :reason "short header"))
-  (let ((magic   (logior (ash (elt header 0) 8) (elt header 1)))
+  (let ((magic   (dpb (elt header 0) (byte 8 8) (elt header 1)))
         (version (elt header 2))
         (type    (elt header 3))
         (len     (logior (ash (elt header 4) 24) (ash (elt header 5) 16)
@@ -147,13 +147,13 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
                              :initial-contents bytes))
 
 (defun %u16-be (buf i v)
-  (setf (aref buf i) (logand (ash v -8) #xFF) (aref buf (1+ i)) (logand v #xFF)))
+  (setf (aref buf i) (ldb (byte 8 8) v) (aref buf (1+ i)) (ldb (byte 8 0) v)))
 
 (defun %u32-be (buf i v)
-  (setf (aref buf i)       (logand (ash v -24) #xFF)
-        (aref buf (+ i 1)) (logand (ash v -16) #xFF)
-        (aref buf (+ i 2)) (logand (ash v -8)  #xFF)
-        (aref buf (+ i 3)) (logand v           #xFF)))
+  (setf (aref buf i)       (ldb (byte 8 24) v)
+        (aref buf (+ i 1)) (ldb (byte 8 16) v)
+        (aref buf (+ i 2)) (ldb (byte 8 8)  v)
+        (aref buf (+ i 3)) (ldb (byte 8 0)  v)))
 
 (defun %status-byte (machine)
   "STATUS reply: bit0 running, bit1 cpu-halted."
@@ -192,7 +192,7 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
 
 (defun %apply-joystick (machine payload)
   (when (>= (length payload) 2)
-    (let ((port (logand (aref payload 0) 1))
+    (let ((port (ldb (byte 1 0) (aref payload 0)))
           (bits (aref payload 1)))
       (input-set-joystick (atari-machine-input machine) port
                           :up (logbitp 0 bits) :down (logbitp 1 bits)
@@ -209,7 +209,7 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
 (defun %apply-paddle (machine payload)
   (when (>= (length payload) 2)
     (input-set-paddle (atari-machine-input machine)
-                      (logand (aref payload 0) 3) (aref payload 1))))
+                      (ldb (byte 2 0) (aref payload 0)) (aref payload 1))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Server
