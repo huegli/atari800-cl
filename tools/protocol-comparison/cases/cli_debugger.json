@@ -1,0 +1,70 @@
+[
+  {
+    "id": "cli.debugger.breakpoint_list_empty",
+    "protocol": "cli",
+    "request": { "line": "CMD:breakpoint list" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.debugger.breakpoint_set_and_clear",
+    "protocol": "cli",
+    "steps": [
+      {
+        "request": { "line": "CMD:breakpoint set $E477" },
+        "expectation": { "response": { "status": "OK" } }
+      },
+      {
+        "request": { "line": "CMD:breakpoint list" },
+        "expectation": { "response": { "status": "OK", "contains": "E477" } }
+      },
+      {
+        "request": { "line": "CMD:breakpoint clear $E477" },
+        "expectation": { "response": { "status": "OK" } }
+      }
+    ],
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.debugger.breakpoint_clearall",
+    "protocol": "cli",
+    "request": { "line": "CMD:breakpoint clearall" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.debugger.stepover",
+    "protocol": "cli",
+    "request": { "line": "CMD:stepover" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.debugger.until",
+    "protocol": "cli",
+    "request": { "line": "CMD:until $E480" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  }
+]

@@ -1,0 +1,24 @@
+[
+  {
+    "id": "cli.disk.drives_empty",
+    "protocol": "cli",
+    "request": { "line": "CMD:drives" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.disk.unmount_empty_drive",
+    "protocol": "cli",
+    "request": { "line": "CMD:unmount 1" },
+    "expectation": {
+      "response": { "status": "ERR" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  }
+]

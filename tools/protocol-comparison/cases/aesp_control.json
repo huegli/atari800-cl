@@ -1,0 +1,133 @@
+[
+  {
+    "id": "aesp.control.ping",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "PING", "payload_hex": "" },
+    "expectation": {
+      "response": { "type": "PONG", "payload": { "class": "empty_or_ignored" } },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.control.pause",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "PAUSE", "payload_hex": "" },
+    "expectation": {
+      "response": { "type": "ACK", "payload": { "class": "empty_or_ignored" } },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.control.resume",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "RESUME", "payload_hex": "" },
+    "expectation": {
+      "response": { "type": "ACK", "payload": { "class": "empty_or_ignored" } },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.control.reset_warm",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "RESET", "payload_hex": "00" },
+    "expectation": {
+      "response": { "type": "ACK", "payload": { "class": "empty_or_ignored" } },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.control.reset_cold",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "RESET", "payload_hex": "01" },
+    "expectation": {
+      "response": { "type": "ACK", "payload": { "class": "empty_or_ignored" } },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.control.status",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "STATUS", "payload_hex": "" },
+    "expectation": {
+      "response": {
+        "type": "STATUS",
+        "payload": { "class": "non_empty", "min_length": 1 }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.control.info",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "type": "INFO", "payload_hex": "" },
+    "expectation": {
+      "response": {
+        "type": "INFO",
+        "payload": { "class": "non_empty", "min_length": 1 }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.invalid.bad_magic",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "raw_hex": "0000010000000000" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "type": "ERROR" },
+          { "connection_closed": true }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.invalid.bad_version",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "raw_hex": "ae50ff000000000000" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "type": "ERROR" },
+          { "connection_closed": true }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.invalid.unknown_type",
+    "protocol": "aesp",
+    "channel": "control",
+    "request": { "raw_hex": "ae5001fe00000000" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "type": "ERROR" },
+          { "connection_closed": true }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

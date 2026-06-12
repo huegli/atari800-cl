@@ -1,0 +1,82 @@
+[
+  {
+    "id": "aesp.input.key_down",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "KEY_DOWN", "payload_hex": "413f00" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true,
+        "payload": { "class": "empty_or_ignored" }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.input.key_up",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "KEY_UP", "payload_hex": "" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true,
+        "payload": { "class": "empty_or_ignored" }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.input.joystick",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "JOYSTICK", "payload_hex": "0001" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true,
+        "payload": { "class": "empty_or_ignored" }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.input.console_keys",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "CONSOLE_KEYS", "payload_hex": "01" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true,
+        "payload": { "class": "empty_or_ignored" }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.input.paddle",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "PADDLE", "payload_hex": "017b" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true,
+        "payload": { "class": "empty_or_ignored" }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

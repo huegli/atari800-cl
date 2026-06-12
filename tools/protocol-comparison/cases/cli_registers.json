@@ -1,0 +1,51 @@
+[
+  {
+    "id": "cli.cpu.registers_read",
+    "protocol": "cli",
+    "request": { "line": "CMD:registers" },
+    "expectation": {
+      "response": { "status": "OK", "data_class": "registers" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.cpu.registers_write_then_read",
+    "protocol": "cli",
+    "steps": [
+      {
+        "request": { "line": "CMD:pause" },
+        "expectation": { "response": { "status": "OK" } }
+      },
+      {
+        "request": { "line": "CMD:registers A=$42 X=$10" },
+        "expectation": {
+          "response": {
+            "status": "OK",
+            "data_class": "registers",
+            "semantic": { "registers": { "A": 66, "X": 16 } }
+          }
+        }
+      },
+      {
+        "request": { "line": "CMD:registers" },
+        "expectation": {
+          "response": {
+            "status": "OK",
+            "data_class": "registers",
+            "semantic": { "registers": { "A": 66, "X": 16 } }
+          }
+        }
+      }
+    ],
+    "expectation": {
+      "response": {
+        "status": "OK",
+        "data_class": "registers",
+        "semantic": { "registers": { "A": 66, "X": 16 } }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

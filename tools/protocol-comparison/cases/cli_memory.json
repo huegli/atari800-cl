@@ -1,0 +1,70 @@
+[
+  {
+    "id": "cli.memory.read_zero_page",
+    "protocol": "cli",
+    "request": { "line": "CMD:read $0000 4" },
+    "expectation": {
+      "response": { "status": "OK", "data_class": "memory_dump" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.memory.write_then_read",
+    "protocol": "cli",
+    "steps": [
+      {
+        "request": { "line": "CMD:write $1000 DE,AD,BE,EF" },
+        "expectation": { "response": { "status": "OK" } }
+      },
+      {
+        "request": { "line": "CMD:read $1000 4" },
+        "expectation": {
+          "response": {
+            "status": "OK",
+            "data_class": "memory_dump",
+            "semantic": { "bytes": [222, 173, 190, 239] }
+          }
+        }
+      }
+    ],
+    "expectation": {
+      "response": {
+        "status": "OK",
+        "data_class": "memory_dump",
+        "semantic": { "bytes": [222, 173, 190, 239] }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.memory.fill_then_read",
+    "protocol": "cli",
+    "steps": [
+      {
+        "request": { "line": "CMD:fill $2000 $2003 $AA" },
+        "expectation": { "response": { "status": "OK" } }
+      },
+      {
+        "request": { "line": "CMD:read $2000 4" },
+        "expectation": {
+          "response": {
+            "status": "OK",
+            "data_class": "memory_dump",
+            "semantic": { "bytes": [170, 170, 170, 170] }
+          }
+        }
+      }
+    ],
+    "expectation": {
+      "response": {
+        "status": "OK",
+        "data_class": "memory_dump",
+        "semantic": { "bytes": [170, 170, 170, 170] }
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

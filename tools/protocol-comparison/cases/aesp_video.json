@@ -1,0 +1,35 @@
+[
+  {
+    "id": "aesp.video.subscribe_config",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 2.0,
+    "request": { "type": "VIDEO_SUBSCRIBE", "payload_hex": "00" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "type": "FRAME_CONFIG", "payload": { "min_length": 6 } },
+          { "type": "ACK" },
+          { "no_response": true }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.video.unsubscribe",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "VIDEO_UNSUBSCRIBE", "payload_hex": "" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

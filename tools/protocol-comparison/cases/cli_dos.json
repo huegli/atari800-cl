@@ -1,0 +1,18 @@
+[
+  {
+    "id": "cli.dos.dir_no_disk",
+    "protocol": "cli",
+    "request": { "line": "CMD:dos dir" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "status": "OK" },
+          { "status": "ERR" }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  }
+]

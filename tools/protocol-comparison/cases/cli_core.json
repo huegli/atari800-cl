@@ -1,0 +1,92 @@
+[
+  {
+    "id": "cli.core.ping",
+    "protocol": "cli",
+    "request": { "line": "CMD:ping" },
+    "expectation": {
+      "response": { "status": "OK", "data_class": "pong" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.version",
+    "protocol": "cli",
+    "request": { "line": "CMD:version" },
+    "expectation": {
+      "response": { "status": "OK", "data_class": "version" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.status",
+    "protocol": "cli",
+    "request": { "line": "CMD:status" },
+    "expectation": {
+      "response": { "status": "OK", "data_class": "status" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.pause",
+    "protocol": "cli",
+    "request": { "line": "CMD:pause" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.resume",
+    "protocol": "cli",
+    "request": { "line": "CMD:resume" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.step_default",
+    "protocol": "cli",
+    "request": { "line": "CMD:step" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.step_n",
+    "protocol": "cli",
+    "request": { "line": "CMD:step 3" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.reset_default",
+    "protocol": "cli",
+    "request": { "line": "CMD:reset" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "cli.core.unknown",
+    "protocol": "cli",
+    "request": { "line": "CMD:frobnicate-no-such-verb" },
+    "expectation": {
+      "response": { "status": "ERR" },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

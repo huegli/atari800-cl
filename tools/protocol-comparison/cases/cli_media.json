@@ -1,0 +1,18 @@
+[
+  {
+    "id": "cli.media.screen",
+    "protocol": "cli",
+    "request": { "line": "CMD:screen" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "status": "OK" },
+          { "status": "ERR" }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  }
+]

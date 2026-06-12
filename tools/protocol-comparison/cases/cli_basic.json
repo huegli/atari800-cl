@@ -1,0 +1,35 @@
+[
+  {
+    "id": "cli.basic.list_empty",
+    "protocol": "cli",
+    "request": { "line": "CMD:basic list" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.basic.info",
+    "protocol": "cli",
+    "request": { "line": "CMD:basic info" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  },
+  {
+    "id": "cli.basic.vars_empty",
+    "protocol": "cli",
+    "request": { "line": "CMD:basic vars" },
+    "expectation": {
+      "response": { "status": "OK" },
+      "compare": { "mode": "semantic" },
+      "required": { "attic": true, "atari800-cl": false },
+      "unsupported_policy": { "atari800-cl": "accepted" }
+    }
+  }
+]

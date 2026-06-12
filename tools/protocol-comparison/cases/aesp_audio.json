@@ -1,0 +1,35 @@
+[
+  {
+    "id": "aesp.audio.subscribe_config",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 2.0,
+    "request": { "type": "AUDIO_SUBSCRIBE", "payload_hex": "" },
+    "expectation": {
+      "response": {
+        "one_of": [
+          { "type": "AUDIO_CONFIG", "payload": { "min_length": 6 } },
+          { "type": "ACK" },
+          { "no_response": true }
+        ]
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  },
+  {
+    "id": "aesp.audio.unsubscribe",
+    "protocol": "aesp",
+    "channel": "control",
+    "timeout": 1.5,
+    "request": { "type": "AUDIO_UNSUBSCRIBE", "payload_hex": "" },
+    "expectation": {
+      "response": {
+        "type": "ACK",
+        "accept_no_response": true
+      },
+      "compare": { "mode": "semantic" },
+      "required": { "atari800-cl": true, "attic": true }
+    }
+  }
+]

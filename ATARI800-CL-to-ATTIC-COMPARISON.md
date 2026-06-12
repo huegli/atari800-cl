@@ -820,3 +820,126 @@ Implement Phase 1 of the protocol comparison framework described in ATARI800-CL-
 
 Work in /Users/nikolai/common-lisp/atari800-cl. Do not modify the Attic repository unless explicitly necessary and separately approved. First inspect Attic launch options and atari800-cl server start APIs. If custom ports/socket paths are not supported by atari800-cl, add minimal support for them with tests. Then create tools/protocol-comparison with Python codecs, probes, adapters, Phase 1 cases, JSON/Markdown reporting, and scripts/compare-attic-protocols.sh. Keep normal atari800-cl ASDF tests independent from Attic. Run ./scripts/test-sbcl.sh and the new comparison probe/smoke commands. Report any live-socket limitations as skips/inconclusive rather than failures.
 ```
+
+## Execution results — Phases 1–4 (initial run)
+
+### Run metadata
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-06-11 |
+| Wall-clock duration | ~62 s for 48 cases (≈ 1 m 02 s, excluding the initial `swift build`) |
+| Report directory | `tools/protocol-comparison/reports/20260611-134655/` |
+| atari800-cl commit | `1b86226` (branch `main`) |
+| Attic commit | `dc7dfce` (branch `main`) |
+
+### Host
+
+| Field | Value |
+| --- | --- |
+| Machine | Apple Mac mini, M2 (arm64) |
+| RAM | 8 GB |
+| OS | macOS 26.5.1 (Darwin 25.5.0) |
+| Python | 3.14.5 |
+| Swift | Apple Swift 6.3.2 (swiftlang 6.3.2.1.108, clang 2100.1.1.101) |
+| SBCL | 2.6.5-85913ede1 |
+| LispWorks | 8.1.0 (console image; available but not exercised in this run) |
+
+### Orchestrator
+
+| Field | Value |
+| --- | --- |
+| Tool | Claude Code (Anthropic CLI for Claude) |
+| Model | Claude Opus 4.7 with 1M-token context (`claude-opus-4-7[1m]`) |
+| Mode | Fast mode, `auto` effort, foreground tool calls only |
+
+The orchestrator inspected both codebases, decided no atari800-cl prerequisite
+changes were needed (custom ports and CLI socket path are already supported),
+generated the entire `tools/protocol-comparison/` harness plus
+`scripts/compare-attic-protocols.sh` and the SBCL launcher
+`start-atari800-cl-server.lisp`, wrote 13 Phase 1–4 case files (48 cases), and
+ran the suite end-to-end against both live servers without further human
+interaction. Two real bugs were caught by self-tests and re-runs during
+development: `_recv_exactly` was swallowing socket timeouts as EOF
+(misclassifying Attic no-response as `DISCONNECT`), and the memory-dump
+normalizer was mis-reading the leading word `data` in Attic's reply as the
+hex byte `0xDA`. Both fixes ship in this run's harness.
+
+### Classification counts
+
+| Classification | Count | % of 48 |
+| --- | --- | --- |
+| `pass` | 18 | 38 % |
+| `accepted_difference` | 11 | 23 % |
+| `unsupported` (expected gap, atari800-cl side) | 15 | 31 % |
+| `attic_failure` | 4 | 8 % |
+| `atari800_cl_failure` | 0 | 0 % |
+| `both_failure` | 0 | 0 % |
+| `inconclusive` / `harness_error` | 0 | 0 % |
+
+Process exit code: `1` (one or more required cases failed — all four are
+Attic side).
+
+### Confirmed Attic spec gaps (4)
+
+| Case | Spec section | Attic observed | atari800-cl observed |
+| --- | --- | --- | --- |
+| `aesp.control.info` | AESP §INFO (0x06) — *UTF-8 JSON response required* | `TIMEOUT` (no `.info` case in the TCP `ServerDelegate` switch; only the WebSocket bridge handles INFO) | `INFO` payload: `{"emulator":"atari800-cl","frame":N,"scanline":N,"running":true}` |
+| `aesp.invalid.bad_magic` | AESP §Error Handling — *Invalid magic should yield `ERROR(0x3F)` or close* | `TIMEOUT` (frame silently dropped) | `DISCONNECT` (spec-permitted close) |
+| `aesp.invalid.bad_version` | AESP §Error Handling — *Unsupported version* | `TIMEOUT` | `DISCONNECT` |
+| `aesp.invalid.unknown_type` | AESP §Error Handling — *Unknown message type* | `TIMEOUT` | `ERROR(0x3F)` with code `NotImplemented` |
+
+### Accepted differences (11)
+
+| Case | Difference |
+| --- | --- |
+| `aesp.input.key_down/key_up/joystick/console_keys/paddle` (5) | atari800-cl sends `ACK`; Attic stays silent (spec table lists request only). |
+| `aesp.video.subscribe_config` / `aesp.video.unsubscribe` (2) | atari800-cl returns `FRAME_CONFIG` / `ACK`; Attic stays silent. |
+| `aesp.audio.subscribe_config` / `aesp.audio.unsubscribe` (2) | atari800-cl returns `AUDIO_CONFIG` / `ACK`; Attic stays silent. |
+| `cli.core.step_default` / `cli.core.step_n` (2) | atari800-cl: `OK:stepped N pc=$XXXX`. Attic: `OK:stepped A=$xx X=$xx Y=$xx S=$xx P=$xx PC=$xxxx`. Both satisfy "status=OK". |
+
+### atari800-cl feature gaps reported as `unsupported` (15)
+
+All marked `required: { attic: true, atari800-cl: false }` with
+`unsupported_policy: { atari800-cl: accepted }`. The framework classifies the
+case as `unsupported` rather than `atari800_cl_failure`:
+
+- Debugger (5): `breakpoint set/clear/clearall/list`, `stepover`, `until`.
+- Disk (2): `drives`, `unmount`.
+- DOS (1): `dos dir`.
+- BASIC (3): `basic list`, `basic info`, `basic vars`.
+- CPU-extended (3): `disassemble` (default + address-anchored), `assemble`.
+- Media (1): `screen`.
+
+### Round-trip verification (Phase 2 multi-step)
+
+| Case | Outcome |
+| --- | --- |
+| `cli.memory.read_zero_page` | `pass` — both return 4 bytes from `$0000`. |
+| `cli.memory.write_then_read` | `pass` — `write $1000 DE,AD,BE,EF` + `read $1000 4` yields `[0xDE,0xAD,0xBE,0xEF]` on both. |
+| `cli.memory.fill_then_read` | `pass` — `fill $2000 $2003 $AA` + read yields `[0xAA × 4]` on both. |
+| `cli.cpu.registers_read` | `pass` — both implementations report `A/X/Y/(S\|SP)/P/PC`. |
+| `cli.cpu.registers_write_then_read` | `pass` after a leading `CMD:pause` step — without pausing, Attic's running CPU clobbered `A` between write and re-read. |
+
+### Evidence captured
+
+- Per-case raw request and response bytes (binary or text):
+  `reports/20260611-134655/raw/<case-id>.<implementation>.{request,response}.{bin,txt}`
+  — 192 files total.
+- Per-server stdout and stderr logs: `reports/20260611-134655/logs/`.
+- Normalized records + per-step results: `cases.jsonl`.
+- Human reports: `summary.md`, `summary.json`, `failures.md`,
+  `feature-matrix.md`.
+
+### Acceptance criteria — final status
+
+| Criterion | Status |
+| --- | --- |
+| `scripts/compare-attic-protocols.sh --probe` reports environment capabilities | ✓ |
+| `scripts/compare-attic-protocols.sh --cases smoke` runs both impls when sockets available | ✓ (any `--cases <id,…>` subset works) |
+| Phase 1 AESP and CLI cases produce a report with no harness crashes | ✓ |
+| Unsupported optional features reported as feature gaps, not raw failures | ✓ (15 `unsupported`) |
+| Raw request/response evidence saved for every failed/accepted-difference case | ✓ (saved for **every** case, not just failures) |
+| Reports include both git commits and launch commands | ✓ |
+| Framework supports Attic-only and atari800-cl-only modes | ✓ (`--implementations attic` / `--implementations atari800-cl`) |
+| Default atari800-cl unit test suite remains independent of Attic | ✓ (`asdf:test-system :atari800-cl` and `./scripts/test-sbcl.sh` unchanged) |
