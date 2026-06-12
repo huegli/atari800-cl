@@ -154,13 +154,10 @@ The image is coerced into a typed simple-array for fast reads."
 
 ;;; ---------------------------------------------------------------------------
 ;;; Memory-map dispatch
-
-(declaim (inline %between? %io-page-fn))
-
-(defun %between? (low addr high)
-  "Inclusive 16-bit range test."
-  (declare (type u16 low addr high))
-  (and (<= low addr) (<= addr high)))
+;;;
+;;; CL comparison operators take any number of arguments, so the
+;;; inclusive range test "is ADDRESS within [LOW, HIGH]?" is spelled
+;;; directly as (<= LOW ADDRESS HIGH) — no helper needed.
 
 (defun bus-read (bus address)
   "Read one byte from ADDRESS, dispatching through the memory map.
@@ -177,22 +174,22 @@ Lookup order — first match wins:
     (cond
       ((and mmu (bus-os-rom bus)
             (selftest-mapped-p mmu)
-            (%between? +selftest-base+ address +selftest-end+))
+            (<= +selftest-base+ address +selftest-end+))
        (%byte-at (bus-os-rom bus)
                  (+ +selftest-os-offset+ (- address +selftest-base+))))
       ((and mmu (bus-basic-rom bus)
             (basic-rom-mapped-p mmu)
-            (%between? +basic-rom-base+ address +basic-rom-end+))
+            (<= +basic-rom-base+ address +basic-rom-end+))
        (%byte-at (bus-basic-rom bus) (- address +basic-rom-base+)))
       ((and mmu (bus-os-rom bus)
             (os-rom-mapped-p mmu)
-            (%between? +os-rom-low-base+ address +os-rom-low-end+))
+            (<= +os-rom-low-base+ address +os-rom-low-end+))
        (%byte-at (bus-os-rom bus) (- address +os-rom-low-base+)))
-      ((%between? +io-base+ address +io-end+)
+      ((<= +io-base+ address +io-end+)
        (io-read bus address))
       ((and mmu (bus-os-rom bus)
             (os-rom-mapped-p mmu)
-            (%between? +os-rom-high-base+ address +os-rom-high-end+))
+            (<= +os-rom-high-base+ address +os-rom-high-end+))
        (%byte-at (bus-os-rom bus) (- address +os-rom-low-base+)))
       (t (aref (bus-ram bus) address)))))
 
@@ -202,7 +199,7 @@ through the chip dispatch closures; everything else (including the
 RAM under any currently-mapped ROM) lands in the 64K RAM array."
   (declare (type bus bus) (type u16 address) (type u8 value))
   (cond
-    ((%between? +io-base+ address +io-end+)
+    ((<= +io-base+ address +io-end+)
      (io-write bus address (logand value #xFF)))
     (t
      (setf (aref (bus-ram bus) address) (logand value #xFF)))))

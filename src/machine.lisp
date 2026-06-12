@@ -222,7 +222,7 @@ Keys: :PORTB :OS-ROM-MAPPED :BASIC-ROM-MAPPED :SELFTEST-MAPPED."
   (let ((cpu (atari-machine-cpu machine)))
     (list :irq-pending  (cpu-pending-irq cpu)
           :nmi-pending  (cpu-pending-nmi cpu)
-          :i-flag-masked (flag-set? cpu +flag-i+))))
+          :i-flag-masked (flag-set-p cpu +flag-i+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Frame scheduler

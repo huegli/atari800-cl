@@ -266,7 +266,7 @@ ARR's decimal-mode flag behaviour is NOT emulated (atari800-cl does not
 exercise BCD via this opcode)."
   (multiple-value-bind (val) (read-via cpu #'addr-immediate)
     (let* ((tmp (logand (cpu-a cpu) val))
-           (cin (if (flag-set? cpu +flag-c+) #x80 0))
+           (cin (if (flag-set-p cpu +flag-c+) #x80 0))
            (r   (logand (logior (ash tmp -1) cin) #xFF)))
       (setf (cpu-a cpu) r)
       (set-flag-to cpu +flag-z+ (zerop r))

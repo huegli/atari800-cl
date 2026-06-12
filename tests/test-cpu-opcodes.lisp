@@ -120,10 +120,10 @@ Expands to a MULTIPLE-VALUE-BIND form."
     (declare (ignore ram))
     (setf (cpu-flags cpu) 0)                    ; clear all flags
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-c+)
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test status-pack-unpack
   "Pushed status: U=1 always; B=1 on PHP/BRK, B=0 on IRQ/NMI.
@@ -205,7 +205,7 @@ Pulled status forces U=1, B=0 in the in-register copy."
         (is (not (zerop (logand pushed-status atari800-cl.cpu:+flag-b+))))
         (is (not (zerop (logand pushed-status atari800-cl.cpu:+flag-u+)))))
       ;; I flag should be set after BRK (interrupts disabled).
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+)))))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-i+)))))
 
 (test rti-restores-status-and-pc
   "RTI pulls status (B forced 0, U forced 1) then PC."
@@ -241,7 +241,7 @@ Pulled status forces U=1, B=0 in the in-register copy."
       ;; Pushed status has B=0 (hardware interrupt, not BRK).
       (is (zerop (logand (aref ram #x01FB) atari800-cl.cpu:+flag-b+)))
       ;; I flag set after servicing NMI.
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+)))))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-i+)))))
 
 (test irq-respects-interrupt-disable
   "If I=1, an asserted IRQ line is ignored."
@@ -268,7 +268,7 @@ Pulled status forces U=1, B=0 in the in-register copy."
       (is (= 7 cycles))
       (is (= #xA000 (cpu-pc cpu)))
       ;; I flag set after servicing IRQ.
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-i+))
       ;; Pushed status has B=0 (hardware interrupt).
       (is (zerop (logand (aref ram #x01FB) atari800-cl.cpu:+flag-b+))))))
 
@@ -282,8 +282,8 @@ Pulled status forces U=1, B=0 in the in-register copy."
     (let ((cycles (step-cpu cpu)))
       (is (= 2 cycles))                           ; immediate mode: 2 cycles
       (is (= #x80 (cpu-a cpu)))
-      (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+)))))
+      (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+)))))
 
 (test lda-absolute-x-page-cross-adds-cycle
   "LDA $00FF,X with X=1 crosses a page: 4+1 = 5 cycles."
@@ -422,9 +422,9 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-d+)  ; binary mode
     (step-cpu cpu)
     (is (= #xA0 (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-v+))   ; overflow
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))   ; negative
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+)))) ; no carry
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-v+))   ; overflow
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))   ; negative
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+)))) ; no carry
 
 (test adc-binary-carry
   "ADC: $FF + $01 = $00 with carry out."
@@ -435,8 +435,8 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-d+)
     (step-cpu cpu)
     (is (= #x00 (cpu-a cpu)))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))  ; carry
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+)))) ; zero
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))  ; carry
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+)))) ; zero
 
 (test adc-decimal-mode
   "BCD: $25 + $48 (no carry-in) = $73."
@@ -447,7 +447,7 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:set-flag   cpu atari800-cl.cpu:+flag-d+)  ; decimal mode
     (step-cpu cpu)
     (is (= #x73 (cpu-a cpu)))         ; 25 + 48 = 73 in BCD
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test adc-decimal-mode-with-carry
   "BCD: $58 + $46 + 1 carry = $05 with carry out (105 in decimal)."
@@ -458,7 +458,7 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-d+)    ; decimal mode
     (step-cpu cpu)
     (is (= #x05 (cpu-a cpu)))         ; 58 + 46 + 1 = 105 → $05 with carry
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test sbc-binary
   "SBC #$01 from $40 with carry set = $3F, carry stays set (no borrow)."
@@ -469,7 +469,7 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-d+)  ; binary mode
     (step-cpu cpu)
     (is (= #x3F (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test sbc-decimal-mode
   "BCD: $46 - $12 (carry set, no borrow) = $34."
@@ -480,7 +480,7 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-d+)
     (step-cpu cpu)
     (is (= #x34 (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test sbc-decimal-borrow
   "BCD: $05 - $12 with carry set = $93 with borrow (carry cleared)."
@@ -491,7 +491,7 @@ This is a well-known hardware bug in the original NMOS 6502."
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-d+)
     (step-cpu cpu)
     (is (= #x93 (cpu-a cpu)))         ; BCD underflow
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Misc opcode behavior
@@ -520,7 +520,7 @@ This is a well-known hardware bug in the original NMOS 6502."
     (setf (aref ram #x10) #x7F)       ; $7F + 1 = $80 (sets N)
     (is (= 5 (step-cpu cpu)))
     (is (= #x80 (aref ram #x10)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 (test bit-sets-n-and-v-from-memory
   "BIT $05 with mem=$C0 and A=$01: Z=1, N=1 (bit7), V=1 (bit6).
@@ -530,9 +530,9 @@ memory value's bits 7 and 6 directly."
     (setf (aref ram #x05) #xC0        ; bits 7 and 6 set
           (cpu-a cpu) #x01)            ; A AND $C0 = 0, so Z=1
     (step-cpu cpu)
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-v+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-v+))))
 
 (test asl-accumulator-flags
   "ASL A on $80 -> $00 with C=1, Z=1."
@@ -542,8 +542,8 @@ memory value's bits 7 and 6 directly."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
     (is (= 2 (step-cpu cpu)))
     (is (= #x00 (cpu-a cpu)))          ; $80 shifted left = $00
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test php-plp-roundtrip
   "PHP pushes status with B=1, U=1; PLP clears B and forces U=1."
@@ -565,8 +565,8 @@ memory value's bits 7 and 6 directly."
     (declare (ignore ram))
     (setf (cpu-a cpu) #x10)
     (step-cpu cpu)
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Per-family coverage — at least one variant of each opcode family.
@@ -577,7 +577,7 @@ memory value's bits 7 and 6 directly."
     (declare (ignore ram))
     (step-cpu cpu)
     (is (= #x00 (cpu-x cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test ldy-immediate-sets-flags
   "LDY #$7F: loads $7F into Y, N=0 (bit 7 clear)."
@@ -585,7 +585,7 @@ memory value's bits 7 and 6 directly."
     (declare (ignore ram))
     (step-cpu cpu)
     (is (= #x7F (cpu-y cpu)))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 (test stx-zero-page
   "STX $10: stores X register to zero-page address $10."
@@ -608,7 +608,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-a cpu) #xF0)
     (step-cpu cpu)
     (is (= 0 (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test ora-immediate
   "ORA #$0F: $F0 OR $0F = $FF."
@@ -634,8 +634,8 @@ memory value's bits 7 and 6 directly."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
     (step-cpu cpu)
     (is (= #x00 (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test rol-accumulator
   "ROL A on $80 with C=0 -> $00, C=1."
@@ -645,7 +645,7 @@ memory value's bits 7 and 6 directly."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
     (step-cpu cpu)
     (is (= #x00 (cpu-a cpu)))          ; $80 rotated left with C=0 in → $00
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test ror-accumulator
   "ROR A on $01 with C=0 -> $00, C=1."
@@ -655,7 +655,7 @@ memory value's bits 7 and 6 directly."
     (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)
     (step-cpu cpu)
     (is (= #x00 (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 (test dec-memory
   "DEC $20: decrements $01 to $00, Z=1."
@@ -663,7 +663,7 @@ memory value's bits 7 and 6 directly."
     (setf (aref ram #x20) #x01)
     (step-cpu cpu)
     (is (= #x00 (aref ram #x20)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test inx-wraps-and-sets-zero
   "INX: $FF + 1 wraps to $00, Z=1."
@@ -672,7 +672,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-x cpu) #xFF)
     (step-cpu cpu)
     (is (= 0 (cpu-x cpu)))            ; wraps to 0
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test iny-sets-negative
   "INY: $7F + 1 = $80, N=1 (sign bit set)."
@@ -681,7 +681,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-y cpu) #x7F)
     (step-cpu cpu)
     (is (= #x80 (cpu-y cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 (test dex-wraps
   "DEX: 0 - 1 wraps to $FF, N=1."
@@ -690,7 +690,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-x cpu) 0)
     (step-cpu cpu)
     (is (= #xFF (cpu-x cpu)))         ; wraps to $FF
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 (test dey-flags
   "DEY: 1 - 1 = 0, Z=1."
@@ -699,7 +699,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-y cpu) 1)
     (step-cpu cpu)
     (is (= 0 (cpu-y cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test tax-copies-and-flags
   "TAX: copies A to X, sets N from the value."
@@ -708,7 +708,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-a cpu) #x80 (cpu-x cpu) 0)
     (step-cpu cpu)
     (is (= #x80 (cpu-x cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 (test tay-copies
   "TAY: copies A to Y."
@@ -733,7 +733,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-y cpu) #xAA)
     (step-cpu cpu)
     (is (= #xAA (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 (test txs-no-flag-update
   "TXS copies X into SP without touching flags."
@@ -752,7 +752,7 @@ memory value's bits 7 and 6 directly."
     (setf (cpu-sp cpu) #x00)
     (step-cpu cpu)
     (is (= #x00 (cpu-x cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test pha-pla-roundtrip
   "PHA pushes A; PLA pulls it back (even after A changes in between)."
@@ -772,8 +772,8 @@ memory value's bits 7 and 6 directly."
     (declare (ignore ram))
     (setf (cpu-x cpu) #x05)
     (step-cpu cpu)
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))))
 
 (test cpy-immediate-less-than
   "CPY #$10 with Y=$05: C=0 (Y < operand)."
@@ -781,7 +781,7 @@ memory value's bits 7 and 6 directly."
     (declare (ignore ram))
     (setf (cpu-y cpu) #x05)
     (step-cpu cpu)
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 ;;; --- Branch instruction variants ---
 
@@ -854,21 +854,21 @@ memory value's bits 7 and 6 directly."
     (declare (ignore ram))
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-c+)
     (step-cpu cpu)            ; CLC — clear carry
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
     (step-cpu cpu)            ; SEC — set carry
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-i+)
     (step-cpu cpu)            ; CLI — clear interrupt disable
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-i+))
     (step-cpu cpu)            ; SEI — set interrupt disable
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-i+))
     (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-v+)
     (step-cpu cpu)            ; CLV — clear overflow
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-v+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-v+))
     (step-cpu cpu)            ; CLD — clear decimal mode
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-d+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-d+))
     (step-cpu cpu)            ; SED — set decimal mode
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-d+))))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-d+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Sanity-check that opcode dispatch wire-up is consistent

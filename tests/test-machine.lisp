@@ -125,7 +125,7 @@ serviced (PC jumps to the NMI vector, pending-nmi clears)."
     (setf (cpu-pending-irq cpu) t)
     (atari800-cl.machine:machine-run-frame m)
     ;; service-irq sets the I flag to disable further IRQs.
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-i+)
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-i+)
              "service-irq must set the I flag to mask further IRQs")))
 
 ;;; ---------------------------------------------------------------------------

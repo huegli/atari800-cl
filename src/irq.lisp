@@ -31,6 +31,6 @@ The IRQ line is level-sensitive — the caller (the chip that asserted
 it) is responsible for clearing CPU-PENDING-IRQ when its own latch is
 acknowledged, otherwise the next tick re-services it immediately."
   (when (and (cpu-pending-irq cpu)
-             (not (flag-set? cpu +flag-i+)))
+             (not (flag-set-p cpu +flag-i+)))
     (service-irq cpu)
     t))

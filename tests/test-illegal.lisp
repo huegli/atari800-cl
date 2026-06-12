@@ -65,12 +65,12 @@
       ;; ASL of #b10000001 = #b00000010 (bit 0 was 1, bit 7 was 1).
       (is (= #b00000010 (aref ram #x10)))
       ;; Carry must reflect old bit 7.
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
       ;; A = #x10 OR #x02 = #x12
       (is (= #x12 (cpu-a cpu)))
       ;; Z=0, N=0 from final A
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+)))))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; RLA  (ROL then AND)
@@ -87,12 +87,12 @@
       (is (= 5 cycles))
       ;; ROL #x55 with C=1 in: #b10101011 = #xAB; bit-7-out = 0 → carry cleared.
       (is (= #xAB (aref ram #x20)))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
       ;; AND: #xAA AND #xAB = #xAA
       (is (= #xAA (cpu-a cpu)))
       ;; N=1 (high bit of AA), Z=0
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+)))))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; SRE  (LSR then EOR)
@@ -107,7 +107,7 @@
       (is (= 5 cycles))
       ;; LSR of #b00000011 = #b00000001
       (is (= #x01 (aref ram #x30)))
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
       ;; A = #xF0 XOR #x01 = #xF1
       (is (= #xF1 (cpu-a cpu))))))
 
@@ -126,7 +126,7 @@
       (is (= #x01 (aref ram #x40)))
       ;; ADC: A = #x10 + #x01 + C(=0) = #x11
       (is (= #x11 (cpu-a cpu)))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+)))))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; DCP  (DEC then CMP)
@@ -142,9 +142,9 @@
       ;; Memory decremented to #x04.
       (is (= #x04 (aref ram #x50)))
       ;; CMP A=#x04 against M=#x04 → Z=1, C=1, N=0.
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))
       ;; A is unchanged by CMP.
       (is (= #x04 (cpu-a cpu))))))
 
@@ -166,7 +166,7 @@
       ;; SBC: A = #x20 - #x0A - 0 = #x16
       (is (= #x16 (cpu-a cpu)))
       ;; C should remain set (no borrow occurred).
-      (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+)))))
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; LAX  (LDA + LDX)
@@ -181,8 +181,8 @@
       (is (= #x80 (cpu-a cpu)))
       (is (= #x80 (cpu-x cpu)))
       ;; #x80 sets N, not Z.
-      (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))
-      (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+)))))
+      (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+)))))
 
 (test lax-imm-loads-immediate-into-a-and-x
   "LAX #imm — unstable, but our canonical implementation sets A = X = imm."
@@ -223,9 +223,9 @@
           (cpu-flags cpu) #x24)
     (step-cpu cpu)
     (is (= #xF0 (cpu-a cpu)))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+)))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+)))
   ;; Case 2: zero result → Z=1, C=0.
   (with-cpu (cpu ram :program (list #x2B #x00))
     (declare (ignore ram))
@@ -233,8 +233,8 @@
           (cpu-flags cpu) #x24)
     (step-cpu cpu)
     (is (= 0 (cpu-a cpu)))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ALR  — A = A AND imm, then A = LSR A.
@@ -248,9 +248,9 @@
     (step-cpu cpu)
     ;; AND: #xFF AND #x03 = #x03; LSR → #x01, C = old bit 0 = 1.
     (is (= #x01 (cpu-a cpu)))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ARR  — A = A AND imm, then A = ROR A with carry-in.
@@ -271,8 +271,8 @@
           (cpu-flags cpu) #x24)
     (step-cpu cpu)
     (is (= #x7F (cpu-a cpu)))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-v+)))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-v+)))
   ;; A=#xFF, imm=#x80, C=0 in.  AND → #x80, ROR → #x40.
   ;; Bit 6 of #x40 = 1, bit 5 = 0 → C=1, V=1.
   (with-cpu (cpu ram :program (list #x6B #x80))
@@ -281,8 +281,8 @@
           (cpu-flags cpu) #x24)
     (step-cpu cpu)
     (is (= #x40 (cpu-a cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-v+))))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-v+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; AXS / SBX  — X = (A AND X) - imm.  C = 1 if (A AND X) >= imm.
@@ -297,9 +297,9 @@
     (step-cpu cpu)
     ;; #x07 - #x03 = #x04, no borrow → C=1.
     (is (= #x04 (cpu-x cpu)))
-    (is-true (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-z+))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+)))
+    (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+)))
   ;; Borrow case: imm > A AND X.
   (with-cpu (cpu ram :program (list #xCB #x20))
     (declare (ignore ram))
@@ -309,8 +309,8 @@
     (step-cpu cpu)
     ;; #x05 - #x20 = #xE5 (wraps), borrow → C=0, N=1.
     (is (= #xE5 (cpu-x cpu)))
-    (is-false (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-c+))
-    (is-true  (atari800-cl.cpu:flag-set? cpu atari800-cl.cpu:+flag-n+))))
+    (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+    (is-true  (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-n+))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; KIL / JAM / STP — unrecoverable halt.

@@ -167,9 +167,9 @@ the details of the memory implementation."
 ;;; These small functions manipulate individual flag bits in the CPU's
 ;;; FLAGS register using bitwise operations.
 
-(declaim (inline flag-set? set-flag clear-flag set-flag-to))
+(declaim (inline flag-set-p set-flag clear-flag set-flag-to))
 
-(defun flag-set? (cpu mask)
+(defun flag-set-p (cpu mask)
   "Return T if the flag bit(s) in MASK are set in the CPU's flags register."
   (declare (type cpu cpu) (type u8 mask))
   ;; LOGAND extracts the bit; ZEROP tests if it's zero; NOT inverts.
@@ -334,9 +334,9 @@ two-argument call shape matches the original scaffold API."
 ;;;
 ;;; The VALUES form returns multiple values.  Callers receive them with
 ;;; MULTIPLE-VALUE-BIND:
-;;;   (multiple-value-bind (addr page-crossed?) (addr-absolute-x cpu) ...)
+;;;   (multiple-value-bind (addr page-crossed-p) (addr-absolute-x cpu) ...)
 
-(declaim (inline read-pc-byte read-pc-word page-crossed?))
+(declaim (inline read-pc-byte read-pc-word page-crossed-p))
 
 (defun read-pc-byte (cpu)
   "Fetch the byte at PC and advance PC by one."
@@ -352,13 +352,13 @@ two-argument call shape matches the original scaffold API."
         (hi (read-pc-byte cpu)))
     (logior lo (ash hi 8))))
 
-(defun page-crossed? (base offset-addr)
+(defun page-crossed-p (base offset-addr)
   "Return T if BASE and OFFSET-ADDR are on different 256-byte pages.
 A page boundary cross adds an extra cycle on certain 6502 instructions."
   (/= (logand base #xFF00) (logand offset-addr #xFF00)))
 
 ;;; --- Addressing modes ---
-;;; Each returns (VALUES effective-address page-crossed?).
+;;; Each returns (VALUES effective-address page-crossed-p).
 
 (defun addr-immediate (cpu)
   "Immediate: the operand IS the byte at PC."
@@ -386,13 +386,13 @@ A page boundary cross adds an extra cycle on certain 6502 instructions."
   "Absolute,X: 16-bit base + X register.  Reports page cross."
   (let* ((base (read-pc-word cpu))
          (addr (logand (+ base (cpu-x cpu)) #xFFFF)))
-    (values addr (page-crossed? base addr))))
+    (values addr (page-crossed-p base addr))))
 
 (defun addr-absolute-y (cpu)
   "Absolute,Y: 16-bit base + Y register.  Reports page cross."
   (let* ((base (read-pc-word cpu))
          (addr (logand (+ base (cpu-y cpu)) #xFFFF)))
-    (values addr (page-crossed? base addr))))
+    (values addr (page-crossed-p base addr))))
 
 (defun addr-indirect (cpu)
   "JMP indirect: read a 16-bit pointer, then fetch the target from that address.
@@ -425,7 +425,7 @@ then add Y to get the effective address.  Reports page cross."
          (hi   (cpu-read-byte cpu (logand (1+ zp) #xFF)))
          (base (logior lo (ash hi 8)))
          (addr (logand (+ base (cpu-y cpu)) #xFFFF)))
-    (values addr (page-crossed? base addr))))
+    (values addr (page-crossed-p base addr))))
 
 (defun addr-relative (cpu)
   "Relative: used by branch instructions.  The operand is a signed 8-bit
@@ -464,17 +464,17 @@ byte has been consumed)."
 Each element is either NIL (illegal opcode) or a function of one
 argument (CPU) that returns the number of cycles consumed.")
 
-(defun step-cpu (cpu &optional memory)
+(defun step-cpu (cpu)
   "Execute one instruction, returning the number of cycles consumed.
 Services pending NMI/IRQ before fetching the next opcode.
+
+The CPU's bus hooks must already be wired — either by the machine
+constructor, or via ATTACH-MEMORY-BUS / RESET-CPU for a bare CPU.
 
 Interrupt priority: NMI first (it's non-maskable), then IRQ (only if
 the I flag is clear).  If neither is pending, fetch and execute the
 next opcode from the dispatch table."
   (declare (type cpu cpu))
-  ;; Lazily wire the bus if a MEMORY was passed but the bus isn't connected yet.
-  (when (and memory (null (cpu-bus-read cpu)))
-    (attach-memory-bus cpu memory))
   ;; COND evaluates each test in order; the first true branch executes.
   (cond
     ;; NMI has highest priority (non-maskable).
@@ -482,7 +482,7 @@ next opcode from the dispatch table."
      (service-nmi cpu)
      7)
     ;; IRQ fires only when the I (interrupt disable) flag is clear.
-    ((and (cpu-pending-irq cpu) (not (flag-set? cpu +flag-i+)))
+    ((and (cpu-pending-irq cpu) (not (flag-set-p cpu +flag-i+)))
      (service-irq cpu)
      7)
     ;; Normal instruction execution.
@@ -503,19 +503,16 @@ next opcode from the dispatch table."
          (incf (cpu-cycles cpu) cycles)
          cycles)))))
 
-(defun run-cpu (cpu &optional memory &key (cycles 0))
+(defun run-cpu (cpu &key (cycles 0))
   "Run the CPU.
 
 If CYCLES is 0, execute exactly one instruction and return its cycle
 count.  Otherwise run until at least CYCLES cycles have elapsed since
 this call began, returning the total cycles executed during the call.
 
-Note: this function mixes &OPTIONAL and &KEY parameters.  This is legal
-CL but unusual.  Callers should write either (RUN-CPU cpu mem :cycles 100)
-or (RUN-CPU cpu :cycles 100) when MEMORY was previously attached."
+Like STEP-CPU, this expects the bus hooks to be wired already (see
+ATTACH-MEMORY-BUS / RESET-CPU)."
   (declare (type cpu cpu))
-  (when (and memory (null (cpu-bus-read cpu)))
-    (attach-memory-bus cpu memory))
   (if (zerop cycles)
       (step-cpu cpu)
       ;; LOOP WHILE ... DO ... is CL's structured while-loop.

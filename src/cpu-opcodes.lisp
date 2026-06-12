@@ -37,7 +37,7 @@
 ;;;;
 ;;;; MULTIPLE-VALUE-BIND receives multiple return values from a function.
 ;;;; For example, the addressing-mode functions return two values
-;;;; (address, page-crossed?), and we bind both with:
+;;;; (address, page-crossed-p), and we bind both with:
 ;;;;   (multiple-value-bind (addr xpage?) (addr-absolute-x cpu) ...)
 ;;;;
 ;;;; (DECLARE (IGNORABLE XP?)) tells the compiler not to warn if XP?
@@ -87,10 +87,10 @@ address, then read the byte at that address."
 (defun do-adc (cpu value)
   "Perform ADC: A = A + VALUE + Carry.  Updates A, C, Z, N, V flags."
   (let* ((a (cpu-a cpu))
-         (c (if (flag-set? cpu +flag-c+) 1 0)))
+         (c (if (flag-set-p cpu +flag-c+) 1 0)))
     (cond
       ;; BCD (decimal) mode
-      ((flag-set? cpu +flag-d+)
+      ((flag-set-p cpu +flag-d+)
        (let* ((bin (logand (+ a value c) #xFF))   ; binary sum for Z flag
               ;; Low nibble: add the two low nibbles and carry
               (lo  (+ (logand a #x0F) (logand value #x0F) c))
@@ -135,10 +135,10 @@ address, then read the byte at that address."
 (defun do-sbc (cpu value)
   "Perform SBC: A = A - VALUE - (1 - Carry).  Updates A, C, Z, N, V flags."
   (let* ((a (cpu-a cpu))
-         (c (if (flag-set? cpu +flag-c+) 1 0)))
+         (c (if (flag-set-p cpu +flag-c+) 1 0)))
     (cond
       ;; BCD (decimal) mode
-      ((flag-set? cpu +flag-d+)
+      ((flag-set-p cpu +flag-d+)
        ;; NMOS BCD subtraction: flags Z/N/V/C are set from the binary
        ;; calculation; only the result digits are decimal-corrected.
        (let* ((bin (logand (- a value (- 1 c)) #xFFFF))
@@ -200,7 +200,7 @@ address, then read the byte at that address."
 
 (defun do-rol (value cpu)
   "Rotate Left: shift left, old Carry enters bit 0, old bit 7 exits to Carry."
-  (let* ((cin (if (flag-set? cpu +flag-c+) 1 0))   ; current carry becomes bit 0
+  (let* ((cin (if (flag-set-p cpu +flag-c+) 1 0))   ; current carry becomes bit 0
          (cout (not (zerop (logand value #x80))))   ; old bit 7 becomes new carry
          (r (logand (logior (ash value 1) cin) #xFF)))
     (set-flag-to cpu +flag-c+ cout)
@@ -209,7 +209,7 @@ address, then read the byte at that address."
 
 (defun do-ror (value cpu)
   "Rotate Right: shift right, old Carry enters bit 7, old bit 0 exits to Carry."
-  (let* ((cin (if (flag-set? cpu +flag-c+) #x80 0)) ; current carry becomes bit 7
+  (let* ((cin (if (flag-set-p cpu +flag-c+) #x80 0)) ; current carry becomes bit 7
          (cout (not (zerop (logand value #x01))))    ; old bit 0 becomes new carry
          (r (logand (logior (ash value -1) cin) #xFF)))
     (set-flag-to cpu +flag-c+ cout)
@@ -234,7 +234,7 @@ by ADDR-RELATIVE).  Returns the number of cycles consumed."
       (t
        (let* ((before (cpu-pc cpu))
               ;; 2 (base) + 1 (taken) + 1 if page crossed
-              (cycles (+ 2 1 (if (page-crossed? before target) 1 0))))
+              (cycles (+ 2 1 (if (page-crossed-p before target) 1 0))))
          (setf (cpu-pc cpu) target)
          cycles)))))
 
@@ -653,14 +653,14 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;; Each branch tests one flag.  If the condition is true, the CPU branches
 ;;; to a relative offset from PC.  All branch instructions are 2 bytes.
 
-(defopcode #x10 bpl (cpu) (do-branch cpu (not (flag-set? cpu +flag-n+))))  ; Branch if Positive (N=0)
-(defopcode #x30 bmi (cpu) (do-branch cpu (flag-set? cpu +flag-n+)))        ; Branch if Minus (N=1)
-(defopcode #x50 bvc (cpu) (do-branch cpu (not (flag-set? cpu +flag-v+))))  ; Branch if Overflow Clear
-(defopcode #x70 bvs (cpu) (do-branch cpu (flag-set? cpu +flag-v+)))        ; Branch if Overflow Set
-(defopcode #x90 bcc (cpu) (do-branch cpu (not (flag-set? cpu +flag-c+))))  ; Branch if Carry Clear
-(defopcode #xB0 bcs (cpu) (do-branch cpu (flag-set? cpu +flag-c+)))        ; Branch if Carry Set
-(defopcode #xD0 bne (cpu) (do-branch cpu (not (flag-set? cpu +flag-z+))))  ; Branch if Not Equal (Z=0)
-(defopcode #xF0 beq (cpu) (do-branch cpu (flag-set? cpu +flag-z+)))        ; Branch if Equal (Z=1)
+(defopcode #x10 bpl (cpu) (do-branch cpu (not (flag-set-p cpu +flag-n+))))  ; Branch if Positive (N=0)
+(defopcode #x30 bmi (cpu) (do-branch cpu (flag-set-p cpu +flag-n+)))        ; Branch if Minus (N=1)
+(defopcode #x50 bvc (cpu) (do-branch cpu (not (flag-set-p cpu +flag-v+))))  ; Branch if Overflow Clear
+(defopcode #x70 bvs (cpu) (do-branch cpu (flag-set-p cpu +flag-v+)))        ; Branch if Overflow Set
+(defopcode #x90 bcc (cpu) (do-branch cpu (not (flag-set-p cpu +flag-c+))))  ; Branch if Carry Clear
+(defopcode #xB0 bcs (cpu) (do-branch cpu (flag-set-p cpu +flag-c+)))        ; Branch if Carry Set
+(defopcode #xD0 bne (cpu) (do-branch cpu (not (flag-set-p cpu +flag-z+))))  ; Branch if Not Equal (Z=0)
+(defopcode #xF0 beq (cpu) (do-branch cpu (flag-set-p cpu +flag-z+)))        ; Branch if Equal (Z=1)
 
 ;;; ===========================================================================
 ;;; Jumps and subroutines

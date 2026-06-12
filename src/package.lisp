@@ -161,7 +161,7 @@
            #:attach-memory-bus
            #:trigger-nmi
            #:set-irq-line
-           #:flag-set?
+           #:flag-set-p
            #:set-flag
            #:clear-flag
            #:set-flag-to

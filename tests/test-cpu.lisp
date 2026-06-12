@@ -45,11 +45,11 @@
   "STEP-CPU should make forward progress on the cycle counter."
   (let ((cpu (make-cpu))
         (mem (make-memory)))
-    (reset-cpu cpu mem)
+    (reset-cpu cpu mem)                ; also wires the bus hooks
     ;; Memory is all zeros, so the first opcode is $00 (BRK), which
     ;; consumes 7 cycles.  We just check that cycles increased.
     (let ((before (cpu-cycles cpu)))
-      (step-cpu cpu mem)
+      (step-cpu cpu)
       (is (> (cpu-cycles cpu) before)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ that PC value.  If it's the success address ($3469), all checks passed."
             ;; RETURN-FROM exits the named function immediately.
             (return-from %run-klaus-test pc))
           (setf previous-pc pc))
-        (step-cpu cpu mem)))))
+        (step-cpu cpu)))))
 
 (test klaus-dormann-functional-test
   "Run Klaus Dormann's 6502 functional test to its success trap."

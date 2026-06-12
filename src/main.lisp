@@ -63,11 +63,8 @@ cycle-correct execution."
 Like STEP-MACHINE, this advances only the CPU and does not pump
 ANTIC/POKEY — use RUN-FRAME for full-system execution.  Returns MACHINE
 for chaining."
-  ;; RUN-CPU's lambda list is (cpu &optional memory &key cycles); the
-  ;; CPU's bus is already wired, so pass NIL for MEMORY (skips re-attach)
-  ;; before the :CYCLES keyword — otherwise :CYCLES is read as MEMORY.
   (atari800-cl.cpu:run-cpu (atari800-cl.machine:atari-machine-cpu machine)
-                           nil :cycles cycles)
+                           :cycles cycles)
   machine)
 
 (defun run-frame (machine &key (count 1))
