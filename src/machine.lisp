@@ -9,7 +9,9 @@
 ;;;; stolen for that clock, the CPU does NOT advance; otherwise we add
 ;;;; one cycle to the CPU's budget and, once the budget is large enough,
 ;;;; fetch and execute the next instruction.  Pending NMI/IRQ lines are
-;;;; serviced at every clock before the CPU decides whether to step.
+;;;; serviced inside STEP-CPU before each instruction fetch, so the
+;;;; 7-cycle interrupt-entry sequence is charged against the CPU budget
+;;;; exactly like an instruction.
 
 (in-package #:atari800-cl.machine)
 
@@ -227,8 +229,13 @@ Keys: :PORTB :OS-ROM-MAPPED :BASIC-ROM-MAPPED :SELFTEST-MAPPED."
 
 (defun %run-clocks (machine n &key abort-pred)
   "Run N NTSC color clocks on MACHINE, pumping ANTIC + POKEY in lockstep with
-the CPU and servicing NMI/IRQ each clock.  Returns the number of clocks
-actually run.
+the CPU.  Returns the number of clocks actually run.
+
+Pending NMI/IRQ lines are serviced by STEP-CPU itself (NMI first, then
+IRQ when the I flag is clear) before each instruction fetch; the 7 cycles
+an interrupt-entry sequence consumes come out of CPU-BUDGET exactly like
+an instruction's cycles, so the CPU cannot run ahead of the clock by
+servicing interrupts for free.
 
 If ABORT-PRED is supplied it is funcalled once per scanline (every 114
 clocks); a true result stops early and returns the clocks run so far.  The
@@ -259,11 +266,10 @@ across calls."
         ;; CPU budget; stolen clocks consume the cycle silently.
         (when (zerop stolen)
           (incf cpu-budget))
-        ;; Service interrupts before each candidate instruction.
-        (check-and-dispatch-nmi cpu)
-        (check-and-dispatch-irq cpu)
         ;; If we have budget for at least the minimum instruction (2 cycles
-        ;; on the 6502) and the CPU isn't halted, step it once.
+        ;; on the 6502) and the CPU isn't halted, step it once.  STEP-CPU
+        ;; services a pending NMI/IRQ instead of fetching when one is due,
+        ;; returning the 7-cycle entry cost so it is charged to the budget.
         (when (and (>= cpu-budget 2) (not (cpu-halted cpu)))
           (handler-case
               (let ((used (step-cpu cpu)))
@@ -277,8 +283,8 @@ across calls."
 
 (defun machine-run-frame (machine)
   "Run one NTSC frame: 29,868 color clocks.  Pumps ANTIC + POKEY in
-lockstep with the CPU, services NMI/IRQ each clock, and increments
-FRAME-COUNT before returning MACHINE."
+lockstep with the CPU (servicing pending NMI/IRQ between instructions)
+and increments FRAME-COUNT before returning MACHINE."
   (%run-clocks machine +clocks-per-frame+)
   (incf (atari-machine-frame-count machine))
   machine)

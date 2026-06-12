@@ -72,9 +72,9 @@ for chaining."
 
 (defun run-frame (machine &key (count 1))
   "Run COUNT full NTSC frames (29,868 color clocks each), pumping ANTIC
-and POKEY in lockstep with the CPU and servicing NMI/IRQ every clock.
-This is the cycle-correct way to drive the whole machine.  Returns
-MACHINE for chaining."
+and POKEY in lockstep with the CPU and servicing pending NMI/IRQ between
+instructions.  This is the cycle-correct way to drive the whole machine.
+Returns MACHINE for chaining."
   (dotimes (i count)
     (declare (ignore i))
     (atari800-cl.machine:machine-run-frame machine))

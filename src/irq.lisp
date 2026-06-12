@@ -3,10 +3,13 @@
 ;;;; The 6502 CPU is the central interrupt target on the Atari 800 XL.
 ;;;; Two pending lines drive it: NMI (non-maskable) and IRQ (maskable
 ;;;; by the I flag).  The chips assert these by setting
-;;;; CPU-PENDING-NMI / CPU-PENDING-IRQ; the machine scheduler must
-;;;; service them at every clock tick BEFORE running the next CPU
-;;;; instruction.  The helpers below are the indirection point the
-;;;; scheduler uses; they call into the CPU package's service-* functions.
+;;;; CPU-PENDING-NMI / CPU-PENDING-IRQ; STEP-CPU services them itself
+;;;; before each instruction fetch and returns the 7-cycle entry cost,
+;;;; which is how the machine scheduler accounts for interrupt time.
+;;;; The helpers below expose the same dispatch as a standalone routing
+;;;; API for tests and alternative drivers that step the CPU manually;
+;;;; note that servicing through them bypasses any caller-side cycle
+;;;; budgeting (SERVICE-NMI/IRQ only increment CPU-CYCLES).
 
 (in-package #:atari800-cl.irq)
 

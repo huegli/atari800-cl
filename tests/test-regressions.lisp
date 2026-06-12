@@ -183,3 +183,41 @@ asserted; acknowledging the second must finally drop it."
     (atari800-cl.pokey:reset-pokey pok)
     (is-false (cpu-pending-irq cpu)
               "RESET-POKEY must release the IRQ line it was driving")))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #7 — Interrupt-entry cycles count against the frame budget.
+;;;
+;;; %RUN-CLOCKS used to call CHECK-AND-DISPATCH-NMI/IRQ at every clock
+;;; in addition to STEP-CPU's own dispatch.  SERVICE-NMI/IRQ increment
+;;; CPU-CYCLES by 7, but that path never charged CPU-BUDGET, so each
+;;; interrupt entry was free wall-clock time and the CPU ran ahead of
+;;; the machine clock.  Under an IRQ storm (line held asserted, handler
+;;; is a bare RTI) the CPU consumed roughly twice as many cycles as
+;;; clocks elapsed.  Interrupts are now serviced exclusively by
+;;; STEP-CPU, whose 7-cycle return value is debited like any
+;;; instruction.
+
+(test interrupt-entry-cycles-count-against-frame-budget
+  "Under a continuous IRQ storm, the CPU must not consume more cycles
+than color clocks elapsed (the budget can overdraw by at most one
+instruction)."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000 :irq-pc #xFE00)))
+    ;; Main program at $C000: CLI, then NOP filler.  IRQ handler at
+    ;; $FE00 (ROM offset $3E00): bare RTI, so the still-asserted line
+    ;; re-enters the handler immediately — a worst-case IRQ storm.
+    (%poke os #x0000 #x58)                               ; CLI
+    (%poke os #x3E00 #x40)                               ; RTI
+    (let* ((m   (make-test-machine :os-rom os))
+           (cpu (atari800-cl.machine:atari-machine-cpu m))
+           (clocks (* 4 114)))                           ; 4 scanlines
+      ;; Hold the IRQ line asserted for the whole run (stuck device).
+      (setf (cpu-pending-irq cpu) t)
+      (atari800-cl.machine:%run-clocks m clocks)
+      (let ((consumed (cpu-cycles cpu)))
+        (is (> consumed 300)
+            "Sanity: the IRQ storm must actually have run (~D cycles in ~D clocks)"
+            consumed clocks)
+        (is (<= consumed clocks)
+            "CPU consumed ~D cycles in ~D clocks — interrupt entries must ~
+             be charged against the budget, not run for free"
+            consumed clocks)))))

@@ -373,8 +373,10 @@
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.irq — NMI / IRQ routing helpers
 ;;;
-;;; Thin wrappers the machine scheduler calls every clock to service
-;;; whichever interrupt the chips have asserted.
+;;; Thin wrappers for servicing whichever interrupt the chips have
+;;; asserted.  STEP-CPU performs the same dispatch internally (and the
+;;; machine scheduler relies on that for cycle accounting); these remain
+;;; for tests and drivers that step the CPU manually.
 
 (defpackage #:atari800-cl.irq
   (:use #:cl #:atari800-cl.compat #:atari800-cl.cpu)
