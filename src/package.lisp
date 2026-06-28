@@ -306,9 +306,15 @@
            #:mode-line-scanlines
            #:+scanlines-per-frame+
            #:+color-clocks-per-scanline+
+           #:+active-start-scanline+
            #:+vbi-scanline+
            #:+dram-refresh-cycles+
-           #:+nmi-dli+ #:+nmi-vbi+))
+           #:+nmi-dli+ #:+nmi-vbi+
+           ;; Rendering support
+           #:antic-scan-y
+           #:antic-screen-data-ptr
+           #:antic-render-screen-data-ptr
+           #:+reg-chbase+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.gtia — GTIA (player/missile + collision latches + console)
@@ -385,6 +391,24 @@
            #:check-and-dispatch-irq))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.renderer — Per-scanline NTSC pixel renderer
+;;;
+;;; Depends on ANTIC (for display-list state) and GTIA (for color/sprite
+;;; registers).  Produces 24-bit RGB pixels into a 384×240 framebuffer.
+
+(defpackage #:atari800-cl.renderer
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus
+        #:atari800-cl.antic #:atari800-cl.gtia)
+  (:documentation "Per-scanline NTSC pixel renderer: palette, playfield, P/M graphics.")
+  (:export #:make-framebuffer
+           #:render-scanline
+           #:+framebuffer-width+
+           #:+framebuffer-height+
+           #:atari-color->r
+           #:atari-color->g
+           #:atari-color->b))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.machine — Top-level NTSC scheduler
 ;;;
 ;;; Owns the CPU plus every chip (mmu, bus, pia, antic, gtia, pokey)
@@ -431,7 +455,10 @@
            #:machine-trace-step
            #:machine-portb-state
            #:machine-scanline
-           #:machine-pending-interrupts))
+           #:machine-pending-interrupts
+           ;; Rendering hooks
+           #:atari-machine-scanline-fn
+           #:atari-machine-post-frame-fn))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.transport — Socket transport (TCP via usocket; Unix via compat)
@@ -470,6 +497,7 @@
            #:+aesp-key-down+ #:+aesp-key-up+ #:+aesp-joystick+
            #:+aesp-console-keys+ #:+aesp-paddle+
            #:+aesp-frame-config+ #:+aesp-video-subscribe+ #:+aesp-video-unsubscribe+
+           #:+aesp-video-frame+
            #:+aesp-audio-config+ #:+aesp-audio-subscribe+ #:+aesp-audio-unsubscribe+
            #:+aesp-err-server-busy+ #:+aesp-err-not-implemented+
            ;; Server

@@ -78,7 +78,13 @@ Slots:
                 parks on the mailbox condvar (paused).
   MAILBOX     — COMMAND-MAILBOX other threads post work to.
   INPUT       — optional host INPUT-STATE wired into PIA/GTIA/POKEY.
-  PRIORITY-PENDING-FLAG — hint set when a high-priority command is queued."
+  PRIORITY-PENDING-FLAG — hint set when a high-priority command is queued.
+  SCANLINE-FN  — if non-nil, called as (funcall scanline-fn machine) after
+                 each completed active scanline (NTSC scanlines 8-247).
+                 Typically set by the AESP server to render into its framebuffer.
+  POST-FRAME-FN — if non-nil, called as (funcall post-frame-fn machine) at
+                  the end of MACHINE-RUN-FRAME (after frame-count increment).
+                  Typically set by the AESP server to push the completed frame."
   (cpu nil)
   (bus nil)
   (mmu nil)
@@ -90,7 +96,9 @@ Slots:
   (running-p nil)
   (mailbox (make-command-mailbox))
   (input nil)
-  (priority-pending-flag nil))
+  (priority-pending-flag nil)
+  (scanline-fn   nil)
+  (post-frame-fn nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Construction
@@ -278,7 +286,17 @@ across calls."
             ;; A KIL instruction signals ILLEGAL-OPCODE; leave the CPU
             ;; halted and stop trying to step.
             (illegal-opcode ()
-              (setf (cpu-halted cpu) t))))))
+              (setf (cpu-halted cpu) t))))
+        ;; After each completed active scanline, invoke the scanline callback.
+        ;; color-clock == 0 means it just wrapped: the previous scanline ended.
+        (when (zerop (antic-color-clock antic))
+          (let ((sfn (atari-machine-scanline-fn machine)))
+            (when sfn
+              (let ((done-sl (mod (1- (antic-scanline antic))
+                                  +scanlines-per-frame+)))
+                (when (and (>= done-sl +active-start-scanline+)
+                           (<  done-sl +vbi-scanline+))
+                  (funcall sfn machine))))))))
     n))
 
 (defun machine-run-frame (machine)
@@ -287,6 +305,8 @@ lockstep with the CPU (servicing pending NMI/IRQ between instructions)
 and increments FRAME-COUNT before returning MACHINE."
   (%run-clocks machine +clocks-per-frame+)
   (incf (atari-machine-frame-count machine))
+  (let ((pfn (atari-machine-post-frame-fn machine)))
+    (when pfn (funcall pfn machine)))
   machine)
 
 ;;; ---------------------------------------------------------------------------

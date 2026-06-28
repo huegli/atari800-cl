@@ -164,12 +164,12 @@ the machine to running."
                        (flexi-streams:octets-to-string pl :external-format :utf-8))))))
 
 (test aesp-server-subscribe-replies-config
-  "VIDEO_SUBSCRIBE returns FRAME_CONFIG (384,240,4,60); AUDIO_SUBSCRIBE
+  "VIDEO_SUBSCRIBE returns FRAME_CONFIG (384,240,24,60); AUDIO_SUBSCRIBE
 returns AUDIO_CONFIG (44100,8,1)."
   (with-aesp-server (m srv s)
     (multiple-value-bind (ty pl) (%aesp-request s atari800-cl.aesp:+aesp-video-subscribe+)
       (is (= atari800-cl.aesp:+aesp-frame-config+ ty))
-      (is (equalp (%octets #x01 #x80 #x00 #xF0 #x04 #x3C) pl)))
+      (is (equalp (%octets #x01 #x80 #x00 #xF0 #x18 #x3C) pl)))
     (multiple-value-bind (ty pl) (%aesp-request s atari800-cl.aesp:+aesp-audio-subscribe+)
       (is (= atari800-cl.aesp:+aesp-audio-config+ ty))
       (is (equalp (%octets #x00 #x00 #xAC #x44 #x08 #x01) pl)))))

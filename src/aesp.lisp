@@ -59,6 +59,7 @@
   (defconstant +aesp-audio-config+      #x81)
   (defconstant +aesp-audio-subscribe+   #x83)
   (defconstant +aesp-audio-unsubscribe+ #x84)
+  (defconstant +aesp-video-frame+       #x65)  ; server-push: completed 24-bit RGB frame
 
   ;; ERROR payload codes.
   (defconstant +aesp-err-server-busy+     #x04)
@@ -173,10 +174,10 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
    :external-format :utf-8))
 
 (defun %frame-config-payload ()
-  "FRAME_CONFIG: width(u16) height(u16) bpp(u8) fps(u8) = 384,240,4,60."
+  "FRAME_CONFIG: width(u16) height(u16) bpp(u8) fps(u8) = 384,240,24,60."
   (let ((b (%make-octets 6)))
     (%u16-be b 0 384) (%u16-be b 2 240)
-    (setf (aref b 4) 4 (aref b 5) 60)
+    (setf (aref b 4) 24 (aref b 5) 60)
     b))
 
 (defun %audio-config-payload ()
@@ -216,15 +217,22 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
 
 (defstruct (aesp-server (:constructor %make-aesp-server))
   "Handle for a running 3-port AESP server.  CONTROL/VIDEO/AUDIO ports carry
-the bound port numbers (useful when started on ephemeral port 0)."
+the bound port numbers (useful when started on ephemeral port 0).
+
+Extra slots for rendering:
+  FRAMEBUFFER   — 384×240 24-bit RGB pixel array written by the scanline
+                  callback and pushed to VIDEO-CLIENTS after each frame.
+  VIDEO-CLIENTS — connections on the video port; frame data is pushed here."
   machine
   host
   control-listener video-listener audio-listener
   control-port video-port audio-port
-  (lock    (make-lock "aesp-server"))
-  (threads '())
-  (clients '())
-  (running t))
+  (lock          (make-lock "aesp-server"))
+  (threads       '())
+  (clients       '())
+  (running       t)
+  (framebuffer   nil)
+  (video-clients '()))
 
 (defun %add-thread (server th)
   (with-lock ((aesp-server-lock server)) (push th (aesp-server-threads server)))
@@ -236,6 +244,36 @@ the bound port numbers (useful when started on ephemeral port 0)."
 (defun %unregister-client (server conn)
   (with-lock ((aesp-server-lock server))
     (setf (aesp-server-clients server) (remove conn (aesp-server-clients server)))))
+
+(defun %register-video-client (server conn)
+  (with-lock ((aesp-server-lock server))
+    (push conn (aesp-server-video-clients server))))
+
+(defun %unregister-video-client (server conn)
+  (with-lock ((aesp-server-lock server))
+    (setf (aesp-server-video-clients server)
+          (remove conn (aesp-server-video-clients server)))))
+
+(defun %push-video-frame (server machine)
+  "Encode and send the current framebuffer to all video-port clients.
+Called on the emulator thread (from ATARI-MACHINE-POST-FRAME-FN).
+Clients that error during the write are silently dropped."
+  (let ((fb (aesp-server-framebuffer server)))
+    (when (null fb) (return-from %push-video-frame nil))
+    (let* ((fno     (atari-machine-frame-count machine))
+           (payload (%make-octets (+ 4 (length fb)))))
+      (%u32-be payload 0 fno)
+      (replace payload fb :start1 4)
+      ;; Snapshot the list under lock, then write outside the lock so a slow
+      ;; client doesn't block the emulator thread indefinitely.
+      (let ((clients (with-lock ((aesp-server-lock server))
+                       (copy-list (aesp-server-video-clients server)))))
+        (dolist (conn clients)
+          (handler-case
+              (write-aesp-message (tcp-stream conn) +aesp-video-frame+ payload)
+            (error ()
+              (%unregister-video-client server conn)
+              (ignore-errors (tcp-close conn)))))))))
 
 (defun %ack (stream) (write-aesp-message stream +aesp-ack+))
 
@@ -288,7 +326,9 @@ on EOF / closed socket / any stream error."
                  (%handle-control server stream type payload))))
          (end-of-file () nil)
          (error () nil))
-    (%unregister-client server conn)
+    (if (eq kind :video)
+        (%unregister-video-client server conn)
+        (%unregister-client server conn))
     (tcp-close conn)))
 
 (defun %aesp-acceptor (server listener kind)
@@ -300,7 +340,9 @@ ends the loop."
                   (error () (return)))))
       (cond
         ((not (aesp-server-running server)) (tcp-close conn) (return))
-        (t (%register-client server conn)
+        (t (if (eq kind :video)
+               (%register-video-client server conn)
+               (%register-client server conn))
            (%add-thread server
              (make-thread (lambda () (%aesp-reader server conn (tcp-stream conn) kind))
                           :name (format nil "aesp-~(~A~)-reader" kind))))))))
@@ -329,7 +371,23 @@ AESP-SERVER-*-PORT accessors)."
                          :control-listener cl :video-listener vl :audio-listener al
                          :control-port (tcp-listener-port cl)
                          :video-port   (tcp-listener-port vl)
-                         :audio-port   (tcp-listener-port al))))
+                         :audio-port   (tcp-listener-port al)
+                         :framebuffer  (atari800-cl.renderer:make-framebuffer))))
+            ;; Wire the scanline and post-frame callbacks into the machine.
+            (setf (atari-machine-scanline-fn machine)
+                  (let ((fb (aesp-server-framebuffer server)))
+                    (lambda (m)
+                      (let* ((a   (atari-machine-antic m))
+                             (sl  (mod (1- (atari800-cl.antic:antic-scanline a))
+                                       atari800-cl.antic:+scanlines-per-frame+))
+                             (row (- sl atari800-cl.antic:+active-start-scanline+)))
+                        (when (and (>= row 0) (< row 240))
+                          (atari800-cl.renderer:render-scanline
+                           fb row a
+                           (atari-machine-gtia m)
+                           (atari-machine-bus  m)))))))
+            (setf (atari-machine-post-frame-fn machine)
+                  (lambda (m) (%push-video-frame server m)))
             (%add-thread server (make-thread (lambda () (%aesp-acceptor server cl :control))
                                              :name "aesp-control-acceptor"))
             (%add-thread server (make-thread (lambda () (%aesp-acceptor server vl :video))
@@ -347,11 +405,17 @@ AESP-SERVER-*-PORT accessors)."
 client connections (unblocking the readers), then join the threads, forcibly
 destroying any that outlive TIMEOUT seconds.  Returns SERVER."
   (setf (aesp-server-running server) nil)
+  ;; Clear machine callbacks so the server struct is no longer referenced
+  ;; from the machine after stop.
+  (setf (atari-machine-scanline-fn   (aesp-server-machine server)) nil
+        (atari-machine-post-frame-fn (aesp-server-machine server)) nil)
   (tcp-close (aesp-server-control-listener server))
   (tcp-close (aesp-server-video-listener server))
   (tcp-close (aesp-server-audio-listener server))
   (dolist (conn (copy-list (aesp-server-clients server)))
     (tcp-close conn))
+  (dolist (conn (copy-list (aesp-server-video-clients server)))
+    (ignore-errors (tcp-close conn)))
   (let ((deadline (+ (get-internal-real-time)
                      (truncate (* timeout internal-time-units-per-second)))))
     (dolist (th (copy-list (aesp-server-threads server)))

@@ -118,7 +118,20 @@ Slots:
   (frame-count   0 :type fixnum)
   (stolen-cycles 0 :type fixnum)
   (cpu nil)
-  (bus nil))
+  (bus nil)
+  ;; Rendering support --------------------------------------------------------
+  ;; SCREEN-DATA-PTR: base address in screen RAM for the current mode line.
+  ;; Set by the LMS modifier; advances after each char row (char modes) or
+  ;; every scanline (bitmap modes).
+  (screen-data-ptr        0 :type (unsigned-byte 16))
+  ;; RENDER-SCREEN-DATA-PTR: snapshot of SCREEN-DATA-PTR taken at color-clock
+  ;; 0 of each scanline, before any end-of-line advancement.  The renderer
+  ;; reads this to avoid an off-by-one on the first scanline of bitmap modes.
+  (render-screen-data-ptr 0 :type (unsigned-byte 16))
+  ;; SCAN-Y: 0-based row index within the current mode line (for char-ROM
+  ;; lookup and bitmap pointer advancement).  Reset to 0 when a new DL
+  ;; instruction is fetched; incremented at end of each scanline.
+  (scan-y 0 :type (unsigned-byte 8)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; DL parsing helpers
@@ -160,6 +173,21 @@ Bit 2 enables 1-cycle missile DMA; bit 3 enables 4-cycle player DMA."
   (+ +dram-refresh-cycles+
      (pm-dma-cycles (antic-dmactl antic))))
 
+(defun bytes-per-screen-row (mode)
+  "Return the number of screen-RAM bytes per logical row for the given ANTIC
+mode nibble.  For character modes this is bytes per character row (consumed
+once per MODE-LINE-SCANLINES scanlines); for bitmap modes it is bytes per
+scanline."
+  (declare (type (unsigned-byte 8) mode))
+  (case mode
+    ((2 3 4 5 8) 40)
+    ((6 7)       20)
+    (9           10)
+    ((10 11 13)  20)
+    ((12 14)     20)
+    (15          40)
+    (t           40)))
+
 (defun process-dl-instruction (antic)
   "Fetch one display-list instruction from the bus and update ANTIC.
 Returns the number of DL bytes consumed by this instruction (1 for a
@@ -188,11 +216,17 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
              (setf (antic-jvb-wait antic) t)))))
       (t
        (when lms-p
-         ;; Skip the two-byte LMS load-memory-scan address (we don't
-         ;; model screen-data fetches).
-         (incf (antic-dl-offset antic) 2))
+         ;; Read the two-byte LMS address (lo then hi) and latch it into
+         ;; SCREEN-DATA-PTR so the renderer knows where screen RAM starts.
+         (let* ((lo (atari800-cl.bus:bus-read bus (%dl-current-address antic))))
+           (incf (antic-dl-offset antic))
+           (let ((hi (atari800-cl.bus:bus-read bus (%dl-current-address antic))))
+             (incf (antic-dl-offset antic))
+             (setf (antic-screen-data-ptr antic)
+                   (dpb hi (byte 8 8) lo)))))
        (setf (antic-mode-scanlines-remaining antic)
-             (mode-line-scanlines inst))))))
+             (mode-line-scanlines inst)
+             (antic-scan-y antic) 0)))))
 
 (declaim (inline %display-active-p))
 
@@ -261,7 +295,13 @@ are all serviced at color-clock 0 as well."
         (setf (antic-dli-armed antic) nil))
       ;; Refresh + P/M DMA steals for this line.
       (setf stolen (%scanline-steal antic))
-      (incf (antic-stolen-cycles antic) stolen))
+      (incf (antic-stolen-cycles antic) stolen)
+      ;; Snapshot the screen-data pointer for the renderer.  This must happen
+      ;; AFTER the DL fetch (which may have set SCREEN-DATA-PTR via LMS) and
+      ;; BEFORE any end-of-line advancement, so the renderer sees the address
+      ;; that is correct for the scanline that is about to be rendered.
+      (setf (antic-render-screen-data-ptr antic)
+            (antic-screen-data-ptr antic)))
     ;; Advance the color clock.
     (incf (antic-color-clock antic))
     (when (>= (antic-color-clock antic) +color-clocks-per-scanline+)
@@ -269,6 +309,31 @@ are all serviced at color-clock 0 as well."
       ;; End-of-scanline housekeeping.
       (when (plusp (antic-mode-scanlines-remaining antic))
         (decf (antic-mode-scanlines-remaining antic)))
+      ;; Advance scan-y and screen-data-ptr for the next scanline.
+      ;; Only relevant during the active display region with DMA enabled.
+      (when (%display-active-p antic)
+        (let* ((inst  (antic-current-mode antic))
+               (mode  (ldb (byte 4 0) inst))
+               (total (mode-line-scanlines inst))
+               (y     (antic-scan-y antic)))
+          (when (>= mode 2)
+            (cond
+              ;; Bitmap modes: advance screen pointer every scanline.
+              ((>= mode 8)
+               (setf (antic-screen-data-ptr antic)
+                     (ldb (byte 16 0)
+                          (+ (antic-screen-data-ptr antic)
+                             (bytes-per-screen-row mode)))))
+              ;; Character modes: advance after the last scanline of each char row.
+              ((and (plusp total) (= y (1- total)))
+               (setf (antic-screen-data-ptr antic)
+                     (ldb (byte 16 0)
+                          (+ (antic-screen-data-ptr antic)
+                             (bytes-per-screen-row mode)))))))
+            ;; Always increment scan-y (wraps at mode-line boundary).
+            (setf (antic-scan-y antic)
+                  (if (zerop total) 0
+                      (mod (1+ y) total)))))
       (incf (antic-scanline antic))
       (when (>= (antic-scanline antic) +scanlines-per-frame+)
         (setf (antic-scanline antic) 0)
@@ -328,7 +393,10 @@ their shadow slots; everything else is just latched into the register file."
         (antic-dli-armed antic) nil
         (antic-jvb-wait antic) nil
         (antic-frame-count antic) 0
-        (antic-stolen-cycles antic) 0)
+        (antic-stolen-cycles antic) 0
+        (antic-screen-data-ptr antic) 0
+        (antic-render-screen-data-ptr antic) 0
+        (antic-scan-y antic) 0)
   antic)
 
 (defun attach-antic (bus antic &optional cpu)
