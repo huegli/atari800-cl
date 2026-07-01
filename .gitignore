@@ -38,3 +38,9 @@ roms/*.bin
 
 # Local quickproject / sly state
 .sbclrc.local
+
+# Environment
+.env
+
+# Assembly builds
+asm/build
