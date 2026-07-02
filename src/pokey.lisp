@@ -40,6 +40,12 @@
 
 (in-package #:atari800-cl.pokey)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Constants
 
@@ -201,6 +207,8 @@ clears — even though IRQST reads back as 'nothing pending'."
       (set-irq-line cpu
                     (logtest (pokey-irqen pokey)
                              (logandc2 #xFF (pokey-irqst pokey)))))))
+
+(declaim (ftype (function (pokey (or null cpu)) boolean) pokey-tick))
 
 (defun pokey-tick (pokey cpu)
   "Advance POKEY by one CPU cycle.  Returns T if any timer raised an IRQ
