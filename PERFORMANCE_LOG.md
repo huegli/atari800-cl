@@ -20,3 +20,9 @@ faster than a real Atari 800 XL).
 | 2026-07-01 | 6fb2973  | lispworks      | nop      |  250.10 |  4.174     | add :klaus workload              |
 | 2026-07-01 | 6fb2973  | lispworks      | irq      |  267.26 |  4.460     | add :klaus workload              |
 | 2026-07-01 | 6fb2973  | lispworks      | klaus    |  230.72 |  3.850     | klaus+PASS, 3252 frames          |
+| 2026-07-02 | ff34cc4  | sbcl           | nop      | 2339.26 | 39.040     | Phase 1: optimize/ftype declarations |
+| 2026-07-02 | ff34cc4  | sbcl           | irq      | 1938.09 | 32.345     | Phase 1: optimize/ftype declarations |
+| 2026-07-02 | ff34cc4  | sbcl           | klaus    | 1737.45 | 28.996     | Phase 1, klaus+PASS, 3252 frames |
+| 2026-07-02 | ff34cc4  | lispworks      | nop      |  652.88 | 10.896     | Phase 1: optimize/ftype declarations |
+| 2026-07-02 | ff34cc4  | lispworks      | irq      |  620.48 | 10.355     | Phase 1: optimize/ftype declarations |
+| 2026-07-02 | ff34cc4  | lispworks      | klaus    |  536.55 |  8.954     | Phase 1, klaus+PASS, 3252 frames |
