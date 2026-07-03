@@ -44,3 +44,7 @@ roms/*.bin
 
 # Assembly builds
 asm/build
+
+# Python bytecode cache (scripts/capture-screenshot.py etc.)
+__pycache__/
+*.pyc
