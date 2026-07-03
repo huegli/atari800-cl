@@ -26,3 +26,38 @@ faster than a real Atari 800 XL).
 | 2026-07-02 | ff34cc4  | lispworks      | nop      |  652.88 | 10.896     | Phase 1: optimize/ftype declarations |
 | 2026-07-02 | ff34cc4  | lispworks      | irq      |  620.48 | 10.355     | Phase 1: optimize/ftype declarations |
 | 2026-07-02 | ff34cc4  | lispworks      | klaus    |  536.55 |  8.954     | Phase 1, klaus+PASS, 3252 frames |
+
+## Phase 2 — page-dispatch table (rejected, not committed)
+
+PERFORMANCE_PLAN.md Phase 2 proposed replacing BUS-READ/BUS-WRITE's
+priority-COND chain with a per-page tag table (256-entry array, one tag
+per address high byte), rebuilt lazily off an MMU generation counter.
+Implemented in full (page tags, MMU generation, eager rebuild on ROM
+install/MMU attach, a dedicated equivalence-vs-oracle test suite), 1596/1596
+checks passed on both implementations — but the benchmark delta didn't
+clear the plan's own bar ("if the gain is < ~5% on both ... keep the
+simpler cond chain"), so the change was reverted and never committed;
+`src/bus.lisp`/`src/mmu.lisp` are back to the Phase 1 (ff34cc4) cond chain.
+
+Mean of 4 runs each, vs. the ff34cc4 Phase 1 baseline above:
+
+| implementation | workload | ff34cc4 fps | Phase 2 fps (mean) | delta  |
+|-----------------|----------|-------------|---------------------|--------|
+| sbcl            | nop      | 2339.26     | 2415.66             | +3.3%  |
+| sbcl            | irq      | 1938.09     | 1949.57             | +0.6%  |
+| sbcl            | klaus    | 1737.45     | 1715.08             | -1.3%  |
+| lispworks       | nop      |  652.88     |  630.77             | -3.4%  |
+| lispworks       | irq      |  620.48     |  591.30             | -4.7%  |
+| lispworks       | klaus    |  536.55     |  506.71             | -5.6%  |
+
+SBCL's gain was marginal/noise-level (nop's +3.3% was the only value that
+stayed consistently positive across repeats; irq and klaus are within
+run-to-run variance). LispWorks — the project's primary target per
+CLAUDE.md — regressed consistently across all three workloads. Likely
+cause: the original COND chain already short-circuits cheaply in these
+workloads (`bus-os-rom`/`bus-basic-rom` being NIL, or address ranges
+failing the first `AND` term immediately), so it wasn't as expensive as
+the plan assumed, while the tag-table path adds a fixed per-access cost
+(generation compare + array read + ECASE) that LispWorks apparently
+doesn't optimize as well as SBCL does. Conclusion: not worth the added
+complexity; Phase 2 is closed without merging.
