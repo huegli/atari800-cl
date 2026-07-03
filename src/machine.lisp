@@ -15,6 +15,12 @@
 
 (in-package #:atari800-cl.machine)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 (defconstant +clocks-per-frame+ 29868
   "262 scanlines × 114 color clocks/scanline (NTSC).")
 

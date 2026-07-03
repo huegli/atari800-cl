@@ -35,6 +35,14 @@
 
 (in-package #:atari800-cl.bus)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  DECLAIM
+;;; PROCLAIMS: under :serial t this also applies to every file compiled
+;;; after this one in the same build, which is intentional here (the whole
+;;; core wants this policy) — but the same declaim is repeated in each hot
+;;; file below so the policy survives recompiling a single file
+;;; interactively.  Safety floor stays at 1: no (safety 0) anywhere.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Memory-map constants
 
@@ -158,6 +166,9 @@ The image is coerced into a typed simple-array for fast reads."
 ;;; CL comparison operators take any number of arguments, so the
 ;;; inclusive range test "is ADDRESS within [LOW, HIGH]?" is spelled
 ;;; directly as (<= LOW ADDRESS HIGH) — no helper needed.
+
+(declaim (ftype (function (bus u16) (values u8 &optional)) bus-read)
+         (ftype (function (bus u16 u8) t) bus-write))
 
 (defun bus-read (bus address)
   "Read one byte from ADDRESS, dispatching through the memory map.

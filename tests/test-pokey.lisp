@@ -160,6 +160,150 @@ to put EVERYTHING on a 1-cycle divisor for the test)."
         (is-true (or (not (zerop r17)) (not (zerop r9))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Lazy RNG + batched advance (PERFORMANCE_PLAN.md Phase 3)
+;;;
+;;; POKEY-ADVANCE batches N cycles with event skipping, and the LFSRs are
+;;; stepped lazily (only when RANDOM is read), reducing large lags with
+;;; MOD by each poly's period.  These tests pin the two assumptions that
+;;; make that bit-identical to the old per-cycle loop: the polys really
+;;; are maximal-length (so the MOD is sound), and chunked advancement
+;;; matches single-cycle ticking through register writes and IRQs.
+
+(test pokey-poly-lfsr-periods-are-maximal
+  "Both LFSRs return to their reset state after exactly 2^N - 1 steps and
+no sooner.  %SYNC-RNG's MOD-by-period shortcut silently diverges if the
+tap configuration ever stops being maximal-length — this test fails first."
+  (let ((pok (atari800-cl.pokey:make-pokey)))
+    (let ((start (atari800-cl.pokey:pokey-poly17-state pok))
+          (first-return nil))
+      (loop for i from 1 to 131071
+            do (atari800-cl.pokey::%step-poly17 pok)
+            when (and (null first-return)
+                      (= start (atari800-cl.pokey:pokey-poly17-state pok)))
+              do (setf first-return i))
+      (is (eql 131071 first-return)
+          "poly17 period must be 2^17-1 = 131071; first return at ~S"
+          first-return))
+    (let ((start (atari800-cl.pokey:pokey-poly9-state pok))
+          (first-return nil))
+      (loop for i from 1 to 511
+            do (atari800-cl.pokey::%step-poly9 pok)
+            when (and (null first-return)
+                      (= start (atari800-cl.pokey:pokey-poly9-state pok)))
+              do (setf first-return i))
+      (is (eql 511 first-return)
+          "poly9 period must be 2^9-1 = 511; first return at ~S"
+          first-return))))
+
+(test pokey-lazy-rng-sync-matches-direct-stepping
+  "A lazy sync after a large batched advance (larger than the poly17
+period, so the MOD shortcut actually engages) yields exactly the LFSR
+states that per-cycle stepping produces."
+  (let ((eager (atari800-cl.pokey:make-pokey))
+        (lazy  (atari800-cl.pokey:make-pokey))
+        (n 150000))                     ; > 131071: exercises the MOD path
+    (dotimes (i n)
+      (atari800-cl.pokey::%step-poly17 eager)
+      (atari800-cl.pokey::%step-poly9  eager))
+    (atari800-cl.pokey:pokey-advance lazy nil n)
+    (atari800-cl.pokey:pokey-random lazy)    ; forces the sync
+    (is (= (atari800-cl.pokey:pokey-poly17-state eager)
+           (atari800-cl.pokey:pokey-poly17-state lazy))
+        "poly17 state after lazy sync must match direct stepping")
+    (is (= (atari800-cl.pokey:pokey-poly9-state eager)
+           (atari800-cl.pokey:pokey-poly9-state lazy))
+        "poly9 state after lazy sync must match direct stepping")))
+
+(defparameter *pokey-equivalence-script*
+  '((0     #xD200 6)                    ; AUDF1 = 6
+    (0     #xD20E #x01)                 ; IRQEN: timer 1
+    (0     #xD209 0)                    ; STIMER
+    (100   #xD202 3)                    ; AUDF2 = 3
+    (100   #xD20E #x03)                 ; IRQEN: timers 1 + 2
+    (1000  #xD208 #x00)                 ; AUDCTL: everything to 64 kHz
+    (2500  #xD209 0)                    ; STIMER reload mid-run
+    (5000  #xD20E #x00)                 ; IRQEN: ack/disable everything
+    (5001  #xD20E #x0B)                 ; IRQEN: timers 1 + 2 + 4
+    (12345 #xD208 #x01)                 ; AUDCTL: 15 kHz base clock
+    (12345 #xD206 10)                   ; AUDF4 = 10
+    (30000 #xD200 0)                    ; AUDF1 = 0 (fires every expiry)
+    (30000 #xD208 #x60)                 ; AUDCTL: ch1 + ch3 at 1.79 MHz
+    (30000 #xD209 0))                   ; STIMER
+  "Register-write schedule for POKEY-TICK-VS-ADVANCE-EQUIVALENCE:
+each entry is (CYCLE ADDRESS VALUE), applied to both POKEYs after
+exactly CYCLE cycles have elapsed.  Sorted by cycle.")
+
+(defparameter *pokey-equivalence-chunks*
+  #(1 3 7 114 2 28 500 13 1 999 114 5 250 4 57)
+  "Fixed chunk-size sequence (cycled) for the batched POKEY in the
+equivalence test.  A literal vector, not RANDOM, so runs are deterministic.")
+
+(test pokey-tick-vs-advance-equivalence
+  "Drives two POKEYs through 50,000 cycles and a scripted sequence of
+register writes: one via single-cycle POKEY-TICK, one via POKEY-ADVANCE
+in fixed odd-sized chunks.  After every chunk, the complete observable
+state — IRQST, all timer counts, all sub-counters, RANDOM, the chunk's
+IRQ-raised result, and the CPU's pending-IRQ line — must agree.  This is
+the test that licenses the event-skipping implementation."
+  (multiple-value-bind (pok-a cpu-a bus-a) (%make-pokey-fixture :audctl #x40)
+    (multiple-value-bind (pok-b cpu-b bus-b) (%make-pokey-fixture :audctl #x40)
+      (let ((script (copy-list *pokey-equivalence-script*))
+            (chunks *pokey-equivalence-chunks*)
+            (seed-i 0)
+            (pos 0)
+            (total 50000)
+            (divergence nil))
+        (flet ((compare (cycle irq-a irq-b)
+                 (unless divergence
+                   (setf divergence
+                         (cond
+                           ((/= (atari800-cl.pokey:pokey-irqst pok-a)
+                                (atari800-cl.pokey:pokey-irqst pok-b))
+                            (list cycle :irqst))
+                           ((loop for ch below 4
+                                  thereis (/= (aref (atari800-cl.pokey:pokey-timer-counts pok-a) ch)
+                                              (aref (atari800-cl.pokey:pokey-timer-counts pok-b) ch)))
+                            (list cycle :timer-counts))
+                           ((loop for ch below 4
+                                  thereis (/= (aref (atari800-cl.pokey:pokey-sub-counters pok-a) ch)
+                                              (aref (atari800-cl.pokey:pokey-sub-counters pok-b) ch)))
+                            (list cycle :sub-counters))
+                           ((/= (atari800-cl.pokey:pokey-random pok-a)
+                                (atari800-cl.pokey:pokey-random pok-b))
+                            (list cycle :random))
+                           ((not (eq (and irq-a t) (and irq-b t)))
+                            (list cycle :irq-raised-result))
+                           ((not (eq (cpu-pending-irq cpu-a)
+                                     (cpu-pending-irq cpu-b)))
+                            (list cycle :cpu-pending-irq)))))))
+          (loop while (< pos total)
+                do ;; Apply every register write scheduled at POS, to both.
+                   (loop while (and script (= (first (car script)) pos))
+                         do (destructuring-bind (cyc addr val) (pop script)
+                              (declare (ignore cyc))
+                              (atari800-cl.bus:bus-write bus-a addr val)
+                              (atari800-cl.bus:bus-write bus-b addr val)))
+                   ;; Advance both to the next script event (or the end),
+                   ;; chunk by chunk, comparing after every chunk.
+                   (let ((limit (if script
+                                    (min total (first (car script)))
+                                    total)))
+                     (loop while (< pos limit)
+                           do (let ((c (min (- limit pos)
+                                            (aref chunks (mod seed-i (length chunks)))))
+                                    (irq-a nil))
+                                (incf seed-i)
+                                (dotimes (i c)
+                                  (when (atari800-cl.pokey:pokey-tick pok-a cpu-a)
+                                    (setf irq-a t)))
+                                (let ((irq-b (atari800-cl.pokey:pokey-advance pok-b cpu-b c)))
+                                  (incf pos c)
+                                  (compare pos irq-a irq-b)))))))
+        (is (null divergence)
+            "POKEY state diverged between tick and batched advance at ~
+             cycle ~S in field ~S" (first divergence) (second divergence))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Read of IRQST through the bus
 
 (test pokey-read-irqst-via-bus

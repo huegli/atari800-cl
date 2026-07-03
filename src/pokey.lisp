@@ -35,10 +35,20 @@
 ;;;;   underflows ("acknowledge" semantics).
 ;;;;
 ;;;; RNG model:
-;;;;   Two LFSRs are clocked once per POKEY-TICK.  AUDCTL bit 7
-;;;;   selects which one feeds RANDOM: clear = 17-bit, set = 9-bit.
+;;;;   Two LFSRs are conceptually clocked once per CPU cycle.  AUDCTL
+;;;;   bit 7 selects which one feeds RANDOM: clear = 17-bit, set = 9-bit.
+;;;;   As an optimization they are stepped LAZILY: advancing the chip
+;;;;   only records how far behind they are (RNG-LAG), and reading
+;;;;   RANDOM catches them up first — observably identical, since
+;;;;   nothing but the RANDOM register exposes LFSR state.
 
 (in-package #:atari800-cl.pokey)
+
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Constants
@@ -90,7 +100,13 @@ Slots:
                                 current countdown.
   SUB-COUNTERS                — 4-element fixnum array, the divider
                                 pre-counter for each channel's clock.
-  POLY17-STATE, POLY9-STATE   — LFSR state words for the polynomial RNG.
+  POLY17-STATE, POLY9-STATE   — LFSR state words for the polynomial RNG,
+                                as of the last RNG sync (the LFSRs are
+                                stepped lazily; see RNG-LAG and %SYNC-RNG).
+  RNG-LAG                     — CPU cycles the LFSRs are behind the
+                                timers.  POKEY-ADVANCE only accumulates
+                                this; %SYNC-RNG catches the LFSRs up when
+                                the RANDOM register is actually read.
   CPU                         — CPU back-pointer for IRQ routing."
   (audf  (make-array 4 :element-type '(unsigned-byte 8) :initial-element 0)
          :type (simple-array (unsigned-byte 8) (4)))
@@ -108,6 +124,7 @@ Slots:
                 :type (simple-array fixnum (4)))
   (poly17-state #x1FFFF :type fixnum)
   (poly9-state  #x01FF  :type fixnum)
+  (rng-lag      0       :type fixnum)
   (cpu nil)
   ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, POT0..3,
   ;; KBCODE, and SKSTAT reads reflect live input instead of the stubs.
@@ -143,28 +160,61 @@ Slots:
     (t 0)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Polynomial RNG (LFSRs clocked every CPU cycle)
+;;; Polynomial RNG (LFSRs — conceptually clocked every CPU cycle, but
+;;; stepped LAZILY: POKEY-ADVANCE only counts how far behind the LFSRs are
+;;; in RNG-LAG, and %SYNC-RNG catches them up when RANDOM is actually read.
+;;; That is observably identical to per-cycle stepping because nothing but
+;;; the RANDOM register (and RESET-POKEY) reads the LFSR state.)
 
-(defun %advance-rng (pokey)
-  "Advance both LFSRs by one bit.  Cheap shift-register approximations
-of the Atari polys (sufficient for the prompt's tests).
+;;; LFSR periods.  Both tap configurations below are maximal-length, so an
+;;; N-bit register cycles through all 2^N - 1 non-zero states — which is
+;;; what lets %SYNC-RNG reduce a large lag with MOD instead of stepping the
+;;; full count.  Pinned by the pokey-poly*-period tests in
+;;; tests/test-pokey.lisp; if the taps ever change, those tests fail before
+;;; the MOD shortcut can silently diverge.
+(defconstant +poly17-period+ (1- (expt 2 17)))   ; 131071
+(defconstant +poly9-period+  (1- (expt 2 9)))    ; 511
 
-  17-bit poly taps: bit 0 XOR bit 5
-   9-bit poly taps: bit 0 XOR bit 4"
+(declaim (inline %step-poly17 %step-poly9))
+
+(defun %step-poly17 (pokey)
+  "Advance the 17-bit LFSR by one bit (taps: bit 0 XOR bit 5, shifting
+right, feedback into bit 16).  Cheap shift-register approximation of the
+Atari poly (sufficient for the prompt's tests)."
   (declare (type pokey pokey))
   (let* ((p17 (pokey-poly17-state pokey))
-         (fb17 (logxor (ldb (byte 1 0) p17) (ldb (byte 1 5) p17)))
-         (n17 (dpb fb17 (byte 1 16) (ash p17 -1)))
-         (p9 (pokey-poly9-state pokey))
-         (fb9 (logxor (ldb (byte 1 0) p9) (ldb (byte 1 4) p9)))
-         (n9 (dpb fb9 (byte 1 8) (ash p9 -1))))
-    (setf (pokey-poly17-state pokey) n17
-          (pokey-poly9-state  pokey) n9)))
+         (fb17 (logxor (ldb (byte 1 0) p17) (ldb (byte 1 5) p17))))
+    (setf (pokey-poly17-state pokey) (dpb fb17 (byte 1 16) (ash p17 -1)))))
+
+(defun %step-poly9 (pokey)
+  "Advance the 9-bit LFSR by one bit (taps: bit 0 XOR bit 4, shifting
+right, feedback into bit 8)."
+  (declare (type pokey pokey))
+  (let* ((p9 (pokey-poly9-state pokey))
+         (fb9 (logxor (ldb (byte 1 0) p9) (ldb (byte 1 4) p9))))
+    (setf (pokey-poly9-state pokey) (dpb fb9 (byte 1 8) (ash p9 -1)))))
+
+(defun %sync-rng (pokey)
+  "Catch both LFSRs up to real time.  Steps each poly (RNG-LAG mod its
+period) times — valid because both polys are maximal-length (see the
+period constants above) — then clears RNG-LAG.  Bounded work per call
+regardless of how long the RNG went unread.  Returns POKEY."
+  (declare (type pokey pokey))
+  (let ((lag (pokey-rng-lag pokey)))
+    (when (plusp lag)
+      (dotimes (i (mod lag +poly17-period+))
+        (%step-poly17 pokey))
+      (dotimes (i (mod lag +poly9-period+))
+        (%step-poly9 pokey))
+      (setf (pokey-rng-lag pokey) 0)))
+  pokey)
 
 (defun pokey-random (pokey)
   "Return the current RANDOM register value.  AUDCTL bit 7 picks the
-9-bit LFSR; otherwise the low 8 bits of the 17-bit LFSR are returned."
+9-bit LFSR; otherwise the low 8 bits of the 17-bit LFSR are returned.
+Syncs the lazily-stepped LFSRs before reading (see %SYNC-RNG)."
   (declare (type pokey pokey))
+  (%sync-rng pokey)
   (if (logtest (pokey-audctl pokey) #x80)
       (ldb (byte 8 0) (pokey-poly9-state  pokey))
       (ldb (byte 8 0) (pokey-poly17-state pokey))))
@@ -202,30 +252,91 @@ clears — even though IRQST reads back as 'nothing pending'."
                     (logtest (pokey-irqen pokey)
                              (logandc2 #xFF (pokey-irqst pokey)))))))
 
+(declaim (inline %expire-channel))
+
+(defun %expire-channel (pokey cpu ch)
+  "Process channel CH's sub-counter expiry: reload the sub-counter from
+%CHANNEL-DIVISOR, then decrement the timer count — or, on underflow,
+reload it from AUDF and try to fire the channel's IRQ.  Returns T if an
+IRQ was actually raised.  This is the single shared expiry path for both
+POKEY-TICK and POKEY-ADVANCE, so the two cannot drift apart."
+  (declare (type pokey pokey) (type fixnum ch))
+  (setf (aref (pokey-sub-counters pokey) ch)
+        (%channel-divisor pokey ch))
+  (let ((new (1- (aref (pokey-timer-counts pokey) ch))))
+    (declare (type fixnum new))
+    (cond
+      ((minusp new)
+       ;; Underflow: reload from AUDF and try to fire IRQ.
+       (setf (aref (pokey-timer-counts pokey) ch)
+             (aref (pokey-audf pokey) ch))
+       (%fire-timer-irq pokey cpu ch))
+      (t
+       (setf (aref (pokey-timer-counts pokey) ch) new)
+       nil))))
+
+(declaim (ftype (function (pokey (or null cpu) fixnum) boolean) pokey-advance)
+         (ftype (function (pokey (or null cpu)) boolean) pokey-tick))
+
 (defun pokey-tick (pokey cpu)
   "Advance POKEY by one CPU cycle.  Returns T if any timer raised an IRQ
-this cycle.  Also clocks both polynomial LFSRs once per call."
+this cycle.  The LFSRs are stepped lazily (RNG-LAG accrues one cycle; see
+%SYNC-RNG).
+
+Deliberately keeps its own simple per-cycle loop instead of delegating to
+(POKEY-ADVANCE pokey cpu 1): this is the hottest POKEY entry point
+(29,868 calls per frame from the machine scheduler), and POKEY-ADVANCE's
+event-skipping bookkeeping costs more than it saves at N = 1 (measured:
+LispWorks lost ~20% frame rate through the general path).  Both paths
+share %EXPIRE-CHANNEL and are pinned equivalent by
+pokey-tick-vs-advance-equivalence in tests/test-pokey.lisp."
   (declare (type pokey pokey))
+  (incf (pokey-rng-lag pokey))
   (let ((irq-raised nil))
     (dotimes (ch 4)
       (declare (type fixnum ch))
       ;; Decrement the divider pre-counter; tick the timer only when it
       ;; expires.
       (when (zerop (decf (aref (pokey-sub-counters pokey) ch)))
-        (setf (aref (pokey-sub-counters pokey) ch)
-              (%channel-divisor pokey ch))
-        (let ((new (1- (aref (pokey-timer-counts pokey) ch))))
-          (declare (type fixnum new))
-          (cond
-            ((minusp new)
-             ;; Underflow: reload from AUDF and try to fire IRQ.
-             (setf (aref (pokey-timer-counts pokey) ch)
-                   (aref (pokey-audf pokey) ch))
-             (when (%fire-timer-irq pokey cpu ch)
-               (setf irq-raised t)))
-            (t
-             (setf (aref (pokey-timer-counts pokey) ch) new))))))
-    (%advance-rng pokey)
+        (when (%expire-channel pokey cpu ch)
+          (setf irq-raised t))))
+    irq-raised))
+
+(defun pokey-advance (pokey cpu n)
+  "Advance POKEY by N CPU cycles.  Returns T if any timer raised an IRQ
+during those cycles.
+
+Uses event skipping rather than a per-cycle loop: between sub-counter
+expiries the only per-cycle state change is the sub-counter decrements
+themselves (the LFSRs are stepped lazily — see %SYNC-RNG), so each pass
+jumps straight to the earliest expiry — (MIN over channels of the
+sub-counter, capped at the cycles remaining) — decrements all four
+sub-counters by that amount arithmetically, and processes any that
+reached zero via %EXPIRE-CHANNEL, exactly as POKEY-TICK does.  Channels
+expiring on the same cycle are processed in order 0..3, matching the
+per-cycle loop.  Sub-counters are always >= 1 after a reload, so each
+pass consumes at least one cycle and the loop terminates.
+
+Bit-identical to N successive POKEY-TICK calls; the equivalence is
+pinned by pokey-tick-vs-advance-equivalence in tests/test-pokey.lisp.
+The payoff is for multi-cycle N (the scanline scheduler's per-line
+advances); for single cycles prefer POKEY-TICK, whose flat loop is
+cheaper than this function's chunk bookkeeping."
+  (declare (type pokey pokey) (type fixnum n))
+  (incf (pokey-rng-lag pokey) n)
+  (let ((subs (pokey-sub-counters pokey))
+        (irq-raised nil))
+    (loop while (plusp n)
+          do (let ((chunk (min n
+                               (aref subs 0) (aref subs 1)
+                               (aref subs 2) (aref subs 3))))
+               (declare (type fixnum chunk))
+               (decf n chunk)
+               (dotimes (ch 4)
+                 (declare (type fixnum ch))
+                 (when (zerop (decf (aref subs ch) chunk))
+                   (when (%expire-channel pokey cpu ch)
+                     (setf irq-raised t))))))
     irq-raised))
 
 ;;; ---------------------------------------------------------------------------
@@ -318,7 +429,8 @@ Side effects:
         (pokey-skstat pokey) #xFF
         (pokey-kbcode pokey) 0
         (pokey-poly17-state pokey) #x1FFFF
-        (pokey-poly9-state  pokey) #x01FF)
+        (pokey-poly9-state  pokey) #x01FF
+        (pokey-rng-lag      pokey) 0)
   ;; IRQEN is now 0, so this de-asserts any IRQ POKEY was holding.
   (%sync-irq-line pokey)
   pokey)

@@ -33,6 +33,12 @@
 
 (in-package #:atari800-cl.antic)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; NTSC timing constants
 ;;;
@@ -105,7 +111,15 @@ Slots:
                             :initial-element 0)
              :type (simple-array (unsigned-byte 8) (32)))
   (dlist-pointer 0 :type (unsigned-byte 16))
-  (dl-offset     0 :type (unsigned-byte 16))
+  ;; FIXNUM rather than (UNSIGNED-BYTE 16): DL-OFFSET only resets to 0 on a
+  ;; JMP/JVB instruction or a fresh DL latch; a malformed display list that
+  ;; never contains one lets it grow past 65535 (INCF by 1 or 2 per DL byte
+  ;; consumed, unbounded across scanlines).  %DL-CURRENT-ADDRESS already
+  ;; masks the derived bus address with (LDB (BYTE 16 0) ...), so the raw
+  ;; offset itself never needs to stay within 16 bits — fixnum avoids a
+  ;; spurious type error (or, at (safety 1)(speed 3), UB) on overflow
+  ;; without changing modelled behaviour for any well-formed DL.
+  (dl-offset     0 :type fixnum)
   (scanline      0 :type (unsigned-byte 9))
   (color-clock   0 :type (unsigned-byte 8))
   (dmactl        0 :type (unsigned-byte 8))
@@ -251,6 +265,8 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tick — advances one color clock
+
+(declaim (ftype (function (antic (or null cpu) (or null bus)) fixnum) antic-tick))
 
 (defun antic-tick (antic cpu bus)
   "Advance ANTIC by one color clock.  Returns the cycles stolen this tick.

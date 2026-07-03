@@ -111,6 +111,26 @@ Run a single test suite (e.g. just the CPU opcode tests):
 (fiveam:run! 'atari800-cl/tests::cpu-opcode-suite)
 ```
 
+## Benchmarking
+
+Frame-rate benchmark harness for measuring optimization deltas. Works
+without real ROM images (synthetic NOP/IRQ workloads built inline).
+
+```sh
+./scripts/bench-sbcl.sh
+./scripts/bench-lispworks.sh
+```
+
+Each prints one machine-readable line per workload:
+`BENCH <workload> frames=600 seconds=<s> fps=<fps> realtime-x=<fps/59.92>`.
+Two workloads: `nop` (NOP-sled baseline) and `irq` (busy loop + POKEY
+timer 1 IRQs exercising the interrupt path). Tune via
+`atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
+
+**Rule: every optimization commit updates `PERFORMANCE_LOG.md` with
+before/after numbers from BOTH implementations.** Measure first, commit
+the delta in the commit message, and log it here.
+
 ## Architecture
 
 ### Package layering (bottom-up dependency order)
