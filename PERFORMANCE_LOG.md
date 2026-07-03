@@ -26,6 +26,25 @@ faster than a real Atari 800 XL).
 | 2026-07-02 | ff34cc4  | lispworks      | nop      |  652.88 | 10.896     | Phase 1: optimize/ftype declarations |
 | 2026-07-02 | ff34cc4  | lispworks      | irq      |  620.48 | 10.355     | Phase 1: optimize/ftype declarations |
 | 2026-07-02 | ff34cc4  | lispworks      | klaus    |  536.55 |  8.954     | Phase 1, klaus+PASS, 3252 frames |
+| 2026-07-02 | df7875d  | sbcl           | nop      | 2618.63 | 43.702     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
+| 2026-07-02 | df7875d  | sbcl           | irq      | 2174.30 | 36.287     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
+| 2026-07-02 | df7875d  | sbcl           | klaus    | 1953.69 | 32.605     | Phase 3, klaus+PASS, 3252 frames (mean of 3) |
+| 2026-07-02 | df7875d  | lispworks      | nop      |  665.44 | 11.105     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
+| 2026-07-02 | df7875d  | lispworks      | irq      |  626.31 | 10.452     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
+| 2026-07-02 | df7875d  | lispworks      | klaus    |  538.03 |  8.979     | Phase 3, klaus+PASS, 3252 frames (mean of 3) |
+
+## Phase 3 note — POKEY-TICK does not delegate to POKEY-ADVANCE
+
+Phase 3's first cut made `pokey-tick` a thin `(pokey-advance pokey cpu 1)`
+wrapper.  Measured through that path, LispWorks lost 18-26% frame rate
+across all workloads (nop 652.88 -> ~481) and SBCL was flat: at N = 1 the
+event-skipping bookkeeping (extra call, chunk MIN, loop setup) costs more
+than the two LFSR steps it saves.  Final shape: `pokey-tick` keeps its own
+flat per-cycle loop with the lazy-RNG win only, `pokey-advance` keeps
+event skipping for the multi-cycle callers the scanline scheduler will
+add, and both share `%expire-channel` with a 50,000-cycle equivalence
+test pinning them together.  That version is what df7875d ships (SBCL
++12%, LispWorks +0.3-1.9%).
 
 ## Phase 2 — page-dispatch table (rejected, not committed)
 
