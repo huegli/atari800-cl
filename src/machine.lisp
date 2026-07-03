@@ -4,14 +4,16 @@
 ;;;; all to the 6502 CPU.  The cold-reset path loads ROM images and
 ;;;; lets the CPU fetch its first PC from the reset vector at $FFFC.
 ;;;;
-;;;; MACHINE-RUN-FRAME pumps 29,868 NTSC color clocks (262 × 114),
-;;;; ticking ANTIC and POKEY at each clock.  When ANTIC reports cycles
-;;;; stolen for that clock, the CPU does NOT advance; otherwise we add
-;;;; one cycle to the CPU's budget and, once the budget is large enough,
-;;;; fetch and execute the next instruction.  Pending NMI/IRQ lines are
-;;;; serviced inside STEP-CPU before each instruction fetch, so the
-;;;; 7-cycle interrupt-entry sequence is charged against the CPU budget
-;;;; exactly like an instruction.
+;;;; MACHINE-RUN-FRAME runs one NTSC frame (29,868 clocks = 262 scanlines
+;;;; of 114 CPU cycles) one SCANLINE at a time: ANTIC-BEGIN-SCANLINE
+;;;; performs the line's events (VBI/DLI, display-list fetch) and reports
+;;;; the cycles ANTIC steals; the rest of the line becomes CPU budget;
+;;;; the CPU executes whole instructions against that budget with POKEY
+;;;; advanced instruction-by-instruction alongside; ANTIC-END-SCANLINE
+;;;; closes the line.  Pending NMI/IRQ lines are serviced inside STEP-CPU
+;;;; before each instruction fetch, so the 7-cycle interrupt-entry
+;;;; sequence is charged against the CPU budget exactly like an
+;;;; instruction.
 
 (in-package #:atari800-cl.machine)
 
@@ -234,8 +236,27 @@ Keys: :PORTB :OS-ROM-MAPPED :BASIC-ROM-MAPPED :SELFTEST-MAPPED."
 ;;; Frame scheduler
 
 (defun %run-clocks (machine n &key abort-pred)
-  "Run N NTSC color clocks on MACHINE, pumping ANTIC + POKEY in lockstep with
-the CPU.  Returns the number of clocks actually run.
+  "Run N NTSC clock cycles on MACHINE at scanline granularity.  Returns
+the number of clocks actually run (N unless ABORT-PRED stopped early).
+
+Structure (SCANLINE_ACCURACY_PLAN.md Phase 1): the loop advances one
+scanline — 114 CPU cycles — at a time.  For each line:
+
+  1. ANTIC-BEGIN-SCANLINE performs the line-start events (VBI/DLI NMIs,
+     display-list fetch) and returns the cycles ANTIC steals; the
+     remainder (114 - stolen) is added to CPU-BUDGET.
+  2. The CPU executes whole instructions while at least 2 cycles (the
+     minimum 6502 instruction) of budget remain.  POKEY is advanced
+     instruction-by-instruction alongside the CPU — NOT in one
+     line-sized batch — so its timer IRQs assert at the correct
+     instruction boundary within the line.
+  3. POKEY is topped up to exactly the line's cycle count (whatever the
+     CPU did not account for), then ANTIC-END-SCANLINE closes the line.
+
+POKEY accounting: POKEY receives exactly 114 cycles per line.  Because
+CPU-BUDGET carries across lines, the CPU can occasionally consume a few
+more cycles within one line than the line grants; POKEY advancement is
+capped at the line length so the surplus is not double-counted.
 
 Pending NMI/IRQ lines are serviced by STEP-CPU itself (NMI first, then
 IRQ when the I flag is clear) before each instruction fetch; the 7 cycles
@@ -243,54 +264,78 @@ an interrupt-entry sequence consumes come out of CPU-BUDGET exactly like
 an instruction's cycles, so the CPU cannot run ahead of the clock by
 servicing interrupts for free.
 
-If ABORT-PRED is supplied it is funcalled once per scanline (every 114
-clocks); a true result stops early and returns the clocks run so far.  The
-default run loop does NOT pass ABORT-PRED — pause/resume/reset are handled
-at frame boundaries (Decision 1: frame-granularity) — but the hook is here
-for a future scanline-granular abort.  CPU-BUDGET is intentionally local: an
-aborted partial run is discarded, not resumed, so no budget needs to carry
-across calls."
+Note on steal accounting: the old per-clock scheduler suppressed only
+ONE budget cycle per line when ANTIC reported a steal; this scheduler
+charges the full steal (114 - stolen granted per line), so the CPU now
+correctly loses all 9+ stolen cycles each line.
+
+When N is not a multiple of 114, floor(N/114) full lines run, then one
+partial line of the remaining cycles: it begins with the usual
+line-start events and steal, but ANTIC-END-SCANLINE is NOT run for it
+(the line is incomplete, so ANTIC's scanline counter must not advance).
+The existing callers all pass whole-line multiples.
+
+If ABORT-PRED is supplied it is funcalled once per scanline boundary
+(before each line after the first); a true result stops early and
+returns the clocks run so far.  The default run loop does NOT pass
+ABORT-PRED — pause/resume/reset are handled at frame boundaries
+(Decision 1: frame-granularity).  CPU-BUDGET is intentionally local: an
+aborted partial run is discarded, not resumed, so no budget needs to
+carry across calls."
   (declare (type atari-machine machine) (type fixnum n))
   (let* ((cpu   (atari-machine-cpu   machine))
          (bus   (atari-machine-bus   machine))
          (antic (atari-machine-antic machine))
          (pokey (atari-machine-pokey machine))
-         (cpu-budget 0))
-    (declare (type fixnum cpu-budget))
-    (dotimes (clock n)
-      (declare (type fixnum clock))
-      ;; Frame-granular abort check (only when a predicate was supplied).
-      (when (and abort-pred
-                 (zerop (mod clock 114))
-                 (plusp clock)
-                 (funcall abort-pred))
-        (return-from %run-clocks clock))
-      (let ((stolen (antic-tick antic cpu bus)))
-        (declare (type fixnum stolen))
-        (pokey-tick pokey cpu)
-        ;; A clock that ANTIC did NOT steal contributes one cycle of
-        ;; CPU budget; stolen clocks consume the cycle silently.
-        (when (zerop stolen)
-          (incf cpu-budget))
-        ;; If we have budget for at least the minimum instruction (2 cycles
-        ;; on the 6502) and the CPU isn't halted, step it once.  STEP-CPU
-        ;; services a pending NMI/IRQ instead of fetching when one is due,
-        ;; returning the 7-cycle entry cost so it is charged to the budget.
-        (when (and (>= cpu-budget 2) (not (cpu-halted cpu)))
-          (handler-case
-              (let ((used (step-cpu cpu)))
-                (declare (type fixnum used))
-                (decf cpu-budget used))
-            ;; A KIL instruction signals ILLEGAL-OPCODE; leave the CPU
-            ;; halted and stop trying to step.
-            (illegal-opcode ()
-              (setf (cpu-halted cpu) t))))))
+         (cpu-budget 0)
+         (clocks-run 0))
+    (declare (type fixnum cpu-budget clocks-run))
+    (loop while (< clocks-run n)
+          do ;; Scanline-boundary abort check (only when a predicate was
+             ;; supplied, and never before the first line).
+             (when (and abort-pred
+                        (plusp clocks-run)
+                        (funcall abort-pred))
+               (return-from %run-clocks clocks-run))
+             (let* ((line-cycles (min +color-clocks-per-scanline+
+                                      (- n clocks-run)))
+                    (stolen (antic-begin-scanline antic cpu bus))
+                    (pokey-remaining line-cycles))
+               (declare (type fixnum line-cycles stolen pokey-remaining))
+               (incf cpu-budget (- line-cycles stolen))
+               ;; Run whole instructions while the budget allows.  STEP-CPU
+               ;; services a pending NMI/IRQ instead of fetching when one is
+               ;; due, returning the 7-cycle entry cost so it is charged to
+               ;; the budget.
+               (loop while (and (>= cpu-budget 2) (not (cpu-halted cpu)))
+                     do (handler-case
+                            (let ((used (step-cpu cpu)))
+                              (declare (type fixnum used))
+                              (decf cpu-budget used)
+                              ;; Advance POKEY alongside the instruction,
+                              ;; capped at this line's remaining cycles.
+                              (let ((chunk (min used pokey-remaining)))
+                                (when (plusp chunk)
+                                  (pokey-advance pokey cpu chunk)
+                                  (decf pokey-remaining chunk))))
+                          ;; A KIL instruction signals ILLEGAL-OPCODE; leave
+                          ;; the CPU halted and stop trying to step.
+                          (illegal-opcode ()
+                            (setf (cpu-halted cpu) t))))
+               ;; Top POKEY up to exactly this line's cycle count.
+               (when (plusp pokey-remaining)
+                 (pokey-advance pokey cpu pokey-remaining))
+               ;; Close the line — but not a trailing partial line.
+               (when (= line-cycles +color-clocks-per-scanline+)
+                 (antic-end-scanline antic))
+               (incf clocks-run line-cycles)))
     n))
 
 (defun machine-run-frame (machine)
-  "Run one NTSC frame: 29,868 color clocks.  Pumps ANTIC + POKEY in
-lockstep with the CPU (servicing pending NMI/IRQ between instructions)
-and increments FRAME-COUNT before returning MACHINE."
+  "Run one NTSC frame: 29,868 clocks = 262 scanlines of 114 CPU cycles.
+Drives ANTIC and POKEY scanline-by-scanline in lockstep with the CPU
+(servicing pending NMI/IRQ between instructions) and increments
+FRAME-COUNT before returning MACHINE."
   (%run-clocks machine +clocks-per-frame+)
   (incf (atari-machine-frame-count machine))
   machine)

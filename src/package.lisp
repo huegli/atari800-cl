@@ -299,6 +299,8 @@
            #:antic-frame-count
            #:antic-stolen-cycles
            #:antic-tick
+           #:antic-begin-scanline
+           #:antic-end-scanline
            #:antic-read
            #:antic-write
            #:reset-antic
