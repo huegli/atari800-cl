@@ -363,6 +363,7 @@
            #:pokey-kbcode
            #:pokey-input
            #:pokey-tick
+           #:pokey-advance
            #:pokey-read #:pokey-write
            #:pokey-random
            #:reset-pokey
