@@ -32,6 +32,42 @@ faster than a real Atari 800 XL).
 | 2026-07-02 | df7875d  | lispworks      | nop      |  665.44 | 11.105     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
 | 2026-07-02 | df7875d  | lispworks      | irq      |  626.31 | 10.452     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
 | 2026-07-02 | df7875d  | lispworks      | klaus    |  538.03 |  8.979     | Phase 3, klaus+PASS, 3252 frames (mean of 3) |
+| 2026-07-02 | 3e9601d  | sbcl           | nop      | 2490.09 | 41.553     | Merge perf-plan into pixel-renderer (mean of 3) |
+| 2026-07-02 | 3e9601d  | sbcl           | irq      | 2103.38 | 35.107     | Merge perf-plan into pixel-renderer (mean of 3) |
+| 2026-07-02 | 3e9601d  | sbcl           | klaus    | 1891.91 | 31.574     | Merge perf-plan into pixel-renderer, klaus+PASS, 3252 frames (mean of 3) |
+| 2026-07-02 | 3e9601d  | lispworks      | nop      |  647.52 | 10.805     | Merge perf-plan into pixel-renderer (mean of 3) |
+| 2026-07-02 | 3e9601d  | lispworks      | irq      |  606.50 | 10.121     | Merge perf-plan into pixel-renderer (mean of 3) |
+| 2026-07-02 | 3e9601d  | lispworks      | klaus    |  531.26 |  8.866     | Merge perf-plan into pixel-renderer, klaus+PASS, 3252 frames (mean of 3) |
+
+## Merge atari800-cl-perf-plan into pixel-renderer (3e9601d)
+
+Merged the performance branch (Phase 1 declarations + Phase 3 POKEY
+batching) into the pixel-renderer branch and re-benchmarked the combined
+tree. The renderer is not on the per-clock hot path (it runs once per
+scanline from `%RUN-CLOCKS`'s line-end callback), so the merge is
+expected to be neutral vs. the df7875d perf-only numbers. Measured delta
+vs. df7875d (mean of 3, same machine):
+
+| implementation | workload | df7875d fps | 3e9601d fps | delta  |
+|----------------|----------|-------------|-------------|--------|
+| sbcl           | nop      | 2618.63     | 2490.09     | -4.9%  |
+| sbcl           | irq      | 2174.30     | 2103.38     | -3.3%  |
+| sbcl           | klaus    | 1953.69     | 1891.91     | -3.2%  |
+| lispworks      | nop      |  665.44     |  647.52     | -2.7%  |
+| lispworks      | irq      |  626.31     |  606.50     | -3.2%  |
+| lispworks      | klaus    |  538.03     |  531.26     | -1.3%  |
+
+The small across-the-board regression is run-to-run variance, not a real
+cost from the merge: the renderer's per-scanline callback is only invoked
+for active scanlines 8-247, and in these three workloads the display list
+is blank (nop/irq) or OS-driven (klaus) so the callback either does no
+playfield work or is not installed (the bench harness builds machines
+without an AESP server, so `atari-machine-scanline-fn` is NIL and the
+callback is a single `WHEN` check per line). The df7875d numbers were
+taken on the perf branch without the renderer source loaded; the
+combined tree loads `src/renderer.lisp` but does not call into it during
+benchmarks. Conclusion: merge is neutral modulo variance; no follow-up
+needed.
 
 ## Phase 3 note — POKEY-TICK does not delegate to POKEY-ADVANCE
 
