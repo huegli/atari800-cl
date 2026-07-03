@@ -32,6 +32,34 @@ faster than a real Atari 800 XL).
 | 2026-07-02 | df7875d  | lispworks      | nop      |  665.44 | 11.105     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
 | 2026-07-02 | df7875d  | lispworks      | irq      |  626.31 | 10.452     | Phase 3: lazy RNG + POKEY-ADVANCE (mean of 3) |
 | 2026-07-02 | df7875d  | lispworks      | klaus    |  538.03 |  8.979     | Phase 3, klaus+PASS, 3252 frames (mean of 3) |
+| 2026-07-02 | c69772d  | sbcl           | nop      | 4005.57 | 66.849     | Scanline scheduler (mean of 3)   |
+| 2026-07-02 | c69772d  | sbcl           | irq      | 4242.57 | 70.804     | Scanline scheduler (mean of 3)   |
+| 2026-07-02 | c69772d  | sbcl           | klaus    | 3380.79 | 56.422     | Scanline sched, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-07-02 | c69772d  | lispworks      | nop      | 1019.84 | 17.020     | Scanline scheduler (mean of 3)   |
+| 2026-07-02 | c69772d  | lispworks      | irq      | 1607.22 | 26.823     | Scanline scheduler (mean of 3)   |
+| 2026-07-02 | c69772d  | lispworks      | klaus    |  999.91 | 16.688     | Scanline sched, klaus+PASS, 3500 frames (mean of 3) |
+
+## Scanline scheduler note — fps gain includes an accuracy correction
+
+c69772d (SCANLINE_ACCURACY_PLAN.md Phase 1) restructures the frame loop
+from per-clock to per-scanline: ~260 antic/pokey calls per frame instead
+of ~60,000, and POKEY-ADVANCE finally runs with multi-cycle N, which is
+where its Phase 3 event skipping pays off (LispWorks irq +157%).  Two
+caveats when comparing these rows against earlier ones:
+
+- Part of the fps gain (~7%) is an ACCURACY correction, not pure
+  optimization: the old per-clock loop suppressed only one budget cycle
+  per line when ANTIC reported a steal, granting the CPU 113
+  cycles/line regardless of the real steal.  The new scheduler charges
+  the full steal (105 cycles/line at the default 9-cycle refresh + P/M
+  steal), so each frame simply executes fewer instructions.  The Klaus
+  workload confirms the same total work: 3500 frames x 27,510 granted
+  cycles ~= 3252 frames x the old ~29,600.
+- The Klaus workload's frame-boundary stuck-PC trap detection had to be
+  hardened in the same commit (confirm traps at instruction
+  granularity): the deterministic per-frame cycle grant can alias a
+  long-running test loop's period, producing a false FAIL at a PC that
+  is not a trap.
 
 ## Phase 3 note — POKEY-TICK does not delegate to POKEY-ADVANCE
 
