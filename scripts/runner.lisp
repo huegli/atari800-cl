@@ -296,9 +296,9 @@ wait loop ever falls through."
              (bus   (bus-of machine)))
 
         (format t "==> loaded ~A~%" xex)
-        (format t "    segments: ~{$~{~4,'0X~}-$~{~4,'0X~}~^, ~}~%"
+        (format t "    segments: ~{$~4,'0X-$~4,'0X~^, ~}~%"
                 (loop for (s . e) in (getf load-result :segments)
-                      collect (list (list s) (list e))))
+                      append (list s e)))
         (when init (format t "    INIT vector: $~4,'0X (not auto-invoked)~%" init))
         (format t "    RUN  entry : $~4,'0X~%" entry)
 

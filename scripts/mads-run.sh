@@ -2,7 +2,8 @@
 # mads-run.sh — Build a MADS source file and, on success, run the resulting
 # XEX in atari800-cl.  Bound to a separate BBEdit keystroke from mads-build.
 #
-# Usage:   mads-run.sh path/to/source.asm
+# Usage:   mads-run.sh path/to/source.asm [atari-run.sh options...]
+#          e.g. mads-run.sh path/to/source.asm -frame 2 -o out.png
 # Exit:    propagates the runner's exit code on a clean build,
 #          or the build's exit code on a build failure.
 
@@ -11,11 +12,12 @@ set -eu -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $(basename "$0") <source.asm>" >&2
+  echo "usage: $(basename "$0") <source.asm> [atari-run.sh options...]" >&2
   exit 3
 fi
 
 SRC="$1"
+shift
 SRC="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
 SRC_DIR="$(dirname "$SRC")"
 SRC_STEM="$(basename "${SRC%.*}")"
@@ -36,4 +38,4 @@ if [[ ! -f "$XEX" ]]; then
 fi
 
 # 3.  Run.
-exec "$SCRIPT_DIR/atari-run.sh" "$XEX"
+exec "$SCRIPT_DIR/atari-run.sh" "$XEX" "$@"
