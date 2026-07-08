@@ -1,0 +1,3 @@
+[submodule "minimal-xl"]
+	path = minimal-xl
+	url = https://github.com/huegli/minimal-xl.git
