@@ -8,17 +8,23 @@
 ;;;; approach as tests/test-helpers.lisp::%make-synthetic-os-rom, but
 ;;;; inlined here so the bench does not depend on the test system.
 ;;;;
-;;;; Two workloads:
-;;;;   NOP   — a NOP sled that loops back via a JMP at $FFF9, so the PC
-;;;;           marches NOPs from $C000 to $FFF9 forever without running
-;;;;           into the vector bytes.  Baseline CPU/memory path.
-;;;;   IRQ   — a busy loop that sets up POKEY timer 1 (AUDF1=50, 64 kHz
-;;;;           clock, IRQEN=timer1, STIMER reload), enables CPU IRQs
-;;;;           with CLI, then JMP-self.  The IRQ handler at $FE00 is a
-;;;;           bare RTI.  Exercises the interrupt path.
-;;;;   KLAUS — Klaus Dormann 6502 functional test binary loaded into
-;;;;           RAM at $0000, run until the success trap at $3469.
-;;;;           Skips gracefully if roms/6502_functional_test.bin is absent.
+;;;; Four workloads:
+;;;;   NOP     — a NOP sled that loops back via a JMP at $FFF9, so the PC
+;;;;             marches NOPs from $C000 to $FFF9 forever without running
+;;;;             into the vector bytes.  Baseline CPU/memory path.
+;;;;   IRQ     — a busy loop that sets up POKEY timer 1 (AUDF1=50, 64 kHz
+;;;;             clock, IRQEN=timer1, STIMER reload), enables CPU IRQs
+;;;;             with CLI, then JMP-self.  The IRQ handler at $FE00 is a
+;;;;             bare RTI.  Exercises the interrupt path.
+;;;;   DISPLAY — the NOP sled with a 24-line mode-2 display list fetched
+;;;;             by ANTIC (DMACTL $22) and the pixel renderer attached
+;;;;             via the machine's scanline callback, exactly as the
+;;;;             AESP server wires it.  Exercises the DMA-active steal
+;;;;             accounting plus per-line rendering — the path real
+;;;;             display programs (and A/V capture) actually run.
+;;;;   KLAUS   — Klaus Dormann 6502 functional test binary loaded into
+;;;;             RAM at $0000, run until the success trap at $3469.
+;;;;             Skips gracefully if roms/6502_functional_test.bin is absent.
 ;;;;
 ;;;; Procedure per workload: build machine, cold reset, run 60 warm-up
 ;;;; frames, then time 600 frames with get-internal-real-time and print
@@ -175,6 +181,52 @@ Timer 1 period ~ 50 * 28 = 1400 cycles, so IRQs fire roughly every
      :irq-pc   #xFE00)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Display workload setup
+;;;
+;;; Runs on the NOP-sled ROM; the interesting work is ANTIC fetching a
+;;; real display list (with playfield + DL-fetch cycle steals charged)
+;;; and the renderer producing pixels for all 192 playfield scanlines
+;;; of every frame.
+
+(defun %setup-display-workload (machine)
+  "Poke a 24-line mode-2 display list + screen data into MACHINE's RAM,
+enable playfield DMA, and attach the pixel renderer through the
+machine's scanline callback (the same wiring src/aesp.lisp uses).
+Called by RUN-WORKLOAD after cold reset, before the warm-up frames."
+  (let ((bus  (atari800-cl.machine:atari-machine-bus  machine))
+        (gtia (atari800-cl.machine:atari-machine-gtia machine))
+        (fb   (atari800-cl.renderer:make-framebuffer)))
+    ;; DL at $4000: mode 2 + LMS -> $5000, 23 plain mode-2 lines, JVB $4000.
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x42)
+    (atari800-cl.bus:bus-poke-ram bus #x4001 #x00)
+    (atari800-cl.bus:bus-poke-ram bus #x4002 #x50)
+    (loop for i from 0 below 23
+          do (atari800-cl.bus:bus-poke-ram bus (+ #x4003 i) #x02))
+    (atari800-cl.bus:bus-poke-ram bus #x401A #x41)
+    (atari800-cl.bus:bus-poke-ram bus #x401B #x00)
+    (atari800-cl.bus:bus-poke-ram bus #x401C #x40)
+    ;; Screen RAM: 24 rows x 40 chars of char code 1; glyphs at $6000
+    ;; with char 1 a solid block, so every playfield pixel is written.
+    (dotimes (i (* 24 40))
+      (atari800-cl.bus:bus-poke-ram bus (+ #x5000 i) #x01))
+    (dotimes (r 8)
+      (atari800-cl.bus:bus-poke-ram bus (+ #x6008 r) #xFF))
+    (atari800-cl.bus:bus-write bus #xD409 #x60)      ; CHBASE
+    (atari800-cl.bus:bus-write bus #xD018 #x68)      ; COLPF2
+    (atari800-cl.bus:bus-write bus #xD402 #x00)      ; DLISTL
+    (atari800-cl.bus:bus-write bus #xD403 #x40)      ; DLISTH
+    (atari800-cl.bus:bus-write bus #xD400 #x22)      ; DMACTL
+    (setf (atari800-cl.machine:atari-machine-scanline-fn machine)
+          (lambda (m)
+            (let* ((a   (atari800-cl.machine:atari-machine-antic m))
+                   (sl  (mod (1- (atari800-cl.antic:antic-scanline a))
+                             atari800-cl.antic:+scanlines-per-frame+))
+                   (row (- sl atari800-cl.antic:+active-start-scanline+)))
+              (when (and (>= row 0) (< row 240))
+                (atari800-cl.renderer:render-scanline
+                 fb row a gtia (atari800-cl.machine:atari-machine-bus m))))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Klaus Dormann functional test workload
 
 (defun %load-klaus-binary-into-bus (bus bytes)
@@ -260,13 +312,17 @@ found (prints a SKIP line instead)."
 ;;; ---------------------------------------------------------------------------
 ;;; Workload runner
 
-(defun run-workload (name rom)
+(defun run-workload (name rom &key setup-fn)
   "Build a machine with ROM installed, cold-reset, run *warmup-frames*
 warm-up frames, then time *measured-frames* frames and print a single
-BENCH line to *standard-output*.  Returns the printed line as a string."
+BENCH line to *standard-output*.  When SETUP-FN is supplied it is called
+with the machine after cold reset and before warm-up (the :display
+workload uses it to poke its display list and attach the renderer).
+Returns the printed line as a string."
   (declare (type string name))
   (let ((machine (atari800-cl.machine:make-atari-machine)))
     (atari800-cl.machine:machine-cold-reset machine :os-rom rom)
+    (when setup-fn (funcall setup-fn machine))
     ;; Warm up: prime caches, JIT-ish inline caches, etc.
     (dotimes (i *warmup-frames*)
       (atari800-cl.machine:machine-run-frame machine))
@@ -287,10 +343,10 @@ BENCH line to *standard-output*.  Returns the printed line as a string."
         (force-output *standard-output*)
         line))))
 
-(defun run-benchmarks (&key (workloads '(:nop :irq :klaus)))
-  "Run every workload named in WORKLOADS (default :nop, :irq, :klaus)
-and print one BENCH line per workload.  The :klaus workload skips
-gracefully if the functional test binary is not found.
+(defun run-benchmarks (&key (workloads '(:nop :irq :display :klaus)))
+  "Run every workload named in WORKLOADS (default :nop, :irq, :display,
+:klaus) and print one BENCH line per workload.  The :klaus workload
+skips gracefully if the functional test binary is not found.
 Returns a list of the printed lines (NIL entries for skipped workloads
 are removed)."
   (let ((roms (list (cons :nop (make-nop-rom))
@@ -302,6 +358,10 @@ are removed)."
          (let ((result (run-klaus-workload)))
            (when result
              (push (first result) lines))))
+        ((eq w :display)
+         (push (run-workload "display" (make-nop-rom)
+                             :setup-fn #'%setup-display-workload)
+               lines))
         (t
          (let ((rom (cdr (assoc w roms))))
            (unless rom
