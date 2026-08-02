@@ -3,6 +3,30 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 1 — cheap hardening batch
+
+Four independent fixes from `MISC_IMPROVEMENTS_PLAN.md`:
+
+- **Opcode-table reload robustness** (item 1) — `*OPCODE-TABLE*` and
+  `*OPCODE-MNEMONIC-TABLE*` are now load-time `DEFVAR`s in `cpu.lisp`;
+  `DEFOPCODE` writes directly into them instead of through a temporary
+  `*OPCODE-TABLE-BUILDER*` bulk-installed at end of file. Reloading
+  `cpu-opcodes.lisp` alone in a live image no longer silently drops
+  `illegal.lisp`'s 105 handlers.
+- **Reset flag consistency** (item 2) — `machine-cold-reset` now sets
+  P to `#x24` (U=1, I=1), matching `reset-cpu`; it previously set
+  `#x34`, disagreeing about the phantom B bit (not a real register bit
+  outside a pushed stack copy).
+- **LispWorks `chmod-file` via FLI** (item 8) — replaced the
+  `/bin/chmod` shell-out with a direct `fli:define-foreign-function`
+  binding to `chmod(2)`, following the existing `%getpid` pattern.
+- **`scripts/fetch-test-roms.sh`** (item 3) — downloads the prebuilt
+  Klaus Dormann functional-test binary into `roms/` (gitignored,
+  no-ops if already present), unblocking that test without a manual
+  build step.
+
+Suite: 1708/1708 checks green on both SBCL and LispWorks.
+
 ## Branch consolidation — everything back on main
 
 The `atari800-cl-perf-ph3-scanline` (performance + scanline scheduler)

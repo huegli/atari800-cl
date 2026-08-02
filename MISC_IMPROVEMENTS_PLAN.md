@@ -1,5 +1,9 @@
 # Miscellaneous Improvements Plan
 
+> **Status (2026-08-02): items 1, 2, 3, 8 done** (ROADMAP.md Phase 1).
+> Items 4-7, 9-11 remain open; see ROADMAP.md for where each is
+> scheduled (item 4 -> Phase 12, items 5 -> Phase 8, 6+7 -> Phase 6c).
+
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent
 unless a dependency is stated; each is its own commit. Ordered roughly by
