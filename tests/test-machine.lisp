@@ -97,6 +97,69 @@ order of magnitude (29,868 clocks minus what ANTIC stole)."
           "CPU cycles after one frame should be ~29,868; got ~A" cycles))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Scanline-granular scheduler (SCANLINE_ACCURACY_PLAN.md Phase 1)
+
+(test machine-vbi-nmi-serviced-exactly-once-per-frame
+  "With NMIEN bit 6 set, the VBI NMI is raised — and serviced — exactly
+once per frame.  Counts services with a synthetic NMI handler that
+increments RAM $80 and RTIs."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000 :nmi-pc #xFE00)))
+    ;; Main program at $C000: JMP $C000 — a tight loop, so the PC never
+    ;; marches down the NOP filler into the handler bytes below.
+    (%poke os #x0000 #x4C)                               ; JMP abs
+    (%poke os #x0001 #x00)
+    (%poke os #x0002 #xC0)
+    ;; NMI handler at $FE00 (ROM offset $3E00): INC $80, RTI.
+    (%poke os #x3E00 #xE6)                               ; INC zp
+    (%poke os #x3E01 #x80)
+    (%poke os #x3E02 #x40)                               ; RTI
+    (let* ((m   (make-test-machine :os-rom os))
+           (bus (atari800-cl.machine:atari-machine-bus m)))
+      ;; Enable only the VBI NMI source (DMACTL stays 0, so no DLIs).
+      (atari800-cl.bus:bus-write bus #xD40E atari800-cl.antic:+nmi-vbi+)
+      (atari800-cl.machine:machine-run-frame m)
+      (is (= 1 (atari800-cl.bus:bus-peek-ram bus #x0080))
+          "VBI handler must run exactly once in frame 1; counter = ~D"
+          (atari800-cl.bus:bus-peek-ram bus #x0080))
+      (atari800-cl.machine:machine-run-frame m)
+      (is (= 2 (atari800-cl.bus:bus-peek-ram bus #x0080))
+          "Frame 2 must add exactly one more VBI service; counter = ~D"
+          (atari800-cl.bus:bus-peek-ram bus #x0080)))))
+
+(test machine-pokey-irq-serviced-within-same-scanline
+  "A POKEY timer IRQ that fires mid-line must be serviced within the same
+scanline it fires on.  Guards the scheduler's interleaving requirement:
+POKEY advances instruction-by-instruction alongside the CPU, not in one
+line-sized batch at the end of the line (which would delay IRQ delivery
+to the NEXT line and leave RAM $81 still 0 after one line here)."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000 :irq-pc #xFE10)))
+    ;; Main program at $C000: JMP $C000 — a tight loop, so the PC never
+    ;; marches down the NOP filler into the handler bytes below.
+    (%poke os #x0000 #x4C)                               ; JMP abs
+    (%poke os #x0001 #x00)
+    (%poke os #x0002 #xC0)
+    ;; IRQ handler at $FE10 (ROM offset $3E10): INC $81, RTI.
+    (%poke os #x3E10 #xE6)                               ; INC zp
+    (%poke os #x3E11 #x81)
+    (%poke os #x3E12 #x40)                               ; RTI
+    (let* ((m   (make-test-machine :os-rom os))
+           (cpu (atari800-cl.machine:atari-machine-cpu m))
+           (bus (atari800-cl.machine:atari-machine-bus m)))
+      ;; POKEY timer 1 at the 1.79 MHz clock (divisor 1), AUDF1 = 30:
+      ;; underflow + IRQ after 31 POKEY cycles — mid-line.
+      (atari800-cl.bus:bus-write bus #xD208 #x40)        ; AUDCTL: ch1 fast
+      (atari800-cl.bus:bus-write bus #xD200 30)          ; AUDF1
+      (atari800-cl.bus:bus-write bus #xD20E #x01)        ; IRQEN: timer 1
+      (atari800-cl.bus:bus-write bus #xD209 0)           ; STIMER
+      ;; Cold reset leaves I=1; unmask IRQs.
+      (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-i+)
+      ;; Run exactly ONE scanline.
+      (atari800-cl.machine:%run-clocks m 114)
+      (is (plusp (atari800-cl.bus:bus-peek-ram bus #x0081))
+          "IRQ handler must have run within the same 114-cycle scanline; ~
+           RAM $81 = ~D" (atari800-cl.bus:bus-peek-ram bus #x0081)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Interrupt service via the scheduler
 
 (test machine-synthetic-nmi-is-serviced-within-one-frame

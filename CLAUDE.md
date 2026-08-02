@@ -12,7 +12,7 @@ The emulated machine is functionally complete at the chip-state level:
 - **MMU** — PORTB-driven bank switching (OS ROM, BASIC ROM, self-test overlay).
 - **System bus** — full Atari 800 XL memory map with RAM/ROM banking and memory-mapped I/O dispatch to the four chips.
 - **PIA** (6520), **ANTIC** (NTSC scanline timing + display-list DMA), **GTIA** (player/missile state + collision latches), **POKEY** (timers, IRQ, RNG, audio register scaffolding).
-- **Machine scheduler** — `MACHINE-RUN-FRAME` pumps 29,868 NTSC color clocks per frame, ticking ANTIC/POKEY and stepping the CPU.
+- **Machine scheduler** — `MACHINE-RUN-FRAME` runs one NTSC frame (29,868 clocks = 262 scanlines × 114 CPU cycles) scanline-by-scanline: `ANTIC-BEGIN-SCANLINE` fires the line's events and reports stolen cycles, the CPU executes against the line's remaining budget with POKEY advanced instruction-by-instruction, and `ANTIC-END-SCANLINE` closes the line.
 
 What is *not* modelled: pixel-level video rendering (no framebuffer), POKEY audio synthesis (register state only), serial/SIO bus, keyboard scanning, paddles/light-pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
 

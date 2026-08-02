@@ -264,7 +264,134 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
     (when cpu (setf (cpu-pending-nmi cpu) t))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Tick — advances one color clock
+;;; Scanline events — the shared line-start / line-end logic
+;;;
+;;; Two drivers use these helpers: the per-cycle ANTIC-TICK (the original,
+;;; heavily-tested reference path) and the scanline-granular
+;;; ANTIC-BEGIN-SCANLINE / ANTIC-END-SCANLINE pair the machine scheduler
+;;; calls.  Keeping the event logic in ONE place means the two paths
+;;; cannot drift apart.
+
+(defun %begin-scanline-events (antic)
+  "Line-start work for the current scanline: VBI on entry to line 248
+(NMIST latch + NMI when NMIEN bit 6 is set, JVB release, DL pointer
+re-latch), display-list instruction fetch when a new mode line is due,
+DLI on the last scanline of a mode line, and the lumped per-line cycle
+steal (DRAM refresh + P/M DMA).  Returns the cycles stolen this line."
+  (declare (type antic antic))
+  ;; VBI fires on entry to scanline 248.
+  (when (= (antic-scanline antic) +vbi-scanline+)
+    (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-vbi+))
+    (when (logtest (antic-nmien antic) +nmi-vbi+)
+      (%raise-nmi antic))
+    ;; A JVB instruction parks ANTIC until VBLANK; we release it now.
+    (setf (antic-jvb-wait antic) nil
+          (antic-mode-scanlines-remaining antic) 0
+          ;; Re-latch DL pointer from the shadow registers.
+          (antic-dlist-pointer antic)
+          (dpb (aref (antic-registers antic) +reg-dlisth+) (byte 8 8)
+               (aref (antic-registers antic) +reg-dlistl+))
+          (antic-dl-offset antic) 0))
+  ;; If a new mode line is needed, fetch the next DL instruction.
+  (when (and (zerop (antic-mode-scanlines-remaining antic))
+             (not (antic-jvb-wait antic))
+             (%display-active-p antic))
+    (process-dl-instruction antic))
+  ;; DLI fires on the LAST scanline of the current mode line.  We
+  ;; identify "last" by the remaining counter being 1 (it'll
+  ;; decrement to 0 when the scanline finishes).
+  (when (and (antic-dli-armed antic)
+             (= (antic-mode-scanlines-remaining antic) 1))
+    (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-dli+))
+    (when (logtest (antic-nmien antic) +nmi-dli+)
+      (%raise-nmi antic))
+    (setf (antic-dli-armed antic) nil))
+  ;; Snapshot the screen-data pointer for the renderer.  This must happen
+  ;; AFTER the DL fetch (which may have set SCREEN-DATA-PTR via LMS) and
+  ;; BEFORE any end-of-line advancement, so the renderer sees the address
+  ;; that is correct for the scanline that is about to be rendered.
+  (setf (antic-render-screen-data-ptr antic)
+        (antic-screen-data-ptr antic))
+  ;; Refresh + P/M DMA steals for this line.
+  (let ((stolen (%scanline-steal antic)))
+    (incf (antic-stolen-cycles antic) stolen)
+    stolen))
+
+(defun %end-scanline-events (antic)
+  "End-of-scanline housekeeping: decrement the current mode line's
+remaining-scanlines counter, advance the scanline counter, and wrap at
+the frame boundary (bumping FRAME-COUNT).  Returns ANTIC."
+  (declare (type antic antic))
+  (when (plusp (antic-mode-scanlines-remaining antic))
+    (decf (antic-mode-scanlines-remaining antic)))
+  ;; Advance scan-y and screen-data-ptr for the next scanline.
+  ;; Only relevant during the active display region with DMA enabled.
+  (when (%display-active-p antic)
+    (let* ((inst  (antic-current-mode antic))
+           (mode  (ldb (byte 4 0) inst))
+           (total (mode-line-scanlines inst))
+           (y     (antic-scan-y antic)))
+      (when (>= mode 2)
+        (cond
+          ;; Bitmap modes: advance screen pointer every scanline.
+          ((>= mode 8)
+           (setf (antic-screen-data-ptr antic)
+                 (ldb (byte 16 0)
+                      (+ (antic-screen-data-ptr antic)
+                         (bytes-per-screen-row mode)))))
+          ;; Character modes: advance after the last scanline of each char row.
+          ((and (plusp total) (= y (1- total)))
+           (setf (antic-screen-data-ptr antic)
+                 (ldb (byte 16 0)
+                      (+ (antic-screen-data-ptr antic)
+                         (bytes-per-screen-row mode)))))))
+        ;; Always increment scan-y (wraps at mode-line boundary).
+        (setf (antic-scan-y antic)
+              (if (zerop total) 0
+                  (mod (1+ y) total)))))
+  (incf (antic-scanline antic))
+  (when (>= (antic-scanline antic) +scanlines-per-frame+)
+    (setf (antic-scanline antic) 0)
+    (incf (antic-frame-count antic)))
+  antic)
+
+;;; ---------------------------------------------------------------------------
+;;; Scanline-granular entry points (SCANLINE_ACCURACY_PLAN.md Phase 1)
+;;;
+;;; The machine scheduler drives ANTIC one whole scanline at a time:
+;;; ANTIC-BEGIN-SCANLINE at the start of each line (returning the cycles
+;;; stolen), ANTIC-END-SCANLINE once the line's 114 CPU cycles have been
+;;; distributed.  Neither touches the COLOR-CLOCK slot — that counter
+;;; belongs to the per-cycle ANTIC-TICK path.  Do not interleave the two
+;;; APIs on the same ANTIC unless COLOR-CLOCK is at 0 (a line boundary).
+
+(declaim (ftype (function (antic (or null cpu) (or null bus)) fixnum)
+                antic-begin-scanline))
+
+(defun antic-begin-scanline (antic cpu bus)
+  "Perform the line-start events for the current scanline and return the
+number of CPU cycles ANTIC steals from it: VBI on entry to line 248,
+display-list instruction fetch when a new mode line is due, DLI on the
+last scanline of a mode line, and the lumped per-line steal (DRAM
+refresh + P/M DMA).  CPU and BUS (either may be NIL to leave the current
+pointer untouched) are cached on the struct so NMI routing and DL
+fetches can reach them.  Pair every call with ANTIC-END-SCANLINE once
+the line has been executed."
+  (declare (type antic antic))
+  ;; Cache CPU and bus pointers on the struct so helpers can reach them.
+  (when cpu (setf (antic-cpu antic) cpu))
+  (when bus (setf (antic-bus antic) bus))
+  (%begin-scanline-events antic))
+
+(defun antic-end-scanline (antic)
+  "Close the current scanline: decrement the mode line's remaining-lines
+counter, advance SCANLINE, and wrap at the frame boundary (bumping
+FRAME-COUNT).  Returns ANTIC.  See ANTIC-BEGIN-SCANLINE."
+  (declare (type antic antic))
+  (%end-scanline-events antic))
+
+;;; ---------------------------------------------------------------------------
+;;; Tick — advances one color clock (the single-cycle reference path)
 
 (declaim (ftype (function (antic (or null cpu) (or null bus)) fixnum) antic-tick))
 
@@ -274,86 +401,21 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
 The per-scanline steal (DRAM refresh + P/M DMA) is lumped at
 color-clock 0 of each new scanline; all subsequent ticks within the
 same scanline return 0.  Display-list parsing, VBI, and DLI events
-are all serviced at color-clock 0 as well."
+are all serviced at color-clock 0 as well.  Built on the same
+%BEGIN-SCANLINE-EVENTS / %END-SCANLINE-EVENTS helpers as the
+scanline-granular API, so the two paths cannot diverge."
   (declare (type antic antic))
   ;; Cache CPU and bus pointers on the struct so helpers can reach them.
   (when cpu (setf (antic-cpu antic) cpu))
   (when bus (setf (antic-bus antic) bus))
   (let ((stolen 0))
     (when (zerop (antic-color-clock antic))
-      ;; ----- New scanline ----------------------------------------
-      ;; VBI fires on entry to scanline 248.
-      (when (= (antic-scanline antic) +vbi-scanline+)
-        (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-vbi+))
-        (when (logtest (antic-nmien antic) +nmi-vbi+)
-          (%raise-nmi antic))
-        ;; A JVB instruction parks ANTIC until VBLANK; we release it now.
-        (setf (antic-jvb-wait antic) nil
-              (antic-mode-scanlines-remaining antic) 0
-              ;; Re-latch DL pointer from the shadow registers.
-              (antic-dlist-pointer antic)
-              (dpb (aref (antic-registers antic) +reg-dlisth+) (byte 8 8)
-                   (aref (antic-registers antic) +reg-dlistl+))
-              (antic-dl-offset antic) 0))
-      ;; If a new mode line is needed, fetch the next DL instruction.
-      (when (and (zerop (antic-mode-scanlines-remaining antic))
-                 (not (antic-jvb-wait antic))
-                 (%display-active-p antic))
-        (process-dl-instruction antic))
-      ;; DLI fires on the LAST scanline of the current mode line.  We
-      ;; identify "last" by the remaining counter being 1 (it'll
-      ;; decrement to 0 when the scanline finishes).
-      (when (and (antic-dli-armed antic)
-                 (= (antic-mode-scanlines-remaining antic) 1))
-        (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-dli+))
-        (when (logtest (antic-nmien antic) +nmi-dli+)
-          (%raise-nmi antic))
-        (setf (antic-dli-armed antic) nil))
-      ;; Refresh + P/M DMA steals for this line.
-      (setf stolen (%scanline-steal antic))
-      (incf (antic-stolen-cycles antic) stolen)
-      ;; Snapshot the screen-data pointer for the renderer.  This must happen
-      ;; AFTER the DL fetch (which may have set SCREEN-DATA-PTR via LMS) and
-      ;; BEFORE any end-of-line advancement, so the renderer sees the address
-      ;; that is correct for the scanline that is about to be rendered.
-      (setf (antic-render-screen-data-ptr antic)
-            (antic-screen-data-ptr antic)))
+      (setf stolen (%begin-scanline-events antic)))
     ;; Advance the color clock.
     (incf (antic-color-clock antic))
     (when (>= (antic-color-clock antic) +color-clocks-per-scanline+)
       (setf (antic-color-clock antic) 0)
-      ;; End-of-scanline housekeeping.
-      (when (plusp (antic-mode-scanlines-remaining antic))
-        (decf (antic-mode-scanlines-remaining antic)))
-      ;; Advance scan-y and screen-data-ptr for the next scanline.
-      ;; Only relevant during the active display region with DMA enabled.
-      (when (%display-active-p antic)
-        (let* ((inst  (antic-current-mode antic))
-               (mode  (ldb (byte 4 0) inst))
-               (total (mode-line-scanlines inst))
-               (y     (antic-scan-y antic)))
-          (when (>= mode 2)
-            (cond
-              ;; Bitmap modes: advance screen pointer every scanline.
-              ((>= mode 8)
-               (setf (antic-screen-data-ptr antic)
-                     (ldb (byte 16 0)
-                          (+ (antic-screen-data-ptr antic)
-                             (bytes-per-screen-row mode)))))
-              ;; Character modes: advance after the last scanline of each char row.
-              ((and (plusp total) (= y (1- total)))
-               (setf (antic-screen-data-ptr antic)
-                     (ldb (byte 16 0)
-                          (+ (antic-screen-data-ptr antic)
-                             (bytes-per-screen-row mode)))))))
-            ;; Always increment scan-y (wraps at mode-line boundary).
-            (setf (antic-scan-y antic)
-                  (if (zerop total) 0
-                      (mod (1+ y) total)))))
-      (incf (antic-scanline antic))
-      (when (>= (antic-scanline antic) +scanlines-per-frame+)
-        (setf (antic-scanline antic) 0)
-        (incf (antic-frame-count antic))))
+      (%end-scanline-events antic))
     stolen))
 
 ;;; ---------------------------------------------------------------------------

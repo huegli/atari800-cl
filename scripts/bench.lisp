@@ -217,8 +217,22 @@ found (prints a SKIP line instead)."
                (start (get-internal-real-time)))
            (loop
              (let ((pc (atari800-cl.cpu:cpu-pc cpu)))
+               ;; A repeated PC at two consecutive frame boundaries is
+               ;; only a HINT of a trap: the scanline scheduler grants a
+               ;; deterministic cycle count per frame, and when that
+               ;; count is a multiple of a long-running test loop's
+               ;; period, the boundary PC aliases while the program is
+               ;; still progressing.  Confirm at instruction
+               ;; granularity: a real trap (the success JMP $3469 or a
+               ;; failure JMP-*/branch-to-self) returns to the same PC
+               ;; after ONE instruction.  The confirmation step advances
+               ;; the CPU without ANTIC/POKEY, which is harmless for a
+               ;; benchmark — and on a false alarm it also breaks the
+               ;; resonance that caused it.
                (when (= pc previous-pc)
-                 (return))
+                 (atari800-cl.cpu:step-cpu cpu)
+                 (when (= pc (atari800-cl.cpu:cpu-pc cpu))
+                   (return)))
                (setf previous-pc pc))
              (atari800-cl.machine:machine-run-frame machine)
              (incf frames)
