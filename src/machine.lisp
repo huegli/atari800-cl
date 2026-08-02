@@ -157,7 +157,7 @@ corresponding slot unchanged.  Returns MACHINE."
   "Perform a cold reset.  Loads supplied ROM images (either as raw byte
 sequences via OS-ROM / BASIC-ROM, or by reading the files at OS-PATH /
 BASIC-PATH), sets PORTB to $FF (OS ROM mapped, BASIC + self-test off),
-initialises CPU registers (P = $34, SP = $FF), and reads the reset
+initialises CPU registers (P = $24, SP = $FF), and reads the reset
 vector at $FFFC to set the initial PC.  Returns MACHINE."
   (let ((cpu (atari-machine-cpu machine))
         (bus (atari-machine-bus machine))
@@ -167,8 +167,13 @@ vector at $FFFC to set the initial PC.  Returns MACHINE."
     (cond (basic-rom (install-basic-rom bus basic-rom))
           (basic-path (install-basic-rom bus (load-rom-file basic-path))))
     (mmu-write-portb mmu #xFF)
+    ;; P = $24 (U=1, I=1), matching RESET-CPU.  B is not a real status-
+    ;; register bit on NMOS 6502 — it only exists in the copy of P a
+    ;; BRK/IRQ pushes to the stack (STATUS-BYTE-FROM-PULL always forces
+    ;; it off on a PLP/RTI read-back) — so #x34 (which also sets B) was
+    ;; a phantom-bit divergence from RESET-CPU's #x24, not a real one.
     (setf (cpu-sp cpu)        #xFF
-          (cpu-flags cpu)     #x34            ; U=1, I=1, B=1
+          (cpu-flags cpu)     #x24            ; U=1, I=1
           (cpu-a cpu)         0
           (cpu-x cpu)         0
           (cpu-y cpu)         0

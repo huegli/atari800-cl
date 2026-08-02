@@ -47,11 +47,24 @@
         "PC after cold reset must equal the reset vector")
     (is (= #xFF (cpu-sp (atari800-cl.machine:atari-machine-cpu m)))
         "SP must be $FF after cold reset")
-    (is (= #x34 (cpu-flags (atari800-cl.machine:atari-machine-cpu m)))
-        "Flags must be $34 (U=1 I=1 B=1) after cold reset")
+    (is (= #x24 (cpu-flags (atari800-cl.machine:atari-machine-cpu m)))
+        "Flags must be $24 (U=1 I=1) after cold reset, matching RESET-CPU -- B is not a real status-register bit")
     (is (= #xFF (atari800-cl.mmu:mmu-portb
                   (atari800-cl.machine:atari-machine-mmu m)))
         "PORTB must be $FF after cold reset (OS on, BASIC off, selftest off)")))
+
+(test machine-cold-reset-flags-match-bare-reset-cpu
+  "MACHINE-COLD-RESET's flags ($24) must equal a bare RESET-CPU's flags on
+a synthetic memory vector -- the two reset paths must not disagree about
+the phantom B bit (see the RESET-CPU / MACHINE-COLD-RESET comments)."
+  (let* ((m   (atari800-cl.machine:make-atari-machine))
+         (rom (%make-synthetic-os-rom :reset-pc #xC037)))
+    (atari800-cl.machine:machine-cold-reset m :os-rom rom)
+    (let ((bare-cpu (make-cpu))
+          (bare-mem (make-memory)))
+      (reset-cpu bare-cpu bare-mem)
+      (is (= (cpu-flags bare-cpu)
+             (cpu-flags (atari800-cl.machine:atari-machine-cpu m)))))))
 
 (test machine-cold-reset-also-loads-basic-rom
   "Supplying :BASIC-ROM puts the BASIC image into bus-basic-rom."
