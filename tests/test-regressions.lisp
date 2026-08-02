@@ -273,3 +273,62 @@ the second write -- executed as the first instruction of the next line
       (atari800-cl.machine:%run-clocks m 114)   ; scanline 3: marker finally runs
       (is (= #xFF (atari800-cl.bus:bus-peek-ram bus #x00))
           "marker must be written once the third scanline runs"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #10 — WSYNC raster bars render as distinct per-line colors.
+;;;
+;;; End-to-end acceptance test for ROADMAP.md Phase 4: the machine-code
+;;; equivalent of asm/edvent02_rasterbars.asm's inner loop (WSYNC then
+;;; increment COLBK, repeated) must produce a run of consecutive
+;;; rendered rows whose background color differs from the row above,
+;;; through the REAL renderer wired up exactly as the AESP server wires
+;;; it (ATARI-MACHINE-SCANLINE-FN calling RENDER-SCANLINE after each
+;;; closed active line).  This fails if WSYNC stops stalling, if the
+;;; scanline callback fires at the wrong point, or if per-line register
+;;; latching breaks.
+
+(test wsync-raster-bars-render-as-distinct-rows
+  "A WSYNC + COLBK-increment loop paints >= 32 consecutive active rows
+with strictly different colors, rendered through the real renderer."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000)))
+    ;; LDX #$40 ; LDA #$00
+    ;; bars: STA WSYNC ; STA COLBK ; CLC ; ADC #$10 ; DEX ; BNE bars
+    (%poke os #x0000 #xA2) (%poke os #x0001 #x40)         ; LDX #$40
+    (%poke os #x0002 #xA9) (%poke os #x0003 #x00)         ; LDA #$00
+    (%poke os #x0004 #x8D) (%poke os #x0005 #x0A)         ; STA $D40A (WSYNC)
+    (%poke os #x0006 #xD4)
+    (%poke os #x0007 #x8D) (%poke os #x0008 #x1A)         ; STA $D01A (COLBK)
+    (%poke os #x0009 #xD0)
+    (%poke os #x000A #x18)                                ; CLC
+    (%poke os #x000B #x69) (%poke os #x000C #x10)         ; ADC #$10
+    (%poke os #x000D #xCA)                                ; DEX
+    (%poke os #x000E #xD0) (%poke os #x000F #xF4)         ; BNE bars (-12)
+    (let* ((m   (make-test-machine :os-rom os))
+           (gtia (atari800-cl.machine:atari-machine-gtia m))
+           (bus  (atari800-cl.machine:atari-machine-bus  m))
+           (fb   (atari800-cl.renderer:make-framebuffer)))
+      ;; Wire the scanline-fn callback exactly as the AESP server does
+      ;; (src/aesp.lisp start-aesp-server).
+      (setf (atari800-cl.machine:atari-machine-scanline-fn m)
+            (lambda (mach)
+              (let* ((a   (atari800-cl.machine:atari-machine-antic mach))
+                     (sl  (mod (1- (atari800-cl.antic:antic-scanline a))
+                               atari800-cl.antic:+scanlines-per-frame+))
+                     (row (- sl atari800-cl.antic:+active-start-scanline+)))
+                (when (and (>= row 0) (< row 240))
+                  (atari800-cl.renderer:render-scanline fb row a gtia bus)))))
+      (atari800-cl.machine:%run-clocks m (* 70 114))
+      ;; Longest run of consecutive rows whose sampled pixel (column 0,
+      ;; part of the border -- filled with COLBK across the whole row)
+      ;; differs from the row immediately above it.
+      (flet ((row-rgb (row)
+               (let ((base (* row 384 3)))
+                 (list (aref fb base) (aref fb (1+ base)) (aref fb (+ base 2))))))
+        (let ((run 0) (best 0))
+          (loop for row from 1 below 64
+                do (if (equal (row-rgb row) (row-rgb (1- row)))
+                       (setf run 0)
+                       (progn (incf run) (setf best (max best run)))))
+          (is (>= best 32)
+              "Expected >= 32 consecutive rows with a color change; longest run was ~D"
+              best))))))

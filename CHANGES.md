@@ -3,6 +3,25 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 4 — raster-bars demo + rendered acceptance test
+
+The EdVenture payoff for Phase 3's WSYNC: `asm/edvent02_rasterbars.asm`
+is a minimal MADS demo that waits for the top of the display then
+loops `STA WSYNC` / `STA COLBK` / advance-hue for 64 lines every frame,
+producing 64 distinct horizontal color bands (visually confirmed via
+`scripts/mads-build.sh` + `scripts/atari-run.sh` screenshot capture).
+
+Added a machine-level regression test
+(`wsync-raster-bars-render-as-distinct-rows`) that pokes the same
+WSYNC/COLBK loop into a synthetic-ROM machine, wires
+`ATARI-MACHINE-SCANLINE-FN` to `RENDER-SCANLINE` exactly as the AESP
+server does, and asserts a run of >= 32 consecutive rendered rows with
+strictly different background colors — pinning WSYNC, the scanline
+callback's firing point, and per-line register latching together
+end-to-end through the real renderer.
+
+Suite: 1720/1720 checks green on both SBCL and LispWorks.
+
 ## ROADMAP Phase 3 — WSYNC ($D40A)
 
 SCANLINE_ACCURACY_PLAN.md Phase 2: `STA WSYNC` now halts the CPU for

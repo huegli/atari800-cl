@@ -272,6 +272,21 @@ a downstream audio player can drive the machine with
 `MACHINE-RUN-FRAME` and read the program-visible POKEY register state
 directly after each frame.
 
+## Raster effects (WSYNC)
+
+`STA WSYNC` ($D40A) — the register every DLI handler starts with —
+stalls the CPU to the end of the current scanline, so a program can
+change a color register (or anything else) once per line and produce
+classic "raster bar" effects. `asm/edvent02_rasterbars.asm` is a
+minimal demo: it waits for the top of the display, then loops writing
+a new `COLBK` value after each `WSYNC` release, painting 64 distinct
+horizontal color bands. Build and capture a screenshot with:
+
+```sh
+./scripts/mads-build.sh asm/edvent02_rasterbars.asm
+./scripts/atari-run.sh asm/build/edvent02_rasterbars.xex -frame 30 -o rasterbars.png
+```
+
 ## Protocol servers (AESP + CLI)
 
 The emulator can be driven by an external GUI/CLI/web client over two
