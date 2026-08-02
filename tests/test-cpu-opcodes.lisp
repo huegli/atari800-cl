@@ -102,6 +102,18 @@ Expands to a MULTIPLE-VALUE-BIND form."
   "Exactly 151 official NMOS 6502 opcodes are installed."
   (is (= 151 (length (atari800-cl.cpu:documented-opcodes)))))
 
+(test dispatch-table-fully-populated
+  "All 256 *OPCODE-TABLE* slots are non-NIL after loading both
+cpu-opcodes.lisp (151 documented) and illegal.lisp (105 illegal).  Pins
+the reload-robustness fix: *OPCODE-TABLE* is a load-time DEFVAR that
+DEFOPCODE writes into directly, so loading either file alone no longer
+wipes out the other file's handlers."
+  (loop for i below 256
+        do (is (svref atari800-cl.cpu:*opcode-table* i)
+               "opcode #x~2,'0X has no installed handler" i))
+  (is (= 256 (+ (length (atari800-cl.cpu:documented-opcodes))
+                (length (atari800-cl.cpu:illegal-opcodes))))))
+
 (test illegal-opcode-signals
   "Stepping into an illegal opcode signals ILLEGAL-OPCODE and halts the CPU."
   (with-cpu (cpu ram :program (list #x02))    ; $02 is not a documented opcode

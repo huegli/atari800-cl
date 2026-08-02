@@ -246,22 +246,10 @@ by ADDR-RELATIVE).  Returns the number of cycles consumed."
 ;;; Opcode table construction
 ;;;
 ;;; DEFOPCODE is the central macro: it defines a named function for each
-;;; opcode and installs it into the 256-entry dispatch table.  Named
-;;; functions are preferable to anonymous lambdas because they show up in
-;;; backtraces and can be inspected in a debugger.
-;;;
-;;; *OPCODE-TABLE-BUILDER* is a temporary array filled during file loading.
-;;; At the bottom of this file, it is installed as the live *OPCODE-TABLE*.
-
-(defparameter *opcode-table-builder* (make-array 256 :initial-element nil)
-  "Temporary 256-entry array filled during file loading.  Each slot is
-either NIL or a named function (defined by DEFOPCODE) that handles one
-opcode.  Installed as *OPCODE-TABLE* at the end of the file.")
-
-(defparameter *opcode-mnemonic-table*
-  (make-array 256 :initial-element nil)
-  "Parallel to *OPCODE-TABLE*: stores the mnemonic string (e.g. \"LDA-IMM\")
-for each installed opcode.  Used by the trace / disassembly helpers.")
+;;; opcode and installs it directly into *OPCODE-TABLE* (defined in
+;;; cpu.lisp, which loads before this file).  Named functions are
+;;; preferable to anonymous lambdas because they show up in backtraces
+;;; and can be inspected in a debugger.
 
 ;; EVAL-WHEN ensures this helper function exists at compile time, because
 ;; DEFOPCODE (a macro) calls it during macro expansion (which happens at
@@ -299,7 +287,7 @@ The macro expands into:
     ;;   #'... gets the function object for the SETF
     `(progn
        (defun ,fn-name ,lambda-list ,@body)
-       (setf (svref *opcode-table-builder* ,opcode) (function ,fn-name)
+       (setf (svref *opcode-table* ,opcode) (function ,fn-name)
              (svref *opcode-mnemonic-table* ,opcode)
              ,(string-upcase (string mnemonic)))
        ',fn-name)))
@@ -740,15 +728,6 @@ sets I flag, and vectors through $FFFE (same as IRQ)."
   "NOP: No Operation.  Does nothing for 2 cycles."
   ;; DECLARE IGNORE tells the compiler we intentionally don't use CPU.
   (declare (ignore cpu)) 2)
-
-;;; ---------------------------------------------------------------------------
-;;; Finalize: install the builder array as the live dispatch table.
-;;;
-;;; At this point all DEFOPCODE forms above have populated
-;;; *OPCODE-TABLE-BUILDER*.  We now install it as the live table that
-;;; STEP-CPU (in cpu.lisp) dispatches through.
-
-(setf *opcode-table* *opcode-table-builder*)
 
 ;;; DOCUMENTED-OPCODES is defined in src/illegal.lisp, after the full
 ;;; opcode map (documented + 105 NMOS undocumented) has been installed.

@@ -483,12 +483,28 @@ byte has been consumed)."
                      (illegal-opcode-opcode c)
                      (illegal-opcode-pc     c)))))
 
-;; DEFVAR only sets the initial value the first time it's loaded.
-;; cpu-opcodes.lisp will populate this with the actual handlers.
-(defvar *opcode-table* nil
-  "256-entry SIMPLE-VECTOR populated by src/cpu-opcodes.lisp.
-Each element is either NIL (illegal opcode) or a function of one
-argument (CPU) that returns the number of cycles consumed.")
+;; DEFVAR only sets the initial value the first time it's loaded, so
+;; reloading this file alone (e.g. interactively) does not wipe out
+;; opcode handlers DEFOPCODE has already installed from cpu-opcodes.lisp
+;; or illegal.lisp.  The array is allocated here, at cpu.lisp load time,
+;; so it exists as soon as this file loads — DEFOPCODE (in the later
+;; files) writes directly into it via SVREF, with no intermediate
+;; "builder" array and no final bulk install.  This means reloading just
+;; cpu-opcodes.lisp (without illegal.lisp) no longer silently drops the
+;; 105 illegal-opcode handlers: each file's DEFOPCODE forms only ever
+;; touch their own slots.
+(defvar *opcode-table* (make-array 256 :initial-element nil)
+  "256-entry SIMPLE-VECTOR populated by DEFOPCODE forms in
+src/cpu-opcodes.lisp and src/illegal.lisp as those files load.  Each
+element is either NIL (illegal opcode with no handler defined) or a
+function of one argument (CPU) that returns the number of cycles
+consumed.")
+
+(defvar *opcode-mnemonic-table* (make-array 256 :initial-element nil)
+  "Parallel to *OPCODE-TABLE*: stores the mnemonic string (e.g.
+\"LDA-IMM\") for each installed opcode, populated by DEFOPCODE forms in
+src/cpu-opcodes.lisp and src/illegal.lisp.  Used by the trace /
+disassembly helpers.")
 
 (declaim (ftype (function (cpu) fixnum) step-cpu))
 
@@ -518,8 +534,10 @@ next opcode from the dispatch table."
      (let* ((pc-at-fetch (cpu-pc cpu))
             (opcode (read-pc-byte cpu))     ; fetch opcode byte, advance PC
             ;; SVREF accesses an element of a simple-vector by index.
-            ;; AND short-circuits: if *OPCODE-TABLE* is NIL, don't try SVREF.
-            (handler (and *opcode-table* (svref *opcode-table* opcode))))
+            ;; *OPCODE-TABLE* always exists (allocated at cpu.lisp load
+            ;; time); a NIL slot means no DEFOPCODE has claimed this
+            ;; opcode number yet.
+            (handler (svref *opcode-table* opcode)))
        ;; UNLESS is (WHEN (NOT ...)).  If no handler, it's an illegal opcode.
        (unless handler
          (setf (cpu-halted cpu) t)
