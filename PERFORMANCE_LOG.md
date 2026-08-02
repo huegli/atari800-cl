@@ -56,6 +56,32 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 0212cf6  | lispworks      | nop      |  998.89 | 16.671     | ROADMAP Phase 3: WSYNC (mean of 3) |
 | 2026-08-02 | 0212cf6  | lispworks      | irq      | 1583.20 | 26.421     | ROADMAP Phase 3: WSYNC (mean of 3) |
 | 2026-08-02 | 0212cf6  | lispworks      | klaus    |  993.48 | 16.581     | ROADMAP Phase 3, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | e3c23bc  | sbcl           | nop      | 3929.98 | 65.577     | ROADMAP Phase 5: playfield DMA steal (mean of 3) |
+| 2026-08-02 | e3c23bc  | sbcl           | irq      | 4128.94 | 68.907     | ROADMAP Phase 5: playfield DMA steal (mean of 3) |
+| 2026-08-02 | e3c23bc  | sbcl           | klaus    | 3332.81 | 55.611     | ROADMAP Phase 5, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | e3c23bc  | lispworks      | nop      |  986.88 | 16.472     | ROADMAP Phase 5: playfield DMA steal (mean of 3) |
+| 2026-08-02 | e3c23bc  | lispworks      | irq      | 1581.72 | 26.398     | ROADMAP Phase 5: playfield DMA steal (mean of 3) |
+| 2026-08-02 | e3c23bc  | lispworks      | klaus    |  991.60 | 16.552     | ROADMAP Phase 5, klaus+PASS, 3500 frames (mean of 3) |
+
+## ROADMAP Phase 5 — playfield DMA steal implementation cost
+
+None of the bench workloads (nop/irq/klaus) ever write DMACTL, so
+%DISPLAY-ACTIVE-P stays false throughout and PLAYFIELD-DMA-CYCLES /
+the DL-fetch accounting never run beyond their cheap early-exit guards.
+Klaus still PASSes at the same 3500-frame count (confirming no steal
+was added to that workload). Measured delta vs. the Phase 3 (WSYNC)
+baseline (mean of 3, same machine):
+
+| implementation | workload | Phase 3 fps | Phase 5 fps | delta  |
+|-----------------|----------|-------------|-------------|--------|
+| sbcl            | nop      | 3911.85     | 3929.98     | +0.5%  |
+| sbcl            | irq      | 4166.01     | 4128.94     | -0.9%  |
+| sbcl            | klaus    | 3345.24     | 3332.81     | -0.4%  |
+| lispworks       | nop      |  998.89     |  986.88     | -1.2%  |
+| lispworks       | irq      | 1583.20     | 1581.72     | -0.1%  |
+| lispworks       | klaus    |  993.48     |  991.60     | -0.2%  |
+
+All within run-to-run noise, as expected.
 
 ## ROADMAP Phase 3 — WSYNC implementation cost
 

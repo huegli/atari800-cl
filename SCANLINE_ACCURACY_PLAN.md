@@ -1,6 +1,6 @@
 # Scanline Accuracy Plan
 
-> **Status (2026-08-02): Phases 0-2 complete and merged to main.**
+> **Status (2026-08-02): Phases 0-3 complete and merged to main.**
 > The scanline-granular scheduler shipped (with the full per-line DMA
 > steal charged to the CPU budget) and the pixel renderer now rides on
 > it. The "Current state" section below describes the pre-Phase-1
@@ -9,8 +9,12 @@
 > 2 (WSYNC) landed via ROADMAP.md Phase 3 as a first cut that stalls
 > to end-of-line, not the hardware-accurate cycle 105 (that refinement
 > is still this plan's stretch Phase 4). Phase 3 (playfield DMA steal
-> tables) and the stretch Phases 4-5 remain open; see ROADMAP.md for
-> scheduling (Phase 5).
+> tables + DL fetch accounting) landed via ROADMAP.md Phase 5 — its
+> bitmap-mode byte counts (modes 8-14) diverge from this plan's
+> original from-memory table, which turned out to disagree with the
+> already-tested renderer; PLAYFIELD-DMA-CYCLES's docstring in
+> `src/antic.lisp` has the corrected table and the reasoning. The
+> stretch Phases 4-5 remain open.
 
 Goal: move the emulator from frame-level timing to scanline-level timing
 accuracy, in dependency order. Each phase is independently committable and
@@ -178,6 +182,14 @@ Commit: "Implement WSYNC: CPU stalls to end of scanline".
 ---
 
 ## Phase 3 — Playfield DMA steal tables + DL fetch accounting
+
+> **Done** (ROADMAP.md Phase 5). The bytes-per-line table below for
+> modes 8-14 is superseded — it was stated from memory and turned out
+> to disagree with the already-tested renderer; see
+> `PLAYFIELD-DMA-CYCLES`'s docstring in `src/antic.lisp` for the
+> corrected table actually shipped. Modes 2-7's counts (40/20) and the
+> overall fetch-timing rules (name-on-first-line, font-every-line for
+> text; DL-fetch byte accounting) shipped as specified below.
 
 The largest remaining timing error: ANTIC steals only refresh (9) + P/M DMA
 (0-5) per line, but real character modes steal ~40+ more cycles per line.

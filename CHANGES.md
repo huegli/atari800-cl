@@ -3,6 +3,41 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 5 — playfield DMA steal + DL fetch accounting
+
+SCANLINE_ACCURACY_PLAN.md Phase 3: the largest remaining timing error
+in `%RUN-CLOCKS`'s per-line steal was that only DRAM refresh (9) and
+P/M DMA (0-5) were charged, ignoring the ~20-96 cycles/line real
+character and bitmap modes steal for their own data.
+
+- New `PLAYFIELD-DMA-CYCLES (mode-byte dmactl first-line-p)` in
+  `src/antic.lisp`: character modes (2-7) charge NAME+FONT bytes on
+  the first scanline of a mode line and FONT-only on later scanlines;
+  bitmap modes (8-F) charge a fresh row every scanline (matching
+  `%RENDER-BITMAP-MODE`'s own per-scanline re-fetch). Byte-per-line
+  counts are cross-checked against this project's own tested renderer
+  code, not recalled independently — they diverge from
+  SCANLINE_ACCURACY_PLAN.md's original from-memory table for modes
+  8-14, which the renderer's implementation contradicts (see the
+  function's docstring for the full reasoning).
+- `process-dl-instruction` now returns the number of DL bytes it
+  consumed (1 for a plain mode byte, +2 for an LMS address, +2 for a
+  JMP/JVB address); `%begin-scanline-events` charges that count plus
+  `PLAYFIELD-DMA-CYCLES` (gated on `%DISPLAY-ACTIVE-P`, since
+  `CURRENT-MODE` can hold a leftover value outside the active region)
+  into the line's total steal, on top of the existing refresh + P/M
+  DMA.
+- New frame-level regression test builds a 24-line mode-2 display list
+  + JVB, runs one frame, and checks that CPU cycles consumed match a
+  scanline-by-scanline expected-steal computation built from the same
+  functions the scheduler uses (a conservation check, not a hand-typed
+  magic number) — pins the whole model end to end.
+
+Suite: 1784/1784 checks green on both SBCL and LispWorks. Benchmarked:
+no measurable change on the standard bench workloads (none of them
+enable DMACTL, so the new accounting never runs beyond its early-exit
+guards) — see `PERFORMANCE_LOG.md`.
+
 ## ROADMAP Phase 4 — raster-bars demo + rendered acceptance test
 
 The EdVenture payoff for Phase 3's WSYNC: `asm/edvent02_rasterbars.asm`
