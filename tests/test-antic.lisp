@@ -108,6 +108,86 @@ Defaults: DMACTL = $22 (normal playfield + instructions DMA enabled),
       (is (= 14 stolen) "9 + 5 = 14; got ~A" stolen))))
 
 ;;; ---------------------------------------------------------------------------
+;;; PLAYFIELD-DMA-CYCLES (ROADMAP.md Phase 5)
+;;;
+;;; DMACTL widths: 0 = off, 1 = narrow, 2 = normal, 3 = wide.
+
+(test playfield-dma-cycles-blank-and-jmp-steal-nothing
+  "Mode 0 (blank) and mode 1 (JMP/JVB) never steal playfield cycles,
+regardless of width or FIRST-LINE-P."
+  (dolist (mode '(0 1))
+    (dolist (width '(0 1 2 3))
+      (dolist (first '(t nil))
+        (is (zerop (atari800-cl.antic:playfield-dma-cycles mode width first))
+            "mode ~D width ~D first ~A: expected 0" mode width first)))))
+
+(test playfield-dma-cycles-width-off-steals-nothing
+  "DMACTL width 0 (off) steals nothing regardless of mode."
+  (dolist (mode '(2 6 8 9 15))
+    (is (zerop (atari800-cl.antic:playfield-dma-cycles mode 0 t)))
+    (is (zerop (atari800-cl.antic:playfield-dma-cycles mode 0 nil)))))
+
+(test playfield-dma-cycles-char-modes-2-5-normal-width
+  "Modes 2-5: 40 bytes/fetch at normal width; first line doubles it
+(NAME + FONT), later lines charge FONT only."
+  (dolist (mode '(2 3 4 5))
+    (is (= 80 (atari800-cl.antic:playfield-dma-cycles mode 2 t))
+        "mode ~D first-line normal: expected 80 (NAME+FONT)" mode)
+    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D later-line normal: expected 40 (FONT only)" mode)))
+
+(test playfield-dma-cycles-char-modes-2-5-narrow-and-wide
+  "Modes 2-5 scale by width: narrow = 4/5, wide = 6/5 of normal (40)."
+  (is (= 32 (atari800-cl.antic:playfield-dma-cycles 2 1 nil)) "narrow FONT-only")
+  (is (= 64 (atari800-cl.antic:playfield-dma-cycles 2 1 t))   "narrow NAME+FONT")
+  (is (= 48 (atari800-cl.antic:playfield-dma-cycles 2 3 nil)) "wide FONT-only")
+  (is (= 96 (atari800-cl.antic:playfield-dma-cycles 2 3 t))   "wide NAME+FONT"))
+
+(test playfield-dma-cycles-char-modes-6-7
+  "Modes 6-7: 20 bytes/fetch at normal width."
+  (dolist (mode '(6 7))
+    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 t))
+        "mode ~D first-line normal: expected 40 (NAME+FONT)" mode)
+    (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D later-line normal: expected 20 (FONT only)" mode)))
+
+(test playfield-dma-cycles-bitmap-modes-fetch-every-line
+  "Bitmap modes 8-F fetch a fresh row every scanline: FIRST-LINE-P has
+no effect (no NAME/FONT split -- unlike character modes)."
+  ;; Modes 8, A(10), F(15): 40 bytes/fetch normal width.
+  (dolist (mode '(8 10 15))
+    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 t)))
+    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D: FIRST-LINE-P must not change the steal" mode))
+  ;; Modes 9, B(11), C(12), D(13), E(14): 20 bytes/fetch normal width.
+  (dolist (mode '(9 11 12 13 14))
+    (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 t)))
+    (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D: FIRST-LINE-P must not change the steal" mode)))
+
+(test playfield-dma-cycles-bitmap-modes-narrow-and-wide
+  "Bitmap modes scale by width like character modes."
+  (is (= 32 (atari800-cl.antic:playfield-dma-cycles 8 1 nil)) "mode 8 narrow")
+  (is (= 48 (atari800-cl.antic:playfield-dma-cycles 8 3 nil)) "mode 8 wide")
+  (is (= 16 (atari800-cl.antic:playfield-dma-cycles 9 1 nil)) "mode 9 narrow")
+  (is (= 24 (atari800-cl.antic:playfield-dma-cycles 9 3 nil)) "mode 9 wide"))
+
+(test playfield-dma-cycles-worst-case-under-114
+  "The worst-case total scanline steal (refresh + P/M + DL-fetch +
+playfield) must stay under the 114-cycle line budget, or the scheduler
+could grant a negative CPU budget for the line."
+  ;; Worst case: wide 40-column char mode, first line (NAME+FONT), plus
+  ;; a 3-byte DL fetch (LMS) and full P/M DMA (5 cycles).
+  (let* ((playfield (atari800-cl.antic:playfield-dma-cycles 2 3 t))  ; 96
+         (dl-fetch  3)
+         (pm-dma    5)
+         (refresh   atari800-cl.antic:+dram-refresh-cycles+)         ; 9
+         (worst     (+ playfield dl-fetch pm-dma refresh)))
+    (is (< worst 114)
+        "worst-case steal ~D must be < 114 (the line's total CPU cycles)"
+        worst)))
+
+;;; ---------------------------------------------------------------------------
 ;;; Display-list parsing
 
 (test dl-fetch-advances-offset-on-active-line

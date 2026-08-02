@@ -15,10 +15,30 @@
 ;;;;   scanlines 8-247  — active display region
 ;;;;   scanline 248     — VBLANK begins; VBI fires here when NMIEN bit 6 set
 ;;;;
-;;;; Cycle-stealing accounting is simplified: we lump all the per-line
-;;;; steals (DRAM refresh + P/M DMA) at CPU cycle 0 of each scanline,
-;;;; returning that lump from ANTIC-TICK so the machine scheduler can
-;;;; deduct them from the CPU's budget for the line.
+;;;; Cycle-stealing accounting (ROADMAP.md Phase 5 / SCANLINE_ACCURACY_PLAN.md
+;;;; Phase 3): we lump all the per-line steals at CPU cycle 0 of each
+;;;; scanline, returning that lump from ANTIC-TICK / ANTIC-BEGIN-SCANLINE
+;;;; so the machine scheduler can deduct them from the CPU's budget for
+;;;; the line.  Four components, summed:
+;;;;   - DRAM refresh: +DRAM-REFRESH-CYCLES+ (9), every scanline.
+;;;;   - P/M DMA: PM-DMA-CYCLES, every scanline (missile +1, player +4).
+;;;;   - DL instruction fetch: 1 cycle per DL byte read (mode byte, +2
+;;;;     for an LMS address, +2 for a JMP/JVB address) -- only on the
+;;;;     scanline that starts a new mode line.
+;;;;   - Playfield data: PLAYFIELD-DMA-CYCLES -- character modes (2-7)
+;;;;     fetch NAME bytes (screen memory) only on the first scanline of
+;;;;     the mode line and FONT bytes (character ROM/RAM lookups) every
+;;;;     scanline; bitmap modes (8-F) fetch a fresh row of screen bytes
+;;;;     every scanline, matching RENDER-SCANLINE's own per-scanline
+;;;;     re-fetch in %RENDER-BITMAP-MODE.  See PLAYFIELD-DMA-CYCLES's
+;;;;     docstring for the byte-count table and its provenance.
+;;;; Approximation: 1 CPU cycle stolen per byte fetched.  Real ANTIC
+;;;; packs playfield fetches 2-bytes-per-DMA-slot (that's what the
+;;;; narrow/normal/wide DMACTL widths are actually tuning); this project
+;;;; does not yet model that 2:1 packing, so its steal counts run higher
+;;;; than real hardware on playfield-heavy lines.  Also out of scope for
+;;;; now: HSCROL widening the fetch window and the exact cycle POSITIONS
+;;;; of each steal within the line (SCANLINE_ACCURACY_PLAN.md Phase 4).
 ;;;;
 ;;;; Display-list parsing supports:
 ;;;;   mode 0 (blank lines)  — bits 4-6 specify (N+1) scanlines of blank
@@ -29,9 +49,7 @@
 ;;;;   bit 7 (DLI)           — fire NMI on the LAST scanline of this mode
 ;;;;                            line (gated by NMIEN bit 7)
 ;;;;   bit 6 (LMS on modes 2-F) — next two bytes are a screen-data base
-;;;;                              address.  We advance the DL offset past
-;;;;                              them but don't otherwise emulate display
-;;;;                              data fetching.
+;;;;                              address, latched for the renderer.
 
 (in-package #:atari800-cl.antic)
 
@@ -204,7 +222,14 @@ Bit 2 enables 1-cycle missile DMA; bit 3 enables 4-cycle player DMA."
   "Return the number of screen-RAM bytes per logical row for the given ANTIC
 mode nibble.  For character modes this is bytes per character row (consumed
 once per MODE-LINE-SCANLINES scanlines); for bitmap modes it is bytes per
-scanline."
+scanline.
+
+NOTE: mode 9's value here (10) disagrees with the 20 bytes/scanline
+%RENDER-BITMAP-MODE actually reads for mode 9 — a pre-existing
+inconsistency from the renderer work, out of scope for the DMA-steal
+accounting below (which uses the renderer's real 20-byte figure, see
+PLAYFIELD-DMA-CYCLES).  Left unfixed here; worth revisiting if mode-9
+display lists ever look wrong."
   (declare (type (unsigned-byte 8) mode))
   (case mode
     ((2 3 4 5 8) 40)
@@ -215,16 +240,78 @@ scanline."
     (15          40)
     (t           40)))
 
+(defun playfield-dma-cycles (mode-byte dmactl first-line-p)
+  "Return the CPU cycles ANTIC steals THIS scanline for playfield data —
+character NAME/FONT bytes for modes 2-7, or a fresh row of screen bytes
+for bitmap modes 8-F — given the DL MODE-BYTE currently in flight,
+DMACTL (bits 0-1 select narrow/normal/wide), and whether this is the
+first scanline of the current mode line (see ANTIC-SCAN-Y).
+
+Byte-count-per-fetch table (normal width; narrow = 4/5 of this, wide =
+6/5 of this, matching the ratios of SCANLINE_ACCURACY_PLAN.md Phase 3's
+original table).  Modes 2-7 confirmed against this project's own
+%RENDER-CHAR-MODE (40 columns for modes 2-5, 20 for 6-7, one NAME + one
+FONT byte per column).  Modes 8-F confirmed against %RENDER-BITMAP-MODE
+directly (NOT the SCANLINE_ACCURACY_PLAN.md table, which grouped 8-9
+and A-C differently from memory and turned out to disagree with the
+already-tested renderer -- the renderer's per-scanline byte-read counts
+are taken as ground truth here):
+  modes 2,3,4,5:        40 bytes
+  modes 6,7:             20 bytes
+  modes 8,10(A):        40 bytes
+  modes 9,11(B),12(C),13(D),14(E): 20 bytes
+  mode 15(F):            40 bytes
+
+Fetch timing:
+  - Mode 0 (blank) and mode 1 (JMP/JVB) steal nothing (blank lines
+    have no playfield; JMP/JVB doesn't display).
+  - Character modes (2-7): on FIRST-LINE-P, ANTIC fetches NAME bytes
+    (once per mode line, line-buffered for the remaining scanlines)
+    *and* FONT bytes (every scanline) — double the byte count.  On
+    later scanlines, only the FONT fetch happens — single byte count.
+  - Bitmap modes (8-F): a fresh row of screen bytes is fetched EVERY
+    scanline regardless of FIRST-LINE-P, matching RENDER-SCANLINE's
+    %RENDER-BITMAP-MODE, which re-reads bytes every call no matter how
+    many scanlines MODE-LINE-SCANLINES says the mode line spans.
+
+Approximation: 1 stolen CPU cycle per fetched byte (this project does
+not yet model real ANTIC's 2-bytes-per-DMA-slot packing — see the file
+header)."
+  (declare (type (unsigned-byte 8) mode-byte dmactl))
+  (let ((mode (ldb (byte 4 0) mode-byte)))
+    (declare (type (unsigned-byte 4) mode))
+    (if (< mode 2)
+        0
+        (let* ((normal (case mode
+                          ((2 3 4 5) 40)
+                          ((6 7)     20)
+                          ((8 10)    40)
+                          (15        40)
+                          (t         20)))    ; 9 11 12 13 14
+               (width  (ldb (byte 2 0) dmactl))
+               (bytes  (case width
+                          (0 0)                            ; DMA off
+                          (1 (truncate (* normal 4) 5))     ; narrow (0.8x)
+                          (2 normal)                        ; normal
+                          (t (truncate (* normal 6) 5)))))  ; wide (1.2x)
+          (declare (type fixnum normal bytes))
+          (if (and (<= mode 7) first-line-p)
+              (* bytes 2)   ; character modes, first line: NAME + FONT
+              bytes)))))    ; character modes (later lines) or any bitmap mode
+
 (defun process-dl-instruction (antic)
   "Fetch one display-list instruction from the bus and update ANTIC.
 Returns the number of DL bytes consumed by this instruction (1 for a
-plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
+plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)
+so the caller can charge it into the line's DMA steal."
   (declare (type antic antic))
   (let* ((bus  (antic-bus antic))
          (inst (atari800-cl.bus:bus-read bus (%dl-current-address antic)))
          (mode (ldb (byte 4 0) inst))
          (lms-p (and (logtest inst #x40) (>= mode 2)))
-         (dli-p (logtest inst #x80)))
+         (dli-p (logtest inst #x80))
+         (bytes-consumed 1))
+    (declare (type fixnum bytes-consumed))
     (incf (antic-dl-offset antic))
     (setf (antic-current-mode antic) inst
           (antic-dli-armed antic) dli-p)
@@ -236,6 +323,7 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
          (incf (antic-dl-offset antic))
          (let ((hi (atari800-cl.bus:bus-read bus (%dl-current-address antic))))
            (incf (antic-dl-offset antic))
+           (incf bytes-consumed 2)
            (setf (antic-dlist-pointer antic) (dpb hi (byte 8 8) lo)
                  (antic-dl-offset antic) 0
                  (antic-mode-scanlines-remaining antic) 0)
@@ -249,11 +337,13 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
            (incf (antic-dl-offset antic))
            (let ((hi (atari800-cl.bus:bus-read bus (%dl-current-address antic))))
              (incf (antic-dl-offset antic))
+             (incf bytes-consumed 2)
              (setf (antic-screen-data-ptr antic)
                    (dpb hi (byte 8 8) lo)))))
        (setf (antic-mode-scanlines-remaining antic)
              (mode-line-scanlines inst)
-             (antic-scan-y antic) 0)))))
+             (antic-scan-y antic) 0)))
+    bytes-consumed))
 
 (declaim (inline %display-active-p))
 
@@ -290,7 +380,9 @@ plain mode byte, 3 for JMP/JVB or any inst with the LMS bit set, etc.)."
 (NMIST latch + NMI when NMIEN bit 6 is set, JVB release, DL pointer
 re-latch), display-list instruction fetch when a new mode line is due,
 DLI on the last scanline of a mode line, and the lumped per-line cycle
-steal (DRAM refresh + P/M DMA).  Returns the cycles stolen this line."
+steal (DRAM refresh + P/M DMA + DL-instruction fetch + playfield data;
+see the file header and PLAYFIELD-DMA-CYCLES).  Returns the cycles
+stolen this line."
   (declare (type antic antic))
   ;; VBI fires on entry to scanline 248.
   (when (= (antic-scanline antic) +vbi-scanline+)
@@ -305,30 +397,43 @@ steal (DRAM refresh + P/M DMA).  Returns the cycles stolen this line."
           (dpb (aref (antic-registers antic) +reg-dlisth+) (byte 8 8)
                (aref (antic-registers antic) +reg-dlistl+))
           (antic-dl-offset antic) 0))
-  ;; If a new mode line is needed, fetch the next DL instruction.
-  (when (and (zerop (antic-mode-scanlines-remaining antic))
-             (not (antic-jvb-wait antic))
-             (%display-active-p antic))
-    (process-dl-instruction antic))
-  ;; DLI fires on the LAST scanline of the current mode line.  We
-  ;; identify "last" by the remaining counter being 1 (it'll
-  ;; decrement to 0 when the scanline finishes).
-  (when (and (antic-dli-armed antic)
-             (= (antic-mode-scanlines-remaining antic) 1))
-    (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-dli+))
-    (when (logtest (antic-nmien antic) +nmi-dli+)
-      (%raise-nmi antic))
-    (setf (antic-dli-armed antic) nil))
-  ;; Snapshot the screen-data pointer for the renderer.  This must happen
-  ;; AFTER the DL fetch (which may have set SCREEN-DATA-PTR via LMS) and
-  ;; BEFORE any end-of-line advancement, so the renderer sees the address
-  ;; that is correct for the scanline that is about to be rendered.
-  (setf (antic-render-screen-data-ptr antic)
-        (antic-screen-data-ptr antic))
-  ;; Refresh + P/M DMA steals for this line.
-  (let ((stolen (%scanline-steal antic)))
-    (incf (antic-stolen-cycles antic) stolen)
-    stolen))
+  ;; If a new mode line is needed, fetch the next DL instruction.  Track
+  ;; the bytes it consumed so they can be charged into this line's steal.
+  (let ((dl-fetch-bytes 0))
+    (declare (type fixnum dl-fetch-bytes))
+    (when (and (zerop (antic-mode-scanlines-remaining antic))
+               (not (antic-jvb-wait antic))
+               (%display-active-p antic))
+      (setf dl-fetch-bytes (process-dl-instruction antic)))
+    ;; DLI fires on the LAST scanline of the current mode line.  We
+    ;; identify "last" by the remaining counter being 1 (it'll
+    ;; decrement to 0 when the scanline finishes).
+    (when (and (antic-dli-armed antic)
+               (= (antic-mode-scanlines-remaining antic) 1))
+      (setf (antic-nmist antic) (logior (antic-nmist antic) +nmi-dli+))
+      (when (logtest (antic-nmien antic) +nmi-dli+)
+        (%raise-nmi antic))
+      (setf (antic-dli-armed antic) nil))
+    ;; Snapshot the screen-data pointer for the renderer.  This must happen
+    ;; AFTER the DL fetch (which may have set SCREEN-DATA-PTR via LMS) and
+    ;; BEFORE any end-of-line advancement, so the renderer sees the address
+    ;; that is correct for the scanline that is about to be rendered.
+    (setf (antic-render-screen-data-ptr antic)
+          (antic-screen-data-ptr antic))
+    ;; Refresh + P/M DMA + DL-fetch + playfield steals for this line.
+    ;; Playfield cycles are gated on %DISPLAY-ACTIVE-P: outside the
+    ;; active region (or with DMA fully off) CURRENT-MODE may still hold
+    ;; a leftover value from the last active scanline, and it must not
+    ;; contribute a steal here.
+    (let* ((playfield (if (%display-active-p antic)
+                           (playfield-dma-cycles (antic-current-mode antic)
+                                                  (antic-dmactl antic)
+                                                  (zerop (antic-scan-y antic)))
+                           0))
+           (stolen (+ (%scanline-steal antic) dl-fetch-bytes playfield)))
+      (declare (type fixnum playfield stolen))
+      (incf (antic-stolen-cycles antic) stolen)
+      stolen)))
 
 (defun %end-scanline-events (antic)
   "End-of-scanline housekeeping: decrement the current mode line's

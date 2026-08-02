@@ -332,3 +332,59 @@ with strictly different colors, rendered through the real renderer."
           (is (>= best 32)
               "Expected >= 32 consecutive rows with a color change; longest run was ~D"
               best))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #11 — playfield DMA steal, frame-level budget check.
+;;;
+;;; ROADMAP.md Phase 5 acceptance test: a display list of 24 mode-2
+;;; lines (192 scanlines) + JVB, DMACTL = $22 (instructions + normal
+;;; playfield width, no P/M DMA), run for one full frame. Pins the
+;;; whole steal model (refresh + DL-fetch + playfield) end to end: the
+;;; expected total steal is computed here scanline-type by
+;;; scanline-type using the SAME building-block functions
+;;; %BEGIN-SCANLINE-EVENTS calls (PLAYFIELD-DMA-CYCLES,
+;;; +DRAM-REFRESH-CYCLES+), traced by hand against this exact DL:
+;;;   scanlines 0-7     (8):   pre-active region, refresh only
+;;;   scanlines 8-199 (192):  24x mode-2 entries, 8 scanlines each --
+;;;                           1 first line (DL-fetch=1, NAME+FONT
+;;;                           playfield) + 7 later lines (FONT-only)
+;;;   scanline 200      (1):  JVB fetch (DL-fetch=3), no playfield
+;;;   scanlines 201-247(47):  JVB-parked, refresh only
+;;;   scanlines 248-261(14):  VBI + post-VBI, still outside active region
+
+(test playfield-dma-steal-matches-frame-budget
+  "Running a 24-line mode-2 display list for one frame consumes CPU
+cycles within one instruction of (262*114 - total-steal), where
+total-steal is computed scanline-by-scanline from the same
+steal-model functions ANTIC-BEGIN-SCANLINE uses."
+  (let* ((m   (make-test-machine))           ; default synthetic ROM: all NOPs
+         (cpu (atari800-cl.machine:atari-machine-cpu m))
+         (bus (atari800-cl.machine:atari-machine-bus m)))
+    ;; Display list at $4000: 24x mode-2 (no LMS, no DLI), then JVB $4000.
+    (dotimes (i 24)
+      (atari800-cl.bus:bus-poke-ram bus (+ #x4000 i) #x02))
+    (atari800-cl.bus:bus-poke-ram bus (+ #x4000 24) #x41)   ; JVB
+    (atari800-cl.bus:bus-poke-ram bus (+ #x4000 25) #x00)   ; addr lo
+    (atari800-cl.bus:bus-poke-ram bus (+ #x4000 26) #x40)   ; addr hi -> $4000
+    (atari800-cl.bus:bus-write bus #xD402 #x00)              ; DLISTL
+    (atari800-cl.bus:bus-write bus #xD403 #x40)              ; DLISTH
+    (atari800-cl.bus:bus-write bus #xD400 #x22)              ; DMACTL
+    (atari800-cl.machine:machine-run-frame m)
+    (let* ((refresh  atari800-cl.antic:+dram-refresh-cycles+)
+           (pm       0)                       ; DMACTL bits 2-3 clear: no P/M DMA
+           (pf-first (atari800-cl.antic:playfield-dma-cycles 2 2 t))
+           (pf-later (atari800-cl.antic:playfield-dma-cycles 2 2 nil))
+           (idle-line   (+ refresh pm))
+           (mode2-entry (+ (+ idle-line 1 pf-first)          ; first line: DL-fetch=1
+                            (* 7 (+ idle-line pf-later))))    ; 7 later lines
+           (pre-active  (* 8 idle-line))
+           (mode2-total (* 24 mode2-entry))
+           (jvb-fetch   (+ idle-line 3))       ; DL-fetch=3 (mode + 2 addr bytes)
+           (parked      (* 47 idle-line))
+           (post-vbi    (* 14 idle-line))
+           (expected-steal (+ pre-active mode2-total jvb-fetch parked post-vbi))
+           (expected-budget (- (* 262 114) expected-steal)))
+      (is (<= (- expected-budget 2) (cpu-cycles cpu) expected-budget)
+          "CPU cycles consumed (~D) should be within one instruction of the ~
+           expected granted budget ~D (expected steal ~D)"
+          (cpu-cycles cpu) expected-budget expected-steal))))

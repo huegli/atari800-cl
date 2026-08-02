@@ -309,6 +309,7 @@
            #:reset-antic
            #:attach-antic
            #:mode-line-scanlines
+           #:playfield-dma-cycles
            #:+scanlines-per-frame+
            #:+cpu-cycles-per-scanline+
            #:+active-start-scanline+
