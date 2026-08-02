@@ -111,6 +111,29 @@
            (is (and (probe-file path) t) "file survives chmod"))
       (delete-file-if-exists path))))
 
+(test chmod-file-actually-changes-mode
+  "CHMOD-FILE really changes the permission bits, not just returns
+without error: after #o400 (read-only) an output open must fail; after
+#o600 it must succeed again.  Exercises the LispWorks FLI chmod(2)
+binding / SBCL's sb-posix:chmod doing real work.  (Assumes the test
+does not run as root, where permission checks are bypassed.)"
+  (let ((path (merge-pathnames "atari800-cl-chmod-mode-test.tmp"
+                               (uiop:temporary-directory))))
+    (unwind-protect
+         (progn
+           (with-open-file (s path :direction :output :if-exists :supersede)
+             (write-line "x" s))
+           (chmod-file path #o400)
+           (signals error
+             (with-open-file (s path :direction :output :if-exists :append)
+               (write-line "y" s)))
+           (chmod-file path #o600)
+           (finishes
+             (with-open-file (s path :direction :output :if-exists :append)
+               (write-line "y" s))))
+      (ignore-errors (chmod-file path #o600))
+      (delete-file-if-exists path))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Unix-domain stream sockets
 ;;;
