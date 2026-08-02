@@ -1,5 +1,15 @@
 # Roadmap — EdVenture-first accuracy, rendering, and audio
 
+> **Status (2026-08-02): Phases 1-5 done and committed to main** (suite
+> green on both implementations throughout; benchmarked at each
+> hot-path phase — see `PERFORMANCE_LOG.md`). Two deviations from the
+> plan as written, both explained in their commit messages: Phase 5's
+> bitmap-mode (8-14) byte-per-line counts were corrected against this
+> project's own tested renderer rather than this document's
+> from-memory table, which turned out to be wrong; that correction is
+> also folded into `SCANLINE_ACCURACY_PLAN.md`. Phase 6 (P/M DMA + full
+> GTIA priority) is next.
+
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
 priority, GTIA modes), POKEY audio synthesis + streaming, and the
@@ -53,14 +63,14 @@ and say so in the commit message.
 
 ## Phase overview and dependencies
 
-| Phase | Title                                        | Depends on | Hot path |
-|-------|----------------------------------------------|------------|----------|
-| 1     | Cheap hardening batch (4 small commits)      | —          | no       |
-| 2     | Rename: color clocks → CPU cycles            | —          | no       |
-| 3     | WSYNC ($D40A)                                | 2          | yes      |
-| 4     | Raster-bars demo + rendered acceptance test  | 3          | no       |
-| 5     | Playfield DMA steal tables                   | 3          | yes      |
-| 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      |
+| Phase | Title                                        | Depends on | Hot path | Status |
+|-------|----------------------------------------------|------------|----------|--------|
+| 1     | Cheap hardening batch (4 small commits)      | —          | no       | done   |
+| 2     | Rename: color clocks → CPU cycles            | —          | no       | done   |
+| 3     | WSYNC ($D40A)                                | 2          | yes      | done   |
+| 4     | Raster-bars demo + rendered acceptance test  | 3          | no       | done   |
+| 5     | Playfield DMA steal tables                   | 3          | yes      | done   |
+| 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      |        |
 | 7     | GTIA modes 9/10/11                           | 6          | no       |
 | 8     | POKEY timer fidelity                         | —          | no       |
 | 9     | POKEY audio synthesis core                   | 8          | yes      |
