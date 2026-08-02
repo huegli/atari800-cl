@@ -68,7 +68,7 @@ for chaining."
   machine)
 
 (defun run-frame (machine &key (count 1))
-  "Run COUNT full NTSC frames (29,868 color clocks each), pumping ANTIC
+  "Run COUNT full NTSC frames (29,868 CPU cycles each), pumping ANTIC
 and POKEY in lockstep with the CPU and servicing pending NMI/IRQ between
 instructions.  This is the cycle-correct way to drive the whole machine.
 Returns MACHINE for chaining."

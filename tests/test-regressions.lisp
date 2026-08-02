@@ -78,14 +78,14 @@ the CPU should end the frame in CPU-HALTED state."
 
 ;;; ---------------------------------------------------------------------------
 ;;; Regression #4 — ANTIC fires DLI EXACTLY once per mode line, not on
-;;; every color clock at the boundary.
+;;; every CPU cycle at the boundary.
 ;;;
 ;;; An earlier ANTIC sketch fired DLI any time mode-scanlines-remaining
-;;; was 1, every color clock for the whole final scanline.
+;;; was 1, every cycle for the whole final scanline.
 
 (test antic-dli-fires-exactly-once-per-mode-line
   "DLI bit set on the mode byte must raise CPU NMI exactly once, then
-clear DLI-ARMED, regardless of how many color clocks we tick after."
+clear DLI-ARMED, regardless of how many CPU cycles we tick after."
   (let* ((bus (atari800-cl.bus:make-bus))
          (cpu (atari800-cl.cpu:make-cpu))
          (antic (atari800-cl.antic:make-antic))
@@ -97,7 +97,7 @@ clear DLI-ARMED, regardless of how many color clocks we tick after."
     (atari800-cl.bus:bus-write bus #xD400 #x22)           ; DMACTL with inst DMA
     (atari800-cl.bus:bus-write bus #xD40E atari800-cl.antic:+nmi-dli+)
     ;; Run ~10 scanlines worth of ticks; DLI must fire at most once.
-    (dotimes (i (* 16 atari800-cl.antic:+color-clocks-per-scanline+))
+    (dotimes (i (* 16 atari800-cl.antic:+cpu-cycles-per-scanline+))
       (atari800-cl.antic:antic-tick antic cpu bus))
     (is-false (atari800-cl.antic:antic-dli-armed antic)
               "DLI-ARMED must be cleared after the mode line fires")
@@ -199,7 +199,7 @@ asserted; acknowledging the second must finally drop it."
 
 (test interrupt-entry-cycles-count-against-frame-budget
   "Under a continuous IRQ storm, the CPU must not consume more cycles
-than color clocks elapsed (the budget can overdraw by at most one
+than CPU-clock cycles elapsed (the budget can overdraw by at most one
 instruction)."
   (let ((os (%make-synthetic-os-rom :reset-pc #xC000 :irq-pc #xFE00)))
     ;; Main program at $C000: CLI, then NOP filler.  IRQ handler at

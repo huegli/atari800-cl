@@ -274,9 +274,10 @@
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.antic — Display list / DMA engine for the 800 XL
 ;;;
-;;; Scanline-oriented model: ANTIC-TICK advances one NTSC color clock,
-;;; performs display-list parsing on the correct scanline boundaries,
-;;; lumps DRAM refresh and P/M DMA steals at color-clock 0 of each
+;;; Scanline-oriented model: ANTIC-TICK advances one CPU cycle (114 per
+;;; scanline; a real NTSC line is 228 color clocks at twice the CPU
+;;; rate), performs display-list parsing on the correct scanline
+;;; boundaries, lumps DRAM refresh and P/M DMA steals at cycle 0 of each
 ;;; scanline, and raises NMI lines for DLI and VBI events.
 
 (defpackage #:atari800-cl.antic
@@ -288,7 +289,7 @@
            #:antic-dlist-pointer
            #:antic-dl-offset
            #:antic-scanline
-           #:antic-color-clock
+           #:antic-line-cycle
            #:antic-dmactl
            #:antic-nmien
            #:antic-nmist
@@ -307,7 +308,7 @@
            #:attach-antic
            #:mode-line-scanlines
            #:+scanlines-per-frame+
-           #:+color-clocks-per-scanline+
+           #:+cpu-cycles-per-scanline+
            #:+active-start-scanline+
            #:+vbi-scanline+
            #:+dram-refresh-cycles+

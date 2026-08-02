@@ -24,7 +24,9 @@
 (declaim (optimize (speed 3) (safety 1) (debug 1)))
 
 (defconstant +clocks-per-frame+ 29868
-  "262 scanlines × 114 color clocks/scanline (NTSC).")
+  "262 scanlines × 114 CPU cycles/scanline (NTSC).  A real NTSC line is
+228 color clocks at twice the CPU rate; this project's timing unit is
+CPU cycles throughout, matching hardware-reference cycle numbers.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Command mailbox
@@ -310,7 +312,7 @@ carry across calls."
                         (plusp clocks-run)
                         (funcall abort-pred))
                (return-from %run-clocks clocks-run))
-             (let* ((line-cycles (min +color-clocks-per-scanline+
+             (let* ((line-cycles (min +cpu-cycles-per-scanline+
                                       (- n clocks-run)))
                     (stolen (antic-begin-scanline antic cpu bus))
                     (pokey-remaining line-cycles))
@@ -339,7 +341,7 @@ carry across calls."
                (when (plusp pokey-remaining)
                  (pokey-advance pokey cpu pokey-remaining))
                ;; Close the line — but not a trailing partial line.
-               (when (= line-cycles +color-clocks-per-scanline+)
+               (when (= line-cycles +cpu-cycles-per-scanline+)
                  (antic-end-scanline antic)
                  ;; The line just closed (SCANLINE has advanced past it);
                  ;; invoke the scanline callback if the completed line is in

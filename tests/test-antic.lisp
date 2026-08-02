@@ -42,9 +42,9 @@ Defaults: DMACTL = $22 (normal playfield + instructions DMA enabled),
     total))
 
 (defun %tick-scanlines (antic cpu bus n)
-  "Tick ANTIC enough color clocks to advance N full scanlines."
+  "Tick ANTIC enough CPU cycles to advance N full scanlines."
   (%tick-n antic cpu bus
-           (* n atari800-cl.antic:+color-clocks-per-scanline+)))
+           (* n atari800-cl.antic:+cpu-cycles-per-scanline+)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Mode-line scanline lookup
@@ -62,13 +62,13 @@ Defaults: DMACTL = $22 (normal playfield + instructions DMA enabled),
   (is (= 1  (atari800-cl.antic:mode-line-scanlines #x0F)))) ; gfx mode F
 
 ;;; ---------------------------------------------------------------------------
-;;; Color clock and scanline wraparound
+;;; Line-cycle and scanline wraparound
 
-(test color-clock-wraps-at-114-and-bumps-scanline
-  "After 114 ticks, color-clock returns to 0 and scanline increments."
+(test line-cycle-wraps-at-114-and-bumps-scanline
+  "After 114 ticks, line-cycle returns to 0 and scanline increments."
   (multiple-value-bind (antic cpu bus) (%make-antic-fixture :dmactl 0)
     (%tick-n antic cpu bus 114)
-    (is (zerop (atari800-cl.antic:antic-color-clock antic)))
+    (is (zerop (atari800-cl.antic:antic-line-cycle antic)))
     (is (= 1 (atari800-cl.antic:antic-scanline antic)))))
 
 (test frame-wraparound-resets-scanline-counter
@@ -118,7 +118,7 @@ Defaults: DMACTL = $22 (normal playfield + instructions DMA enabled),
                            :dl-bytes '(#x70 #x02))   ; 8 blank, then mode 2
     ;; Advance to scanline 8 (active region begins): tick 8 * 114.
     (%tick-scanlines antic cpu bus 8)
-    ;; One more color-clock-0 tick to trigger the fetch.
+    ;; One more cycle-0 tick to trigger the fetch.
     (atari800-cl.antic:antic-tick antic cpu bus)
     (is (= 1 (atari800-cl.antic:antic-dl-offset antic))
         "After entering active region, first DL byte must be consumed")
@@ -131,19 +131,19 @@ offset stays at 1."
   (multiple-value-bind (antic cpu bus)
       (%make-antic-fixture :dlist-addr #x4000
                            :dl-bytes '(#x70 #x02))   ; 8 blank, then mode 2
-    (%tick-scanlines antic cpu bus 8)        ; reach scanline 8 c-c=0
+    (%tick-scanlines antic cpu bus 8)        ; reach scanline 8 cycle 0
     (atari800-cl.antic:antic-tick antic cpu bus)   ; fetch the blank-line inst
     (is (= 1 (atari800-cl.antic:antic-dl-offset antic)))
-    ;; Mode lasts 8 scanlines; we've consumed 1 color clock of scanline 8.
-    ;; Tick 7 more full scanlines' worth (798 color clocks) — by the end
-    ;; we're 1 color clock into scanline 15 (the 8th mode-scanline) with
+    ;; Mode lasts 8 scanlines; we've consumed 1 CPU cycle of scanline 8.
+    ;; Tick 7 more full scanlines' worth (798 CPU cycles) — by the end
+    ;; we're 1 cycle into scanline 15 (the 8th mode-scanline) with
     ;; the blank-line span still in effect.
     (%tick-n antic cpu bus 798)
     (is (= 1 (atari800-cl.antic:antic-dl-offset antic))
         "DL offset must stay at 1 throughout the blank-line span")
     (is (= #x70 (atari800-cl.antic:antic-current-mode antic)))
-    ;; 114 more ticks: cross into scanline 16 and let its c-c=0 event run,
-    ;; which fetches the next DL byte ($02).
+    ;; 114 more ticks: cross into scanline 16 and let its cycle-0 event
+    ;; run, which fetches the next DL byte ($02).
     (%tick-n antic cpu bus 114)
     (is (= 2 (atari800-cl.antic:antic-dl-offset antic))
         "After the blank ends, the next DL byte gets fetched")
@@ -180,9 +180,9 @@ offset stays at 1."
 (test dli-fires-on-last-scanline-of-mode-line
   "A mode byte with bit 7 set + NMIEN bit 7 = NMI on the mode's last line.
 
-DLI fires at color-clock 0 of the LAST scanline of the mode (when
+DLI fires at cycle 0 of the LAST scanline of the mode (when
 mode-scanlines-remaining = 1).  For an 8-line mode starting on
-scanline 8, that's c-c=0 of scanline 15."
+scanline 8, that's cycle 0 of scanline 15."
   (multiple-value-bind (antic cpu bus)
       (%make-antic-fixture :dlist-addr #x4000
                            :dl-bytes '(#x82)        ; mode 2 + DLI bit
@@ -191,17 +191,17 @@ scanline 8, that's c-c=0 of scanline 15."
     (atari800-cl.antic:antic-tick antic cpu bus)            ; fetch DL
     (is-true (atari800-cl.antic:antic-dli-armed antic))
     (is-false (cpu-pending-nmi cpu) "NMI must not fire on the fetch tick")
-    ;; State now (8, 1, remaining=8).  Advance to JUST BEFORE c-c=0 of
+    ;; State now (8, 1, remaining=8).  Advance to JUST BEFORE cycle 0 of
     ;; scanline 15: 113 ticks (rest of scanline 8) + 6 full scanlines
     ;; (9-14) = 113 + 6*114 = 797 ticks.  Final state (15, 0, 1) — the
-    ;; c-c=0 events of scanline 15 have NOT YET run.
+    ;; cycle-0 events of scanline 15 have NOT YET run.
     (%tick-n antic cpu bus 797)
     (is-false (cpu-pending-nmi cpu)
-              "NMI must not fire before the last mode-scanline's c-c=0 event")
-    ;; One more tick: c-c=0 of scanline 15 with remaining=1 → DLI fires.
+              "NMI must not fire before the last mode-scanline's cycle-0 event")
+    ;; One more tick: cycle 0 of scanline 15 with remaining=1 → DLI fires.
     (atari800-cl.antic:antic-tick antic cpu bus)
     (is-true (cpu-pending-nmi cpu)
-             "DLI must fire at c-c=0 of the last scanline of the mode line")
+             "DLI must fire at cycle 0 of the last scanline of the mode line")
     (is-true (not (zerop (logand (atari800-cl.antic:antic-nmist antic)
                                  atari800-cl.antic:+nmi-dli+)))
              "NMIST must record the DLI bit")))

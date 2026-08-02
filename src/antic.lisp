@@ -7,14 +7,16 @@
 ;;;;
 ;;;; Timing model (NTSC):
 ;;;;   262 scanlines / frame
-;;;;   114 color clocks / scanline   (one color clock = one CPU half-cycle;
-;;;;                                  for our integer model we treat them
-;;;;                                  as 1:1 with CPU cycles)
+;;;;   114 CPU cycles / scanline   (a real NTSC line is 228 color clocks;
+;;;;                                the color clock runs at twice the CPU
+;;;;                                rate, so 114 CPU cycles per line is
+;;;;                                the correct unit — hardware docs quote
+;;;;                                cycle positions 0-113 within a line)
 ;;;;   scanlines 8-247  — active display region
 ;;;;   scanline 248     — VBLANK begins; VBI fires here when NMIEN bit 6 set
 ;;;;
 ;;;; Cycle-stealing accounting is simplified: we lump all the per-line
-;;;; steals (DRAM refresh + P/M DMA) at color-clock 0 of each scanline,
+;;;; steals (DRAM refresh + P/M DMA) at CPU cycle 0 of each scanline,
 ;;;; returning that lump from ANTIC-TICK so the machine scheduler can
 ;;;; deduct them from the CPU's budget for the line.
 ;;;;
@@ -50,7 +52,7 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defconstant +scanlines-per-frame+        262)
-  (defconstant +color-clocks-per-scanline+  114)
+  (defconstant +cpu-cycles-per-scanline+    114)
   (defconstant +active-start-scanline+      8)
   (defconstant +vbi-scanline+               248)
   (defconstant +dram-refresh-cycles+        9)
@@ -95,7 +97,9 @@ Slots:
   DL-OFFSET                 — bytes consumed within the current DL since
                               DLIST-POINTER was last latched.
   SCANLINE                  — vertical line counter, 0-261.
-  COLOR-CLOCK               — horizontal counter, 0-113.
+  LINE-CYCLE                — horizontal counter, 0-113 CPU cycles within
+                              the current scanline (a real NTSC line is
+                              228 color clocks at twice the CPU rate).
   DMACTL                    — shadow of register $D400 (DMA enables).
   NMIEN                     — shadow of register $D40E (NMI enables).
   NMIST                     — NMI status latch (bits 6/7 = VBI/DLI pending).
@@ -121,7 +125,7 @@ Slots:
   ;; without changing modelled behaviour for any well-formed DL.
   (dl-offset     0 :type fixnum)
   (scanline      0 :type (unsigned-byte 9))
-  (color-clock   0 :type (unsigned-byte 8))
+  (line-cycle    0 :type (unsigned-byte 8))
   (dmactl        0 :type (unsigned-byte 8))
   (nmien         0 :type (unsigned-byte 8))
   (nmist         0 :type (unsigned-byte 8))
@@ -138,7 +142,7 @@ Slots:
   ;; Set by the LMS modifier; advances after each char row (char modes) or
   ;; every scanline (bitmap modes).
   (screen-data-ptr        0 :type (unsigned-byte 16))
-  ;; RENDER-SCREEN-DATA-PTR: snapshot of SCREEN-DATA-PTR taken at color-clock
+  ;; RENDER-SCREEN-DATA-PTR: snapshot of SCREEN-DATA-PTR taken at CPU cycle
   ;; 0 of each scanline, before any end-of-line advancement.  The renderer
   ;; reads this to avoid an off-by-one on the first scanline of bitmap modes.
   (render-screen-data-ptr 0 :type (unsigned-byte 16))
@@ -361,9 +365,9 @@ the frame boundary (bumping FRAME-COUNT).  Returns ANTIC."
 ;;; The machine scheduler drives ANTIC one whole scanline at a time:
 ;;; ANTIC-BEGIN-SCANLINE at the start of each line (returning the cycles
 ;;; stolen), ANTIC-END-SCANLINE once the line's 114 CPU cycles have been
-;;; distributed.  Neither touches the COLOR-CLOCK slot — that counter
+;;; distributed.  Neither touches the LINE-CYCLE slot — that counter
 ;;; belongs to the per-cycle ANTIC-TICK path.  Do not interleave the two
-;;; APIs on the same ANTIC unless COLOR-CLOCK is at 0 (a line boundary).
+;;; APIs on the same ANTIC unless LINE-CYCLE is at 0 (a line boundary).
 
 (declaim (ftype (function (antic (or null cpu) (or null bus)) fixnum)
                 antic-begin-scanline))
@@ -391,30 +395,30 @@ FRAME-COUNT).  Returns ANTIC.  See ANTIC-BEGIN-SCANLINE."
   (%end-scanline-events antic))
 
 ;;; ---------------------------------------------------------------------------
-;;; Tick — advances one color clock (the single-cycle reference path)
+;;; Tick — advances one CPU cycle (the single-cycle reference path)
 
 (declaim (ftype (function (antic (or null cpu) (or null bus)) fixnum) antic-tick))
 
 (defun antic-tick (antic cpu bus)
-  "Advance ANTIC by one color clock.  Returns the cycles stolen this tick.
+  "Advance ANTIC by one CPU cycle.  Returns the cycles stolen this tick.
 
-The per-scanline steal (DRAM refresh + P/M DMA) is lumped at
-color-clock 0 of each new scanline; all subsequent ticks within the
-same scanline return 0.  Display-list parsing, VBI, and DLI events
-are all serviced at color-clock 0 as well.  Built on the same
-%BEGIN-SCANLINE-EVENTS / %END-SCANLINE-EVENTS helpers as the
-scanline-granular API, so the two paths cannot diverge."
+The per-scanline steal (DRAM refresh + P/M DMA) is lumped at cycle 0 of
+each new scanline; all subsequent ticks within the same scanline return
+0.  Display-list parsing, VBI, and DLI events are all serviced at cycle
+0 as well.  Built on the same %BEGIN-SCANLINE-EVENTS /
+%END-SCANLINE-EVENTS helpers as the scanline-granular API, so the two
+paths cannot diverge."
   (declare (type antic antic))
   ;; Cache CPU and bus pointers on the struct so helpers can reach them.
   (when cpu (setf (antic-cpu antic) cpu))
   (when bus (setf (antic-bus antic) bus))
   (let ((stolen 0))
-    (when (zerop (antic-color-clock antic))
+    (when (zerop (antic-line-cycle antic))
       (setf stolen (%begin-scanline-events antic)))
-    ;; Advance the color clock.
-    (incf (antic-color-clock antic))
-    (when (>= (antic-color-clock antic) +color-clocks-per-scanline+)
-      (setf (antic-color-clock antic) 0)
+    ;; Advance the line-cycle counter.
+    (incf (antic-line-cycle antic))
+    (when (>= (antic-line-cycle antic) +cpu-cycles-per-scanline+)
+      (setf (antic-line-cycle antic) 0)
       (%end-scanline-events antic))
     stolen))
 
@@ -462,7 +466,7 @@ their shadow slots; everything else is just latched into the register file."
   (setf (antic-dlist-pointer antic) 0
         (antic-dl-offset antic) 0
         (antic-scanline antic) 0
-        (antic-color-clock antic) 0
+        (antic-line-cycle antic) 0
         (antic-dmactl antic) 0
         (antic-nmien antic) 0
         (antic-nmist antic) 0

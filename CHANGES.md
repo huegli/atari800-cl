@@ -3,6 +3,21 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 2 — rename color clocks to CPU cycles
+
+SCANLINE_ACCURACY_PLAN.md's previously-skipped Phase 0. The 114-unit
+ANTIC and the machine scheduler use per scanline is CPU cycles, not
+color clocks (a real NTSC line is 228 color clocks at twice the CPU
+rate; hardware references quote cycle positions 0-113). Renamed
+`+color-clocks-per-scanline+` → `+cpu-cycles-per-scanline+` and the
+`antic` struct slot/accessor `color-clock`/`antic-color-clock` →
+`line-cycle`/`antic-line-cycle` throughout `src/` and `tests/`, and
+reworded the surrounding comments/docstrings. Pure rename — no
+behaviour change.
+
+Suite: 1708/1708 checks green on both SBCL and LispWorks (unchanged
+count, confirming no behaviour change).
+
 ## ROADMAP Phase 1 — cheap hardening batch
 
 Four independent fixes from `MISC_IMPROVEMENTS_PLAN.md`:
