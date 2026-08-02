@@ -3,6 +3,87 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Phases 1-5 review fixes (3) — display bench workload + misc hardening
+
+Closes out the remaining recommendations from the Phases 1-5 review:
+
+- `scripts/bench.lisp`: new `display` workload — the NOP sled with a
+  24-line mode-2 display list fetched by ANTIC (DMACTL $22) and the
+  pixel renderer attached through the scanline callback, exactly as
+  the AESP server wires it. Until now no bench workload ever enabled
+  DMACTL, so the DMA-active steal accounting + per-line render path
+  (what display programs and A/V capture actually run) was unmeasured.
+  In the default workload list; both bench scripts pick it up.
+- `scripts/fetch-test-roms.sh`: the download is now verified against a
+  pinned sha256 (the binary the suite was validated with) instead of
+  merely echoing a checksum; a mismatched download is discarded, a
+  mismatched pre-existing file gets a warning.
+- `tests/test-compat.lisp`: `chmod-file-actually-changes-mode` verifies
+  CHMOD-FILE really changes permission bits (write-denied at #o400,
+  allowed again at #o600) — the LispWorks FLI chmod(2) binding from
+  ROADMAP Phase 1 previously had no effect-level test.
+- `CLAUDE.md` benchmarking section now documents all four workloads
+  (`klaus` had never been added, `display` is new).
+
+## Phases 1-5 review fixes (2) — WSYNC stall edge cases
+
+Two scheduler-level WSYNC defects found in the Phases 1-5 review:
+
+- The stall clamp in `%RUN-CLOCKS` was `(setf cpu-budget 0)`, which
+  FORGAVE a negative budget: when the `STA WSYNC` instruction itself
+  overshot the line's remaining budget (it can enter with 2-3 cycles
+  left and costs 4+), the borrowed cycles were erased and the CPU got
+  them free on the next line. Now `(setf cpu-budget (min cpu-budget 0))`
+  — surplus still cannot leak past the stall, but a deficit carries.
+  Regression test pins the exact two-line cycle ledger (209, not 211).
+- A WSYNC flag armed OUTSIDE the scheduler (a debugger poke of $D40A,
+  or `MACHINE-TRACE-STEP` executing a store) used to stall the first
+  line of the next `%RUN-CLOCKS` call. The flag is now consumed on
+  entry: out-of-band writes have no scanline context to stall against.
+  Regression test covers the bus-poke case.
+- Also: the `DEC WSYNC` NMOS double-write out-of-scope note ROADMAP
+  Phase 3 asked for is now actually in `src/antic.lisp`, and
+  `ANTIC-BEGIN-SCANLINE`'s docstring lists the full steal components
+  (it still described the pre-Phase-5 refresh + P/M only lump).
+
+## Phases 1-5 review fixes (1) — map-mode geometry + DMA table corrected to hardware
+
+Reverses the ROADMAP Phase 5 deviation, which ran the wrong way: the
+SCANLINE_ACCURACY_PLAN.md byte table was RIGHT (pixel width × bpp ÷ 8
+per mode, per the Altirra Hardware Reference), and the RENDERER's
+map-mode geometry was the divergent component the steal tables then
+inherited.
+
+- `BYTES-PER-SCREEN-ROW` (`src/antic.lisp`, now exported) is the single
+  hardware byte table: modes 2-5 → 40, 6-7 → 20, 8-9 → 10, A-C → 20,
+  D-F → 40. `PLAYFIELD-DMA-CYCLES`, the renderer, and the end-of-line
+  screen-pointer advance all derive from it and can no longer disagree.
+- Map modes (8-F) now fetch screen bytes on the FIRST scanline of a
+  mode line only — ANTIC line-buffers them and replays the buffer on
+  the remaining scanlines (0 steal), matching hardware. Previously
+  every scanline was charged AND the screen pointer advanced every
+  scanline, so a mode-8 mode line consumed 320 bytes instead of 10.
+- `%RENDER-BITMAP-MODE` (`src/renderer.lisp`) rewritten to hardware
+  geometry: mode 8 = 10 bytes 2bpp (40 px × 8 columns), 9 = 10 bytes
+  1bpp, A = 20 bytes 2bpp, D/E = 40 bytes 2bpp (previously e.g. mode 8
+  was drawn as 40 bytes of 1bpp and mode E stopped at 20 bytes). 1bpp
+  map pixels now use COLPF0 (modes 9/B/C; B/C previously used COLPF2).
+  Mode F's simplified artifact-free output is unchanged (GTIA-mode
+  work, ROADMAP Phase 7).
+- New renderer tests pin modes 8/9/E geometry and registers; a new
+  end-to-end test renders a full mode-2 frame through the machine
+  scheduler with DMA stealing active (the render test ROADMAP Phase 5
+  listed but never landed); an ANTIC test pins the line-buffer
+  behaviour (render pointer constant across a mode-8 line, screen
+  pointer +10 after it).
+- `src/antic.lisp`'s header no longer claims real ANTIC packs fetches
+  "2 bytes per DMA slot" (it doesn't; one byte per slot, and the char
+  mode counts always did match hardware). ROADMAP.md and
+  SCANLINE_ACCURACY_PLAN.md status headers corrected — they asserted
+  the plan table "turned out to be wrong", which was false.
+
+Suite: 1832/1832 checks green on both SBCL and LispWorks.
+
 ## ROADMAP Phase 5 — playfield DMA steal + DL fetch accounting
 
 SCANLINE_ACCURACY_PLAN.md Phase 3: the largest remaining timing error

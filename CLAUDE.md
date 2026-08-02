@@ -124,8 +124,12 @@ without real ROM images (synthetic NOP/IRQ workloads built inline).
 
 Each prints one machine-readable line per workload:
 `BENCH <workload> frames=600 seconds=<s> fps=<fps> realtime-x=<fps/59.92>`.
-Two workloads: `nop` (NOP-sled baseline) and `irq` (busy loop + POKEY
-timer 1 IRQs exercising the interrupt path). Tune via
+Four workloads: `nop` (NOP-sled baseline), `irq` (busy loop + POKEY
+timer 1 IRQs exercising the interrupt path), `display` (NOP sled with a
+24-line mode-2 display list fetched by ANTIC — DMA-active steal
+accounting — and the pixel renderer attached via the scanline callback),
+and `klaus` (the Klaus Dormann functional test as a CPU-heavy load;
+skips if the binary is absent). Tune via
 `atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
 
 **Rule: every optimization commit updates `PERFORMANCE_LOG.md` with

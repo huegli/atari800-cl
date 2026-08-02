@@ -62,6 +62,43 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | e3c23bc  | lispworks      | nop      |  986.88 | 16.472     | ROADMAP Phase 5: playfield DMA steal (mean of 3) |
 | 2026-08-02 | e3c23bc  | lispworks      | irq      | 1581.72 | 26.398     | ROADMAP Phase 5: playfield DMA steal (mean of 3) |
 | 2026-08-02 | e3c23bc  | lispworks      | klaus    |  991.60 | 16.552     | ROADMAP Phase 5, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | b4e8d51  | sbcl           | nop      | 3509.97 | 58.578     | same-session re-baseline for review fixes (mean of 3) |
+| 2026-08-02 | b4e8d51  | sbcl           | irq      | 3963.98 | 66.155     | same-session re-baseline for review fixes (mean of 3) |
+| 2026-08-02 | b4e8d51  | lispworks      | nop      |  923.57 | 15.413     | same-session re-baseline for review fixes (mean of 3) |
+| 2026-08-02 | b4e8d51  | lispworks      | irq      | 1460.45 | 24.374     | same-session re-baseline for review fixes (mean of 3) |
+| 2026-08-02 | f7ca0d6  | sbcl           | nop      | 3451.22 | 57.598     | Phases 1-5 review fixes (mean of 3)  |
+| 2026-08-02 | f7ca0d6  | sbcl           | irq      | 3883.83 | 64.817     | Phases 1-5 review fixes (mean of 3)  |
+| 2026-08-02 | f7ca0d6  | sbcl           | display  |  525.50 |  8.770     | NEW workload: DMA-active + renderer (mean of 3) |
+| 2026-08-02 | f7ca0d6  | sbcl           | klaus    | 3179.26 | 53.058     | Phases 1-5 review fixes, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | f7ca0d6  | lispworks      | nop      |  925.96 | 15.453     | Phases 1-5 review fixes (mean of 3)  |
+| 2026-08-02 | f7ca0d6  | lispworks      | irq      | 1462.81 | 24.413     | Phases 1-5 review fixes (mean of 3)  |
+| 2026-08-02 | f7ca0d6  | lispworks      | display  |   66.74 |  1.114     | NEW workload: DMA-active + renderer (mean of 3) |
+| 2026-08-02 | f7ca0d6  | lispworks      | klaus    |  924.15 | 15.424     | Phases 1-5 review fixes, klaus+PASS, 3500 frames (mean of 3) |
+
+## Phases 1-5 review fixes — map-mode/WSYNC corrections + display workload
+
+The review-fix commits (map-mode hardware geometry/steal tables, WSYNC
+deficit clamp + stale-flag consume) touch the hot path, so both rules-3
+runs were done — with one methodology note: measured fps this session
+is 5-10% below the e3c23bc rows across ALL workloads on BOTH
+implementations, including code paths the fixes never touch.  To
+separate machine drift from real cost, b4e8d51 (the pre-fix tree) was
+re-benchmarked in a worktree in the SAME session (rows above): against
+that baseline the fixes are neutral — SBCL nop -1.7% / irq -2.0%
+(inside the run-to-run spread of the three samples), LispWorks nop and
+irq +0.2%.  The nop/irq/klaus workloads never enable DMACTL, so the
+map-mode table changes never execute there; the only new always-on work
+is one ANTIC-CONSUME-WSYNC call per %RUN-CLOCKS invocation (once per
+frame) and the MIN in the (rare) stall clamp.
+
+The NEW `display` workload (24-line mode-2 DL, DMACTL $22, renderer
+attached via the scanline callback — the first bench to exercise the
+DMA-active steal accounting and per-line rendering) has no "before"
+row; its f7ca0d6 rows are the baseline for future renderer/DMA work.
+Note the cost of rendering: ~6.6x slower than nop on SBCL (525 fps) and
+~14x on LispWorks (67 fps ≈ 1.11x realtime — close to the realtime
+floor; renderer optimization is a candidate before Phase 6's per-pixel
+priority work lands on top of it).
 
 ## ROADMAP Phase 5 — playfield DMA steal implementation cost
 

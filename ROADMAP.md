@@ -2,12 +2,17 @@
 
 > **Status (2026-08-02): Phases 1-5 done and committed to main** (suite
 > green on both implementations throughout; benchmarked at each
-> hot-path phase — see `PERFORMANCE_LOG.md`). Two deviations from the
-> plan as written, both explained in their commit messages: Phase 5's
-> bitmap-mode (8-14) byte-per-line counts were corrected against this
-> project's own tested renderer rather than this document's
-> from-memory table, which turned out to be wrong; that correction is
-> also folded into `SCANLINE_ACCURACY_PLAN.md`. Phase 6 (P/M DMA + full
+> hot-path phase — see `PERFORMANCE_LOG.md`). **Post-phase correction
+> (2026-08-02):** Phase 5 originally rejected `SCANLINE_ACCURACY_PLAN.md`'s
+> map-mode (8-14) byte table in favor of this project's own renderer —
+> that call was backwards. The plan's table matched real hardware
+> (each mode's pixel width × bits per pixel ÷ 8); it was the RENDERER
+> whose map-mode geometry was wrong (mode 8 drawn as 40 bytes of 1bpp
+> instead of 10 bytes of 2bpp, mode E as 20 bytes instead of 40, etc.).
+> A follow-up commit restored the hardware byte counts, fixed the
+> renderer's map-mode geometry/colors to match, and made map modes
+> fetch on the first scanline of a mode line only (ANTIC line-buffers
+> them), per the Altirra Hardware Reference. Phase 6 (P/M DMA + full
 > GTIA priority) is next.
 
 A complete, ordered execution plan covering the four open work streams:

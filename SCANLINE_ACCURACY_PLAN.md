@@ -9,11 +9,17 @@
 > 2 (WSYNC) landed via ROADMAP.md Phase 3 as a first cut that stalls
 > to end-of-line, not the hardware-accurate cycle 105 (that refinement
 > is still this plan's stretch Phase 4). Phase 3 (playfield DMA steal
-> tables + DL fetch accounting) landed via ROADMAP.md Phase 5 — its
-> bitmap-mode byte counts (modes 8-14) diverge from this plan's
-> original from-memory table, which turned out to disagree with the
-> already-tested renderer; PLAYFIELD-DMA-CYCLES's docstring in
-> `src/antic.lisp` has the corrected table and the reasoning. The
+> tables + DL fetch accounting) landed via ROADMAP.md Phase 5. It
+> initially shipped with map-mode (8-14) byte counts taken from the
+> renderer instead of this plan's table — a correction that ran the
+> wrong way: THIS PLAN'S TABLE WAS RIGHT (each mode's pixel width ×
+> bits per pixel ÷ 8, per the Altirra Hardware Reference), and the
+> renderer's map-mode geometry was the divergent part. A follow-up
+> commit restored the hardware table (BYTES-PER-SCREEN-ROW in
+> `src/antic.lisp`, now shared by the renderer, the steal accounting,
+> and the screen-pointer advance), fixed the renderer's map modes to
+> hardware geometry, and made map modes fetch on the first scanline
+> of a mode line only, exactly as step 1 below specified. The
 > stretch Phases 4-5 remain open.
 
 Goal: move the emulator from frame-level timing to scanline-level timing
