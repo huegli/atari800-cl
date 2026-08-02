@@ -3,6 +3,26 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Frame-rate benchmark harness (PERFORMANCE_PLAN Phase 0)
+
+- `scripts/bench.lisp` — portable `:atari800-cl.bench` package building
+  the machine with an inlined synthetic OS ROM (no real ROM images
+  needed).  Two workloads: `nop` (a NOP sled that loops back via a JMP
+  placed below the vector region) and `irq` (a busy loop that arms POKEY
+  timer 1, enables IRQs, and fields a bare-`RTI` handler).  Runs 60
+  warm-up + 600 timed frames and prints one
+  `BENCH <workload> frames=600 seconds=… fps=… realtime-x=…` line per
+  workload.  Tune via `*warmup-frames*` / `*measured-frames*`.
+- `scripts/bench-sbcl.sh` / `scripts/bench-lispworks.sh` (+ the
+  `-lispworks.lisp` driver) mirror the test runners' sandbox/ASDF/
+  `mp:initialize-multiprocessing` handling.  Exit 0 on completion.
+- `PERFORMANCE_LOG.md` records the baseline from both implementations;
+  every optimization commit must add before/after rows.
+- `CLAUDE.md` gained a "Benchmarking" section pointing at the scripts
+  and stating the log-update rule.
+
+Suite untouched; harness runs clean on both SBCL and LispWorks.
+
 ## AESP + CLI protocol servers
 
 External GUI/CLI/web clients can now drive the headless emulator over two

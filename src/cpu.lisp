@@ -66,6 +66,12 @@
 
 (in-package #:atari800-cl.cpu)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Status-register flag bits (NV-BDIZC)
 ;;;
@@ -117,7 +123,11 @@ Slots:
   (y           0    :type u8)
   (sp          #xFD :type u8)            ; stack pointer starts at $FD after reset
   (flags       #x24 :type u8)            ; U=1, I=1 after reset
-  (cycles      0    :type (unsigned-byte 64))
+  ;; FIXNUM rather than (UNSIGNED-BYTE 64): raw (unsigned-byte 64) struct
+  ;; slots are SBCL-specific goodness but may box on LispWorks, whereas
+  ;; fixnum is fast (unboxed) on both.  62 bits of cycle count is
+  ;; millennia of emulated time, so the narrower range is not a concern.
+  (cycles      0    :type fixnum)
   (bus-read    nil :type (or null function))
   (bus-write   nil :type (or null function))
   (pending-irq nil :type boolean)
@@ -137,13 +147,21 @@ Slots:
   (declare (type cpu cpu) (type u16 address))
   ;; FUNCALL is needed because CPU-BUS-READ returns a function object,
   ;; and CL requires FUNCALL to invoke a value in the "variable" namespace.
-  (funcall (cpu-bus-read cpu) (ldb (byte 16 0) address)))
+  ;; The slot's declared type is (OR NULL FUNCTION); checking for NIL up
+  ;; front lets THE tell the compiler the FUNCALL target is a known
+  ;; FUNCTION afterward, instead of an opaque callable it must look up via
+  ;; FDEFINITION on every single memory access.
+  (let ((fn (cpu-bus-read cpu)))
+    (unless fn (error "CPU bus-read hook is not wired"))
+    (funcall (the function fn) (ldb (byte 16 0) address))))
 
 (defun cpu-write-byte (cpu address value)
   (declare (type cpu cpu) (type u16 address) (type u8 value))
-  (funcall (cpu-bus-write cpu)
-           (ldb (byte 16 0) address)
-           (ldb (byte 8 0) value)))
+  (let ((fn (cpu-bus-write cpu)))
+    (unless fn (error "CPU bus-write hook is not wired"))
+    (funcall (the function fn)
+             (ldb (byte 16 0) address)
+             (ldb (byte 8 0) value))))
 
 (defun cpu-read-word (cpu address)
   "Read a little-endian 16-bit word: low byte at ADDRESS, high byte at ADDRESS+1."
@@ -439,7 +457,9 @@ offset from the NEXT instruction's address (i.e. from PC after the offset
 byte has been consumed)."
   (let* ((off (read-pc-byte cpu))
          ;; Convert unsigned byte to signed: values >= #x80 are negative.
-         (s   (if (>= off #x80) (- off #x100) off)))
+         (s   (the (signed-byte 16)
+                   (if (>= off #x80) (- off #x100) off))))
+    (declare (type u8 off))
     (values (ldb (byte 16 0) (+ (cpu-pc cpu) s)) nil)))
 
 ;;; ---------------------------------------------------------------------------
@@ -469,6 +489,8 @@ byte has been consumed)."
   "256-entry SIMPLE-VECTOR populated by src/cpu-opcodes.lisp.
 Each element is either NIL (illegal opcode) or a function of one
 argument (CPU) that returns the number of cycles consumed.")
+
+(declaim (ftype (function (cpu) fixnum) step-cpu))
 
 (defun step-cpu (cpu)
   "Execute one instruction, returning the number of cycles consumed.

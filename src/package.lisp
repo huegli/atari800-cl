@@ -299,6 +299,8 @@
            #:antic-frame-count
            #:antic-stolen-cycles
            #:antic-tick
+           #:antic-begin-scanline
+           #:antic-end-scanline
            #:antic-read
            #:antic-write
            #:reset-antic
@@ -363,6 +365,7 @@
            #:pokey-kbcode
            #:pokey-input
            #:pokey-tick
+           #:pokey-advance
            #:pokey-read #:pokey-write
            #:pokey-random
            #:reset-pokey

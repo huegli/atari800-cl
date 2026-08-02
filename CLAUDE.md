@@ -12,7 +12,7 @@ The emulated machine is functionally complete at the chip-state level:
 - **MMU** — PORTB-driven bank switching (OS ROM, BASIC ROM, self-test overlay).
 - **System bus** — full Atari 800 XL memory map with RAM/ROM banking and memory-mapped I/O dispatch to the four chips.
 - **PIA** (6520), **ANTIC** (NTSC scanline timing + display-list DMA), **GTIA** (player/missile state + collision latches), **POKEY** (timers, IRQ, RNG, audio register scaffolding).
-- **Machine scheduler** — `MACHINE-RUN-FRAME` pumps 29,868 NTSC color clocks per frame, ticking ANTIC/POKEY and stepping the CPU.
+- **Machine scheduler** — `MACHINE-RUN-FRAME` runs one NTSC frame (29,868 clocks = 262 scanlines × 114 CPU cycles) scanline-by-scanline: `ANTIC-BEGIN-SCANLINE` fires the line's events and reports stolen cycles, the CPU executes against the line's remaining budget with POKEY advanced instruction-by-instruction, and `ANTIC-END-SCANLINE` closes the line.
 
 What is *not* modelled: pixel-level video rendering (no framebuffer), POKEY audio synthesis (register state only), serial/SIO bus, keyboard scanning, paddles/light-pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
 
@@ -110,6 +110,26 @@ Run a single test suite (e.g. just the CPU opcode tests):
 ```lisp
 (fiveam:run! 'atari800-cl/tests::cpu-opcode-suite)
 ```
+
+## Benchmarking
+
+Frame-rate benchmark harness for measuring optimization deltas. Works
+without real ROM images (synthetic NOP/IRQ workloads built inline).
+
+```sh
+./scripts/bench-sbcl.sh
+./scripts/bench-lispworks.sh
+```
+
+Each prints one machine-readable line per workload:
+`BENCH <workload> frames=600 seconds=<s> fps=<fps> realtime-x=<fps/59.92>`.
+Two workloads: `nop` (NOP-sled baseline) and `irq` (busy loop + POKEY
+timer 1 IRQs exercising the interrupt path). Tune via
+`atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
+
+**Rule: every optimization commit updates `PERFORMANCE_LOG.md` with
+before/after numbers from BOTH implementations.** Measure first, commit
+the delta in the commit message, and log it here.
 
 ## Architecture
 

@@ -58,6 +58,12 @@
 
 (in-package #:atari800-cl.cpu)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Common arithmetic / load / store helpers
 ;;;
@@ -71,6 +77,7 @@
   "Apply addressing MODE to CPU; return (VALUES VALUE PAGE-CROSSED? EFFECTIVE-ADDR).
 MODE is a function like #'ADDR-ABSOLUTE-X.  We call it to get the effective
 address, then read the byte at that address."
+  (declare (type cpu cpu) (type function mode))
   ;; FUNCALL is needed because MODE is a function passed as a value.
   (multiple-value-bind (addr xpage-p) (funcall mode cpu)
     (values (cpu-read-byte cpu addr) xpage-p addr)))
