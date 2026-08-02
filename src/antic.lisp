@@ -26,19 +26,18 @@
 ;;;;     for an LMS address, +2 for a JMP/JVB address) -- only on the
 ;;;;     scanline that starts a new mode line.
 ;;;;   - Playfield data: PLAYFIELD-DMA-CYCLES -- character modes (2-7)
-;;;;     fetch NAME bytes (screen memory) only on the first scanline of
-;;;;     the mode line and FONT bytes (character ROM/RAM lookups) every
-;;;;     scanline; bitmap modes (8-F) fetch a fresh row of screen bytes
-;;;;     every scanline, matching RENDER-SCANLINE's own per-scanline
-;;;;     re-fetch in %RENDER-BITMAP-MODE.  See PLAYFIELD-DMA-CYCLES's
-;;;;     docstring for the byte-count table and its provenance.
-;;;; Approximation: 1 CPU cycle stolen per byte fetched.  Real ANTIC
-;;;; packs playfield fetches 2-bytes-per-DMA-slot (that's what the
-;;;; narrow/normal/wide DMACTL widths are actually tuning); this project
-;;;; does not yet model that 2:1 packing, so its steal counts run higher
-;;;; than real hardware on playfield-heavy lines.  Also out of scope for
-;;;; now: HSCROL widening the fetch window and the exact cycle POSITIONS
-;;;; of each steal within the line (SCANLINE_ACCURACY_PLAN.md Phase 4).
+;;;;     fetch NAME bytes (screen memory) on the first scanline of the
+;;;;     mode line only (ANTIC line-buffers them) plus FONT bytes
+;;;;     (character ROM/RAM lookups) every scanline; map modes (8-F)
+;;;;     fetch their screen bytes on the first scanline of the mode
+;;;;     line only, and ANTIC's internal line buffer replays them on
+;;;;     the remaining scanlines.  See PLAYFIELD-DMA-CYCLES's docstring
+;;;;     for the byte-count table (BYTES-PER-SCREEN-ROW).
+;;;; Steal cost is 1 CPU cycle per byte fetched, which is what real
+;;;; ANTIC charges (each DMA slot transfers one byte).  Still out of
+;;;; scope: HSCROL widening the fetch window and the exact cycle
+;;;; POSITIONS of each steal within the line -- everything is lumped at
+;;;; cycle 0 (SCANLINE_ACCURACY_PLAN.md Phase 4).
 ;;;;
 ;;;; Display-list parsing supports:
 ;;;;   mode 0 (blank lines)  — bits 4-6 specify (N+1) scanlines of blank
@@ -219,75 +218,67 @@ Bit 2 enables 1-cycle missile DMA; bit 3 enables 4-cycle player DMA."
      (pm-dma-cycles (antic-dmactl antic))))
 
 (defun bytes-per-screen-row (mode)
-  "Return the number of screen-RAM bytes per logical row for the given ANTIC
-mode nibble.  For character modes this is bytes per character row (consumed
-once per MODE-LINE-SCANLINES scanlines); for bitmap modes it is bytes per
-scanline.
+  "Return the number of screen-RAM bytes one mode line of the given ANTIC
+mode nibble consumes at NORMAL playfield width.  For character modes
+this is the NAME bytes per character row; for map modes it is the
+screen bytes per mode line (fetched on the mode line's first scanline
+and replayed from ANTIC's line buffer on the rest).
 
-NOTE: mode 9's value here (10) disagrees with the 20 bytes/scanline
-%RENDER-BITMAP-MODE actually reads for mode 9 — a pre-existing
-inconsistency from the renderer work, out of scope for the DMA-steal
-accounting below (which uses the renderer's real 20-byte figure, see
-PLAYFIELD-DMA-CYCLES).  Left unfixed here; worth revisiting if mode-9
-display lists ever look wrong."
+These are the real-hardware values — each mode's playfield width in
+logical pixels times its bits per pixel, divided by 8 (Altirra Hardware
+Reference Manual; also the SCANLINE_ACCURACY_PLAN.md Phase 3 table):
+  modes 2-5:  40 chars                    → 40 bytes
+  modes 6-7:  20 chars                    → 20 bytes
+  mode  8:    40 px  2bpp, mode 9: 80 px 1bpp → 10 bytes
+  mode  A:    80 px  2bpp, modes B/C: 160 px 1bpp → 20 bytes
+  modes D/E: 160 px  2bpp, mode F: 320 px 1bpp → 40 bytes
+
+The renderer (%RENDER-BITMAP-MODE) and the DMA-steal accounting
+(PLAYFIELD-DMA-CYCLES) both derive from this table, and
+%END-SCANLINE-EVENTS advances SCREEN-DATA-PTR by exactly this many
+bytes at the end of each mode line — the three consumers cannot
+disagree."
   (declare (type (unsigned-byte 8) mode))
   (case mode
-    ((2 3 4 5 8) 40)
+    ((2 3 4 5)   40)
     ((6 7)       20)
-    (9           10)
-    ((10 11 13)  20)
-    ((12 14)     20)
-    (15          40)
+    ((8 9)       10)
+    ((10 11 12)  20)
+    ((13 14 15)  40)
     (t           40)))
 
 (defun playfield-dma-cycles (mode-byte dmactl first-line-p)
   "Return the CPU cycles ANTIC steals THIS scanline for playfield data —
-character NAME/FONT bytes for modes 2-7, or a fresh row of screen bytes
-for bitmap modes 8-F — given the DL MODE-BYTE currently in flight,
+character NAME/FONT bytes for modes 2-7, or a mode line's screen bytes
+for map modes 8-F — given the DL MODE-BYTE currently in flight,
 DMACTL (bits 0-1 select narrow/normal/wide), and whether this is the
 first scanline of the current mode line (see ANTIC-SCAN-Y).
 
-Byte-count-per-fetch table (normal width; narrow = 4/5 of this, wide =
-6/5 of this, matching the ratios of SCANLINE_ACCURACY_PLAN.md Phase 3's
-original table).  Modes 2-7 confirmed against this project's own
-%RENDER-CHAR-MODE (40 columns for modes 2-5, 20 for 6-7, one NAME + one
-FONT byte per column).  Modes 8-F confirmed against %RENDER-BITMAP-MODE
-directly (NOT the SCANLINE_ACCURACY_PLAN.md table, which grouped 8-9
-and A-C differently from memory and turned out to disagree with the
-already-tested renderer -- the renderer's per-scanline byte-read counts
-are taken as ground truth here):
-  modes 2,3,4,5:        40 bytes
-  modes 6,7:             20 bytes
-  modes 8,10(A):        40 bytes
-  modes 9,11(B),12(C),13(D),14(E): 20 bytes
-  mode 15(F):            40 bytes
+Byte counts come from BYTES-PER-SCREEN-ROW (the real-hardware table —
+see its docstring for provenance); narrow width charges 4/5 of the
+normal count and wide 6/5 (e.g. modes 2-5: 32/40/48, modes 8-9:
+8/10/12), matching the SCANLINE_ACCURACY_PLAN.md Phase 3 table.
 
-Fetch timing:
+Fetch timing (Altirra Hardware Reference Manual):
   - Mode 0 (blank) and mode 1 (JMP/JVB) steal nothing (blank lines
     have no playfield; JMP/JVB doesn't display).
   - Character modes (2-7): on FIRST-LINE-P, ANTIC fetches NAME bytes
     (once per mode line, line-buffered for the remaining scanlines)
     *and* FONT bytes (every scanline) — double the byte count.  On
     later scanlines, only the FONT fetch happens — single byte count.
-  - Bitmap modes (8-F): a fresh row of screen bytes is fetched EVERY
-    scanline regardless of FIRST-LINE-P, matching RENDER-SCANLINE's
-    %RENDER-BITMAP-MODE, which re-reads bytes every call no matter how
-    many scanlines MODE-LINE-SCANLINES says the mode line spans.
+  - Map modes (8-F): screen bytes are fetched on FIRST-LINE-P only;
+    ANTIC's line buffer replays them on the mode line's remaining
+    scanlines, stealing nothing.
 
-Approximation: 1 stolen CPU cycle per fetched byte (this project does
-not yet model real ANTIC's 2-bytes-per-DMA-slot packing — see the file
-header)."
+Steal cost is 1 CPU cycle per fetched byte, as on real hardware (each
+ANTIC DMA slot transfers one byte)."
   (declare (type (unsigned-byte 8) mode-byte dmactl))
   (let ((mode (ldb (byte 4 0) mode-byte)))
     (declare (type (unsigned-byte 4) mode))
-    (if (< mode 2)
+    (if (or (< mode 2)
+            (and (>= mode 8) (not first-line-p)))   ; map modes: buffered replay
         0
-        (let* ((normal (case mode
-                          ((2 3 4 5) 40)
-                          ((6 7)     20)
-                          ((8 10)    40)
-                          (15        40)
-                          (t         20)))    ; 9 11 12 13 14
+        (let* ((normal (bytes-per-screen-row mode))
                (width  (ldb (byte 2 0) dmactl))
                (bytes  (case width
                           (0 0)                            ; DMA off
@@ -297,7 +288,7 @@ header)."
           (declare (type fixnum normal bytes))
           (if (and (<= mode 7) first-line-p)
               (* bytes 2)   ; character modes, first line: NAME + FONT
-              bytes)))))    ; character modes (later lines) or any bitmap mode
+              bytes)))))    ; char modes later lines (FONT), or map first line
 
 (defun process-dl-instruction (antic)
   "Fetch one display-list instruction from the bus and update ANTIC.
@@ -450,19 +441,18 @@ the frame boundary (bumping FRAME-COUNT).  Returns ANTIC."
            (total (mode-line-scanlines inst))
            (y     (antic-scan-y antic)))
       (when (>= mode 2)
-        (cond
-          ;; Bitmap modes: advance screen pointer every scanline.
-          ((>= mode 8)
-           (setf (antic-screen-data-ptr antic)
-                 (ldb (byte 16 0)
-                      (+ (antic-screen-data-ptr antic)
-                         (bytes-per-screen-row mode)))))
-          ;; Character modes: advance after the last scanline of each char row.
-          ((and (plusp total) (= y (1- total)))
-           (setf (antic-screen-data-ptr antic)
-                 (ldb (byte 16 0)
-                      (+ (antic-screen-data-ptr antic)
-                         (bytes-per-screen-row mode)))))))
+        ;; Advance the screen pointer after the LAST scanline of the mode
+        ;; line — character and map modes alike.  A mode line consumes
+        ;; BYTES-PER-SCREEN-ROW bytes total, no matter how many scanlines
+        ;; it spans: character modes re-read the line-buffered NAMEs and
+        ;; map modes replay the line-buffered screen bytes on every
+        ;; scanline after the first (single-scanline modes C/E/F advance
+        ;; every line, since every line is a last line).
+        (when (and (plusp total) (= y (1- total)))
+          (setf (antic-screen-data-ptr antic)
+                (ldb (byte 16 0)
+                     (+ (antic-screen-data-ptr antic)
+                        (bytes-per-screen-row mode))))))
         ;; Always increment scan-y (wraps at mode-line boundary).
         (setf (antic-scan-y antic)
               (if (zerop total) 0
@@ -491,7 +481,8 @@ the frame boundary (bumping FRAME-COUNT).  Returns ANTIC."
 number of CPU cycles ANTIC steals from it: VBI on entry to line 248,
 display-list instruction fetch when a new mode line is due, DLI on the
 last scanline of a mode line, and the lumped per-line steal (DRAM
-refresh + P/M DMA).  CPU and BUS (either may be NIL to leave the current
+refresh + P/M DMA + DL-instruction fetch + playfield data; see the file
+header and PLAYFIELD-DMA-CYCLES).  CPU and BUS (either may be NIL to leave the current
 pointer untouched) are cached on the struct so NMI routing and DL
 fetches can reach them.  Pair every call with ANTIC-END-SCANLINE once
 the line has been executed."
@@ -573,6 +564,11 @@ register file."
                             (antic-mode-scanlines-remaining antic) 0))
       (#.+reg-nmien+ (setf (antic-nmien antic) v))
       (#.+reg-nmires+ (setf (antic-nmist antic) 0))
+      ;; WSYNC via a read-modify-write instruction (e.g. DEC WSYNC, whose
+      ;; NMOS double-write hits the register twice in one instruction) is
+      ;; out of scope until an NMOS bus-quirk phase models per-cycle
+      ;; writes; both writes land here in the same instruction and simply
+      ;; leave the one flag set.
       (#.+reg-wsync+ (setf (antic-wsync-pending antic) t))
       (t nil))))
 

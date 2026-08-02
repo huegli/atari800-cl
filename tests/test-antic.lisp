@@ -151,26 +151,77 @@ regardless of width or FIRST-LINE-P."
     (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
         "mode ~D later-line normal: expected 20 (FONT only)" mode)))
 
-(test playfield-dma-cycles-bitmap-modes-fetch-every-line
-  "Bitmap modes 8-F fetch a fresh row every scanline: FIRST-LINE-P has
-no effect (no NAME/FONT split -- unlike character modes)."
-  ;; Modes 8, A(10), F(15): 40 bytes/fetch normal width.
-  (dolist (mode '(8 10 15))
-    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 t)))
-    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
-        "mode ~D: FIRST-LINE-P must not change the steal" mode))
-  ;; Modes 9, B(11), C(12), D(13), E(14): 20 bytes/fetch normal width.
-  (dolist (mode '(9 11 12 13 14))
-    (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 t)))
-    (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
-        "mode ~D: FIRST-LINE-P must not change the steal" mode)))
+(test playfield-dma-cycles-map-modes-fetch-first-line-only
+  "Map modes 8-F fetch their screen bytes on the FIRST scanline of the
+mode line only; ANTIC's line buffer replays them on the remaining
+scanlines (0 cycles).  Byte counts are the hardware values: width in
+logical pixels x bits per pixel / 8."
+  ;; Modes 8, 9: 10 bytes (40px 2bpp / 80px 1bpp).
+  (dolist (mode '(8 9))
+    (is (= 10 (atari800-cl.antic:playfield-dma-cycles mode 2 t))
+        "mode ~D first line normal: expected 10" mode)
+    (is (zerop (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D later line: line buffer replay must steal 0" mode))
+  ;; Modes A(10), B(11), C(12): 20 bytes.
+  (dolist (mode '(10 11 12))
+    (is (= 20 (atari800-cl.antic:playfield-dma-cycles mode 2 t))
+        "mode ~D first line normal: expected 20" mode)
+    (is (zerop (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D later line: line buffer replay must steal 0" mode))
+  ;; Modes D(13), E(14), F(15): 40 bytes.
+  (dolist (mode '(13 14 15))
+    (is (= 40 (atari800-cl.antic:playfield-dma-cycles mode 2 t))
+        "mode ~D first line normal: expected 40" mode)
+    (is (zerop (atari800-cl.antic:playfield-dma-cycles mode 2 nil))
+        "mode ~D later line: line buffer replay must steal 0" mode)))
 
-(test playfield-dma-cycles-bitmap-modes-narrow-and-wide
-  "Bitmap modes scale by width like character modes."
-  (is (= 32 (atari800-cl.antic:playfield-dma-cycles 8 1 nil)) "mode 8 narrow")
-  (is (= 48 (atari800-cl.antic:playfield-dma-cycles 8 3 nil)) "mode 8 wide")
-  (is (= 16 (atari800-cl.antic:playfield-dma-cycles 9 1 nil)) "mode 9 narrow")
-  (is (= 24 (atari800-cl.antic:playfield-dma-cycles 9 3 nil)) "mode 9 wide"))
+(test playfield-dma-cycles-map-modes-narrow-and-wide
+  "Map modes scale their first-line fetch by width like character modes
+(narrow = 4/5, wide = 6/5 of normal)."
+  (is (= 8  (atari800-cl.antic:playfield-dma-cycles 8 1 t))  "mode 8 narrow")
+  (is (= 12 (atari800-cl.antic:playfield-dma-cycles 8 3 t))  "mode 8 wide")
+  (is (= 32 (atari800-cl.antic:playfield-dma-cycles 13 1 t)) "mode D narrow")
+  (is (= 48 (atari800-cl.antic:playfield-dma-cycles 13 3 t)) "mode D wide")
+  ;; Width never matters on buffered-replay lines.
+  (is (zerop (atari800-cl.antic:playfield-dma-cycles 8 3 nil)))
+  (is (zerop (atari800-cl.antic:playfield-dma-cycles 13 1 nil))))
+
+(test bytes-per-screen-row-hardware-table
+  "BYTES-PER-SCREEN-ROW returns the real-hardware bytes per mode line:
+each mode's logical-pixel width times bits per pixel, divided by 8."
+  (dolist (spec '((2 40) (3 40) (4 40) (5 40)
+                  (6 20) (7 20)
+                  (8 10) (9 10)
+                  (10 20) (11 20) (12 20)
+                  (13 40) (14 40) (15 40)))
+    (destructuring-bind (mode expected) spec
+      (is (= expected (atari800-cl.antic:bytes-per-screen-row mode))
+          "mode ~D: expected ~D bytes" mode expected))))
+
+(test map-mode-line-buffer-holds-screen-pointer-across-mode-line
+  "A multi-scanline map mode (mode 8, 8 scanlines) keeps
+RENDER-SCREEN-DATA-PTR constant across all scanlines of the mode line
+(the line buffer replays the same bytes) and advances SCREEN-DATA-PTR
+by exactly BYTES-PER-SCREEN-ROW (10) once the mode line completes."
+  (multiple-value-bind (antic cpu bus)
+      ;; DL: LMS mode 8 -> screen $5000, then JVB back to the DL.
+      (%make-antic-fixture :dl-bytes '(#x48 #x00 #x50   ; mode 8 + LMS $5000
+                                       #x41 #x00 #x40)) ; JVB $4000
+    ;; Advance to the start of the active region (scanline 8).
+    (loop until (= (atari800-cl.antic:antic-scanline antic) 8)
+          do (atari800-cl.antic:antic-begin-scanline antic cpu bus)
+             (atari800-cl.antic:antic-end-scanline antic))
+    ;; Run the mode line's 8 scanlines: the render snapshot must stay at
+    ;; $5000 for every one of them.
+    (dotimes (y 8)
+      (atari800-cl.antic:antic-begin-scanline antic cpu bus)
+      (is (= #x5000 (atari800-cl.antic:antic-render-screen-data-ptr antic))
+          "scanline ~D of the mode-8 line: render pointer must stay $5000, got $~4,'0X"
+          y (atari800-cl.antic:antic-render-screen-data-ptr antic))
+      (atari800-cl.antic:antic-end-scanline antic))
+    (is (= (+ #x5000 10) (atari800-cl.antic:antic-screen-data-ptr antic))
+        "after the mode line, the screen pointer must have advanced by 10 bytes, got $~4,'0X"
+        (atari800-cl.antic:antic-screen-data-ptr antic))))
 
 (test playfield-dma-cycles-worst-case-under-114
   "The worst-case total scanline steal (refresh + P/M + DL-fetch +

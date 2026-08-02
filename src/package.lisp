@@ -310,6 +310,7 @@
            #:attach-antic
            #:mode-line-scanlines
            #:playfield-dma-cycles
+           #:bytes-per-screen-row
            #:+scanlines-per-frame+
            #:+cpu-cycles-per-scanline+
            #:+active-start-scanline+

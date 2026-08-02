@@ -206,9 +206,28 @@ Produces 320 output pixels (modes 2-5: 40 chars × 8px; modes 6-7: 20 chars × 1
               (%write-rgb fb (+ p 3) color))))))))
 
 (defun %render-bitmap-mode (fb pf-base screen-ptr mode gtia-wr bus)
-  "Render bitmap modes 8-F into PF-BASE columns of FB.
-All modes produce 320 output pixels: 1bpp and 2bpp modes stretch pixels
-horizontally to fill the 320-pixel active area."
+  "Render map (bitmap) modes 8-F into PF-BASE columns of FB.
+
+Geometry follows real hardware: each mode line consumes
+BYTES-PER-SCREEN-ROW bytes (the shared ANTIC table — 10 for modes 8-9,
+20 for A-C, 40 for D-F at normal width), decoded at that mode's color
+depth and stretched to fill the 320-pixel active area:
+
+  mode 8 (GR.3):   10 bytes  2bpp →  40 logical px × 8 output columns
+  mode 9 (GR.4):   10 bytes  1bpp →  80 logical px × 4
+  mode A (GR.5):   20 bytes  2bpp →  80 logical px × 4
+  mode B (GR.6):   20 bytes  1bpp → 160 logical px × 2
+  mode C:          20 bytes  1bpp → 160 logical px × 2
+  mode D (GR.7):   40 bytes  2bpp → 160 logical px × 2
+  mode E (GR.15):  40 bytes  2bpp → 160 logical px × 2
+  mode F (GR.8):   40 bytes  1bpp → 320 px, 1:1
+
+Color registers (Altirra Hardware Reference Manual): 2bpp map modes map
+pixel values 0/1/2/3 to COLBK/COLPF0/COLPF1/COLPF2; 1bpp map modes 9/B/C
+map 0/1 to COLBK/COLPF0.  Mode F keeps this renderer's simplified
+0→COLBK, 1→COLPF2 output (real GR.8 shows COLPF2 as the playfield
+background with COLPF1's luminance for set pixels — that artifact model
+is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
   (declare (type (simple-array (unsigned-byte 8) (*)) fb gtia-wr)
            (type fixnum pf-base)
            (type (unsigned-byte 16) screen-ptr)
@@ -218,82 +237,38 @@ horizontally to fill the 320-pixel active area."
         (colpf0 (aref gtia-wr +w-colpf0+))
         (colpf1 (aref gtia-wr (+ +w-colpf0+ 1)))
         (colpf2 (aref gtia-wr (+ +w-colpf0+ 2))))
-    (case mode
-      ;; Modes 8, A: 40 bytes, 1bpp → 160 logical pixels, each 2 output px.
-      ((8 10)
-       (dotimes (bx 40)
-         (let ((byte (atari800-cl.bus:bus-read
-                      bus (ldb (byte 16 0) (+ screen-ptr bx)))))
-           (dotimes (bit 8)
-             (let* ((v     (ldb (byte 1 (- 7 bit)) byte))
-                    (color (if (zerop v) colbk colpf0))
-                    (out-x (* (+ (* bx 8) bit) 2))
-                    (p     (+ pf-base (* out-x 3))))
-               (%write-rgb fb p color)
-               (%write-rgb fb (+ p 3) color))))))
-      ;; Modes 9, D: 20 bytes, 2bpp → 40 × 4px doubled to 320 output px.
-      ((9 13)
-       (dotimes (bx 20)
-         (let ((byte (atari800-cl.bus:bus-read
-                      bus (ldb (byte 16 0) (+ screen-ptr bx)))))
-           (dotimes (pair 4)
-             (let* ((shift (- 6 (* pair 2)))
-                    (bits  (ldb (byte 2 shift) byte))
-                    (color (case bits
-                             (0 colbk) (1 colpf0) (2 colpf1) (t colpf2)))
-                    (out-x (* (+ (* bx 4) pair) 4))
-                    (p     (+ pf-base (* out-x 3))))
-               (dotimes (dp 4)
-                 (%write-rgb fb (+ p (* dp 3)) color)))))))
-      ;; Mode B: 20 bytes, 1bpp → 160 logical px doubled.
-      (11
-       (dotimes (bx 20)
-         (let ((byte (atari800-cl.bus:bus-read
-                      bus (ldb (byte 16 0) (+ screen-ptr bx)))))
-           (dotimes (bit 8)
-             (let* ((v     (ldb (byte 1 (- 7 bit)) byte))
-                    (color (if (zerop v) colbk colpf2))
-                    (out-x (* (+ (* bx 8) bit) 2))
-                    (p     (+ pf-base (* out-x 3))))
-               (%write-rgb fb p color)
-               (%write-rgb fb (+ p 3) color))))))
-      ;; Mode C: 20 bytes, 1bpp → 160 px doubled.
-      (12
-       (dotimes (bx 20)
-         (let ((byte (atari800-cl.bus:bus-read
-                      bus (ldb (byte 16 0) (+ screen-ptr bx)))))
-           (dotimes (bit 8)
-             (let* ((v     (ldb (byte 1 (- 7 bit)) byte))
-                    (color (if (zerop v) colbk colpf2))
-                    (out-x (* (+ (* bx 8) bit) 2))
-                    (p     (+ pf-base (* out-x 3))))
-               (%write-rgb fb p color)
-               (%write-rgb fb (+ p 3) color))))))
-      ;; Mode E: 20 bytes, 2bpp → 40 × 4px doubled to 320 output px.
-      (14
-       (dotimes (bx 20)
-         (let ((byte (atari800-cl.bus:bus-read
-                      bus (ldb (byte 16 0) (+ screen-ptr bx)))))
-           (dotimes (pair 4)
-             (let* ((shift (- 6 (* pair 2)))
-                    (bits  (ldb (byte 2 shift) byte))
-                    (color (case bits
-                             (0 colbk) (1 colpf0) (2 colpf1) (t colpf2)))
-                    (out-x (* (+ (* bx 4) pair) 4))
-                    (p     (+ pf-base (* out-x 3))))
-               (dotimes (dp 4)
-                 (%write-rgb fb (+ p (* dp 3)) color)))))))
-      ;; Mode F: 40 bytes, 1bpp high-res → 320 output px (1:1).
-      (15
-       (dotimes (bx 40)
-         (let ((byte (atari800-cl.bus:bus-read
-                      bus (ldb (byte 16 0) (+ screen-ptr bx)))))
-           (dotimes (bit 8)
-             (let* ((v     (ldb (byte 1 (- 7 bit)) byte))
-                    (color (if (zerop v) colbk colpf2))
-                    (out-x (+ (* bx 8) bit))
-                    (p     (+ pf-base (* out-x 3))))
-               (%write-rgb fb p color)))))))))
+    (if (= mode 15)
+        ;; Mode F: 40 bytes, 1bpp high-res → 320 output px (1:1).
+        (dotimes (bx 40)
+          (let ((byte (atari800-cl.bus:bus-read
+                       bus (ldb (byte 16 0) (+ screen-ptr bx)))))
+            (dotimes (bit 8)
+              (let* ((v     (ldb (byte 1 (- 7 bit)) byte))
+                     (color (if (zerop v) colbk colpf2))
+                     (out-x (+ (* bx 8) bit))
+                     (p     (+ pf-base (* out-x 3))))
+                (%write-rgb fb p color)))))
+        ;; Modes 8-E: generic scaled decode from the shared byte table.
+        (let* ((nbytes      (bytes-per-screen-row mode))
+               (two-bpp-p   (case mode ((8 10 13 14) t) (t nil)))
+               (px-per-byte (if two-bpp-p 4 8))
+               (scale       (truncate +playfield-pixel-width+
+                                      (* nbytes px-per-byte))))
+          (declare (type fixnum nbytes px-per-byte scale))
+          (dotimes (bx nbytes)
+            (let ((byte (atari800-cl.bus:bus-read
+                         bus (ldb (byte 16 0) (+ screen-ptr bx)))))
+              (dotimes (px px-per-byte)
+                (let* ((color (if two-bpp-p
+                                  (case (ldb (byte 2 (- 6 (* px 2))) byte)
+                                    (0 colbk) (1 colpf0) (2 colpf1) (t colpf2))
+                                  (if (zerop (ldb (byte 1 (- 7 px)) byte))
+                                      colbk
+                                      colpf0)))
+                       (out-x (* (+ (* bx px-per-byte) px) scale))
+                       (p     (+ pf-base (* out-x 3))))
+                  (dotimes (dp scale)
+                    (%write-rgb fb (+ p (* dp 3)) color))))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Player/missile compositing
