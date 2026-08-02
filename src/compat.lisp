@@ -217,6 +217,12 @@ after that long.  Returns NIL if it timed out, non-NIL otherwise."
 #+lispworks
 (fli:define-foreign-function (%getpid "getpid") () :result-type :int)
 
+#+lispworks
+(fli:define-foreign-function (%chmod "chmod")
+    ((path (:reference-pass :ef-mb-string))
+     (mode :int))
+  :result-type :int)
+
 (defun current-process-id ()
   "Return the current OS process id as an integer."
   #+sbcl       (sb-posix:getpid)
@@ -231,10 +237,14 @@ after that long.  Returns NIL if it timed out, non-NIL otherwise."
     t))
 
 (defun chmod-file (pathname mode)
-  "Set the permission bits of PATHNAME to MODE (an integer, e.g. #o600)."
+  "Set the permission bits of PATHNAME to MODE (an integer, e.g. #o600).
+Returns the namestring of PATHNAME.  Signals an error if the underlying
+chmod(2) call fails (non-zero return)."
   (let ((ns (namestring pathname)))
     #+sbcl       (sb-posix:chmod ns mode)
-    #+lispworks  (system:call-system (format nil "chmod ~o ~a" mode ns) :wait t)
+    #+lispworks  (let ((result (%chmod ns mode)))
+                   (unless (zerop result)
+                     (error "chmod-file: chmod(2) failed for ~A (mode #o~O)" ns mode)))
     #-(or sbcl lispworks)
     (error "chmod-file: unsupported implementation")
     ns))
