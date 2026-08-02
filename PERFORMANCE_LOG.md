@@ -50,6 +50,34 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 273cfe4  | lispworks      | nop      |  962.02 | 16.055     | Merge scanline scheduler into pixel-renderer (mean of 3) |
 | 2026-08-02 | 273cfe4  | lispworks      | irq      | 1542.98 | 25.751     | Merge scanline scheduler into pixel-renderer (mean of 3) |
 | 2026-08-02 | 273cfe4  | lispworks      | klaus    |  971.21 | 16.209     | Merge scanline sched into pixel-renderer, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 0212cf6  | sbcl           | nop      | 3911.85 | 65.288     | ROADMAP Phase 3: WSYNC (mean of 3) |
+| 2026-08-02 | 0212cf6  | sbcl           | irq      | 4166.01 | 69.520     | ROADMAP Phase 3: WSYNC (mean of 3) |
+| 2026-08-02 | 0212cf6  | sbcl           | klaus    | 3345.24 | 55.828     | ROADMAP Phase 3, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 0212cf6  | lispworks      | nop      |  998.89 | 16.671     | ROADMAP Phase 3: WSYNC (mean of 3) |
+| 2026-08-02 | 0212cf6  | lispworks      | irq      | 1583.20 | 26.421     | ROADMAP Phase 3: WSYNC (mean of 3) |
+| 2026-08-02 | 0212cf6  | lispworks      | klaus    |  993.48 | 16.581     | ROADMAP Phase 3, klaus+PASS, 3500 frames (mean of 3) |
+
+## ROADMAP Phase 3 — WSYNC implementation cost
+
+WSYNC adds one `ANTIC-CONSUME-WSYNC` call (an inline read-and-clear of
+a boolean slot) per instruction inside `%RUN-CLOCKS`'s inner loop, plus
+a `CASE` branch in `ANTIC-WRITE`. Neither of these benchmark workloads
+(nop/irq/klaus) ever writes $D40A, so the check is pure overhead with
+the flag always false. Measured delta vs. the pre-WSYNC baseline (mean
+of 3, same machine, immediately before this change):
+
+| implementation | workload | before fps | after fps | delta  |
+|-----------------|----------|------------|-----------|--------|
+| sbcl            | nop      | 3958.70    | 3911.85   | -1.2%  |
+| sbcl            | irq      | 4134.09    | 4166.01   | +0.8%  |
+| sbcl            | klaus    | 3363.96    | 3345.24   | -0.6%  |
+| lispworks       | nop      |  995.04    |  998.89   | +0.4%  |
+| lispworks       | irq      | 1577.58    | 1583.20   | +0.4%  |
+| lispworks       | klaus    |  983.34    |  993.48   | +1.0%  |
+
+All deltas are within run-to-run noise (compare to the ±1-3% spread
+across repeated runs of the same commit elsewhere in this log) — the
+per-instruction WSYNC check is effectively free, as expected.
 
 ## Merge atari800-cl-perf-plan into pixel-renderer (3e9601d)
 

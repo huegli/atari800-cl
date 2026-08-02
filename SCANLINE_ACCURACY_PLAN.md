@@ -1,13 +1,16 @@
 # Scanline Accuracy Plan
 
-> **Status (2026-08-02): Phases 0-1 complete and merged to main.**
+> **Status (2026-08-02): Phases 0-2 complete and merged to main.**
 > The scanline-granular scheduler shipped (with the full per-line DMA
 > steal charged to the CPU budget) and the pixel renderer now rides on
 > it. The "Current state" section below describes the pre-Phase-1
 > per-clock loop and is retained for historical context. Phase 0 (the
-> color-clock → CPU-cycle rename) landed via ROADMAP.md Phase 2.
-> Phases 2 (WSYNC), 3 (playfield DMA steal tables), and the stretch
-> Phases 4-5 remain open; see ROADMAP.md for scheduling (Phase 3, 5).
+> color-clock → CPU-cycle rename) landed via ROADMAP.md Phase 2. Phase
+> 2 (WSYNC) landed via ROADMAP.md Phase 3 as a first cut that stalls
+> to end-of-line, not the hardware-accurate cycle 105 (that refinement
+> is still this plan's stretch Phase 4). Phase 3 (playfield DMA steal
+> tables) and the stretch Phases 4-5 remain open; see ROADMAP.md for
+> scheduling (Phase 5).
 
 Goal: move the emulator from frame-level timing to scanline-level timing
 accuracy, in dependency order. Each phase is independently committable and

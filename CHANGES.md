@@ -3,6 +3,31 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 3 — WSYNC ($D40A)
+
+SCANLINE_ACCURACY_PLAN.md Phase 2: `STA WSYNC` now halts the CPU for
+the rest of the current scanline, the single most important register
+for scanline-accurate software (every DLI handler starts with it).
+
+- `src/antic.lisp`: new `WSYNC-PENDING` struct slot, armed by
+  `ANTIC-WRITE`'s `$D40A` case, read-and-cleared by the new
+  `ANTIC-CONSUME-WSYNC`. Scheduler-only — the per-cycle `ANTIC-TICK`
+  reference path never calls it, so WSYNC has no effect there.
+- `src/machine.lisp` `%RUN-CLOCKS`: after every instruction, checks
+  `ANTIC-CONSUME-WSYNC` and, if armed, clamps `CPU-BUDGET` to 0 and
+  ends the line's instruction loop. POKEY still advances through the
+  skipped remainder via the existing per-line top-up step. First cut:
+  stalls to end-of-line rather than the hardware-accurate cycle 105
+  (that refinement is SCANLINE_ACCURACY_PLAN.md's stretch Phase 4).
+- Back-to-back `STA WSYNC` correctly stalls a full extra scanline
+  (verified by a dedicated regression test), matching real hardware.
+
+Suite: 1719/1719 checks green on both SBCL and LispWorks (11 new
+checks: 3 unit tests + 2 machine-level regression tests, one with
+multiple assertions). Benchmarked: the per-instruction check is
+effectively free (±0.4-1.2%, within run-to-run noise) — see
+`PERFORMANCE_LOG.md`.
+
 ## ROADMAP Phase 2 — rename color clocks to CPU cycles
 
 SCANLINE_ACCURACY_PLAN.md's previously-skipped Phase 0. The 114-unit
