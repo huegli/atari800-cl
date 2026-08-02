@@ -221,3 +221,55 @@ instruction)."
             "CPU consumed ~D cycles in ~D clocks — interrupt entries must ~
              be charged against the budget, not run for free"
             consumed clocks)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #8 — WSYNC stalls the CPU to the end of the scanline.
+
+(test wsync-stalls-cpu-to-end-of-scanline
+  "STA WSYNC halts instruction execution for the rest of the current
+scanline; the next instruction only runs once the following scanline
+begins."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000)))
+    ;; Main program at $C000: LDA #$FF ; STA $D40A ; STA $00 (marker).
+    (%poke os #x0000 #xA9)  (%poke os #x0001 #xFF)       ; LDA #$FF
+    (%poke os #x0002 #x8D)  (%poke os #x0003 #x0A)       ; STA $D40A
+    (%poke os #x0004 #xD4)
+    (%poke os #x0005 #x85)  (%poke os #x0006 #x00)       ; STA $00
+    (let* ((m   (make-test-machine :os-rom os))
+           (bus (atari800-cl.machine:atari-machine-bus m)))
+      (atari800-cl.machine:%run-clocks m 114)   ; one full scanline
+      (is (zerop (atari800-cl.bus:bus-peek-ram bus #x00))
+          "STA $00 must NOT have executed yet — the CPU stalled at WSYNC ~
+           partway through the first scanline")
+      (atari800-cl.machine:%run-clocks m 114)   ; the next scanline
+      (is (= #xFF (atari800-cl.bus:bus-peek-ram bus #x00))
+          "STA $00 must have executed once the next scanline began"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #9 — back-to-back WSYNC writes stall a full extra scanline.
+
+(test back-to-back-wsync-stalls-two-scanlines
+  "Two consecutive STA WSYNC writes stall the CPU across TWO scanline
+boundaries: the first write stalls out the rest of the current line, and
+the second write -- executed as the first instruction of the next line
+-- immediately stalls that line too."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000)))
+    ;; LDA #$FF ; STA $D40A ; STA $D40A ; STA $00 (marker).
+    (%poke os #x0000 #xA9)  (%poke os #x0001 #xFF)       ; LDA #$FF
+    (%poke os #x0002 #x8D)  (%poke os #x0003 #x0A)       ; STA $D40A (1st)
+    (%poke os #x0004 #xD4)
+    (%poke os #x0005 #x8D)  (%poke os #x0006 #x0A)       ; STA $D40A (2nd)
+    (%poke os #x0007 #xD4)
+    (%poke os #x0008 #x85)  (%poke os #x0009 #x00)       ; STA $00
+    (let* ((m   (make-test-machine :os-rom os))
+           (bus (atari800-cl.machine:atari-machine-bus m)))
+      (atari800-cl.machine:%run-clocks m 114)   ; scanline 1: 1st WSYNC stalls it
+      (is (zerop (atari800-cl.bus:bus-peek-ram bus #x00))
+          "marker must not be written after the first scanline")
+      (atari800-cl.machine:%run-clocks m 114)   ; scanline 2: 2nd WSYNC stalls it too
+      (is (zerop (atari800-cl.bus:bus-peek-ram bus #x00))
+          "marker must STILL not be written after the second scanline -- ~
+           back-to-back WSYNC eats a whole extra line")
+      (atari800-cl.machine:%run-clocks m 114)   ; scanline 3: marker finally runs
+      (is (= #xFF (atari800-cl.bus:bus-peek-ram bus #x00))
+          "marker must be written once the third scanline runs"))))

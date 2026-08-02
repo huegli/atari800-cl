@@ -109,6 +109,14 @@ Slots:
   JVB-WAIT                  — T after a JVB instruction; cleared at VBI.
   FRAME-COUNT               — frames elapsed since reset (debug counter).
   STOLEN-CYCLES             — running total of cycles ANTIC has stolen.
+  WSYNC-PENDING             — T after a write to $D40A (WSYNC); consumed
+                              (read-and-cleared) by the machine scheduler's
+                              per-instruction check, which stalls the CPU
+                              to the end of the current scanline.  Only
+                              meaningful to the ANTIC-BEGIN-SCANLINE /
+                              ANTIC-END-SCANLINE scheduler path — the
+                              per-cycle ANTIC-TICK reference path does not
+                              consume it.
   CPU                       — CPU back-pointer for NMI routing.
   BUS                       — bus back-pointer (currently unused in tick)."
   (registers (make-array 32 :element-type '(unsigned-byte 8)
@@ -135,6 +143,7 @@ Slots:
   (jvb-wait      nil :type boolean)
   (frame-count   0 :type fixnum)
   (stolen-cycles 0 :type fixnum)
+  (wsync-pending nil :type boolean)
   (cpu nil)
   (bus nil)
   ;; Rendering support --------------------------------------------------------
@@ -439,7 +448,9 @@ paths cannot diverge."
 
 (defun antic-write (antic address value)
   "Write an ANTIC register.  DMACTL/DLISTL/DLISTH/NMIEN/NMIRES update
-their shadow slots; everything else is just latched into the register file."
+their shadow slots; WSYNC ($D40A, offset $0A, mirrored across the $D4xx
+page) arms WSYNC-PENDING; everything else is just latched into the
+register file."
   (declare (type antic antic) (type (unsigned-byte 16) address)
            (type (unsigned-byte 8) value))
   (let ((offset (ldb (byte 5 0) address))
@@ -457,7 +468,20 @@ their shadow slots; everything else is just latched into the register file."
                             (antic-mode-scanlines-remaining antic) 0))
       (#.+reg-nmien+ (setf (antic-nmien antic) v))
       (#.+reg-nmires+ (setf (antic-nmist antic) 0))
+      (#.+reg-wsync+ (setf (antic-wsync-pending antic) t))
       (t nil))))
+
+(declaim (inline antic-consume-wsync))
+
+(defun antic-consume-wsync (antic)
+  "Read-and-clear ANTIC's WSYNC-PENDING flag.  Returns the old value (T if
+a WSYNC write is pending, NIL otherwise).  Called once per instruction by
+the machine scheduler's %RUN-CLOCKS; the per-cycle ANTIC-TICK reference
+path does not call this, so WSYNC has no effect when driven through
+ANTIC-TICK."
+  (declare (type antic antic))
+  (prog1 (antic-wsync-pending antic)
+    (setf (antic-wsync-pending antic) nil)))
 
 (defun reset-antic (antic)
   "Reset all ANTIC counters and shadow slots.  Returns ANTIC."
@@ -476,6 +500,7 @@ their shadow slots; everything else is just latched into the register file."
         (antic-jvb-wait antic) nil
         (antic-frame-count antic) 0
         (antic-stolen-cycles antic) 0
+        (antic-wsync-pending antic) nil
         (antic-screen-data-ptr antic) 0
         (antic-render-screen-data-ptr antic) 0
         (antic-scan-y antic) 0)

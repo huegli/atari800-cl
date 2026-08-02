@@ -304,6 +304,8 @@
            #:antic-end-scanline
            #:antic-read
            #:antic-write
+           #:antic-wsync-pending
+           #:antic-consume-wsync
            #:reset-antic
            #:attach-antic
            #:mode-line-scanlines

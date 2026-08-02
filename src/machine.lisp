@@ -284,6 +284,16 @@ ONE budget cycle per line when ANTIC reported a steal; this scheduler
 charges the full steal (114 - stolen granted per line), so the CPU now
 correctly loses all 9+ stolen cycles each line.
 
+WSYNC ($D40A): after each instruction, ANTIC-CONSUME-WSYNC is checked;
+if a WSYNC write is pending, CPU-BUDGET is clamped to 0 and the
+instruction loop stops for this line -- the CPU stalls to the end of
+the scanline (a first cut; the hardware-accurate release at cycle 105
+is SCANLINE_ACCURACY_PLAN.md's stretch Phase 4).  Back-to-back WSYNC
+writes therefore stall to the END of the NEXT line: the first stalls
+out the current line, and the second (executed as the first instruction
+of the following line, before any further budget has been consumed)
+immediately zeroes that line's budget too.
+
 When N is not a multiple of 114, floor(N/114) full lines run, then one
 partial line of the remaining cycles: it begins with the usual
 line-start events and steal, but ANTIC-END-SCANLINE is NOT run for it
@@ -336,7 +346,23 @@ carry across calls."
                           ;; A KIL instruction signals ILLEGAL-OPCODE; leave
                           ;; the CPU halted and stop trying to step.
                           (illegal-opcode ()
-                            (setf (cpu-halted cpu) t))))
+                            (setf (cpu-halted cpu) t)))
+                        ;; WSYNC ($D40A): a write halts the CPU until the
+                        ;; end of the current scanline.  Clamp (not merely
+                        ;; decrement) CPU-BUDGET to 0 -- real WSYNC freezes
+                        ;; the CPU regardless of any surplus budget carried
+                        ;; in from a previous line, so that surplus must not
+                        ;; leak past the stall.  POKEY-REMAINING is left
+                        ;; untouched here; the "top POKEY up to exactly this
+                        ;; line's cycle count" step below advances POKEY
+                        ;; through the skipped remainder, so POKEY still
+                        ;; sees every cycle of the line.  ANTIC-TICK (the
+                        ;; per-cycle reference path) never calls
+                        ;; ANTIC-CONSUME-WSYNC, so WSYNC has no effect
+                        ;; outside this scheduler.
+                        (when (antic-consume-wsync antic)
+                          (setf cpu-budget 0)
+                          (return)))
                ;; Top POKEY up to exactly this line's cycle count.
                (when (plusp pokey-remaining)
                  (pokey-advance pokey cpu pokey-remaining))

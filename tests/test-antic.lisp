@@ -267,6 +267,37 @@ scanline 8, that's cycle 0 of scanline 15."
     (atari800-cl.bus:bus-write bus #xD400 #x3F)
     (is (= #x3F (atari800-cl.antic:antic-dmactl antic)))))
 
+;;; ---------------------------------------------------------------------------
+;;; WSYNC ($D40A)
+
+(test wsync-write-arms-pending-flag
+  "Writing $D40A sets WSYNC-PENDING."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl 0)
+    (declare (ignore cpu))
+    (is-false (atari800-cl.antic:antic-wsync-pending antic))
+    (atari800-cl.bus:bus-write bus #xD40A #x00)
+    (is-true (atari800-cl.antic:antic-wsync-pending antic))))
+
+(test antic-consume-wsync-reads-and-clears
+  "ANTIC-CONSUME-WSYNC returns the old value, then NIL on the next call."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl 0)
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD40A #x00)
+    (is-true (atari800-cl.antic:antic-consume-wsync antic))
+    (is-false (atari800-cl.antic:antic-wsync-pending antic))
+    (is-false (atari800-cl.antic:antic-consume-wsync antic))))
+
+(test reset-antic-clears-wsync-pending
+  "RESET-ANTIC clears a pending WSYNC flag."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl 0)
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD40A #x00)
+    (atari800-cl.antic:reset-antic antic)
+    (is-false (atari800-cl.antic:antic-wsync-pending antic))))
+
 (test vcount-read-returns-scanline-shifted-right
   "Reading $D40B returns scanline >> 1."
   (multiple-value-bind (antic cpu bus)
