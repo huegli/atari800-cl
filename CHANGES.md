@@ -3,6 +3,88 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Branch consolidation — everything back on main
+
+The `atari800-cl-perf-ph3-scanline` (performance + scanline scheduler)
+and `pixel-renderer` feature branches were merged into `main` and
+deleted, along with their worktrees.  The one real integration point:
+the renderer's per-line bookkeeping (screen-pointer snapshot at line
+start, screen-pointer/scan-y advancement at line end) moved into the
+shared `%BEGIN-SCANLINE-EVENTS` / `%END-SCANLINE-EVENTS` helpers, so
+both the per-cycle `ANTIC-TICK` reference path and the scanline-granular
+scheduler carry rendering support, and the machine's per-scanline render
+callback now fires right after `ANTIC-END-SCANLINE` closes each full
+line.  Combined-tree benchmarks logged in `PERFORMANCE_LOG.md` (2-6%
+below the renderer-less scheduler rows; the scheduler's gains dwarf it).
+The `minimal-xl` submodule was bumped to `phase-1-bringup`: the minimal
+OS now assembles to a loadable XEX (`OPT h+`, `run RESET`) and gained
+`run.sh`, a one-shot assemble/run/screenshot script.
+
+Suite: 1450/1450 checks green on both SBCL and LispWorks.
+
+## Pixel renderer + AESP video frames + screenshot capture
+
+- `src/renderer.lisp` — `:atari800-cl.renderer`: converts ANTIC
+  display-list state + GTIA registers into a 384×240 24-bit RGB
+  framebuffer, one scanline at a time (background flood, 320-pixel
+  playfield for modes 2-F, player/missile compositing with PRIOR
+  priority arbitration, NTSC hue/luminance palette).
+- ANTIC gained the renderer's screen-data plumbing: LMS addresses are
+  latched into `SCREEN-DATA-PTR`, snapshotted per line for the
+  renderer, and advanced per scanline (bitmap modes) or per character
+  row (character modes) with a `SCAN-Y` row counter.
+- `atari-machine` gained `SCANLINE-FN` / `POST-FRAME-FN` callback
+  slots; the AESP server uses them to render into its framebuffer and
+  push completed frames to video subscribers as `VIDEO_FRAME` (0x65)
+  messages after `FRAME_CONFIG`.
+- `scripts/capture-screenshot.py` subscribes to the AESP video port
+  and saves a frame as PNG (PPM fallback without Pillow);
+  `scripts/atari-run.sh` wires it into the XEX run workflow.
+- `minimal-xl/` added as a git submodule: a minimal XL OS used for
+  emulator bring-up against real display output.
+
+## MADS assembly toolchain
+
+- `asm/hello.asm`, `asm/edvent01.asm` — example 6502 programs in MADS
+  syntax.
+- `scripts/mads-build.sh` / `scripts/mads-run.sh` — assemble MADS
+  sources to XEX and run them in the emulator.
+- `scripts/runner.lisp` + `scripts/xex-loader.lisp` — load a XEX into
+  machine RAM segment-by-segment and run it for N frames from the
+  shell (`scripts/atari-run.sh`).
+
+## Scanline-granular scheduler (SCANLINE_ACCURACY_PLAN Phase 1)
+
+- `%RUN-CLOCKS` restructured from per-clock to per-scanline: ~260
+  `ANTIC`/`POKEY` calls per frame instead of ~60,000.
+  `ANTIC-BEGIN-SCANLINE` fires the line's events (VBI/DLI, DL fetch)
+  and reports stolen cycles; the CPU executes whole instructions
+  against the line's remaining budget with `POKEY-ADVANCE` alongside;
+  `ANTIC-END-SCANLINE` closes the line.  `ANTIC-TICK` remains as the
+  single-cycle reference path, built on the same shared event helpers.
+- Accuracy correction included: the old loop granted the CPU 113
+  cycles/line regardless of the real steal; the scheduler charges the
+  full per-line steal (105 cycles/line at the default 9-cycle refresh
+  + P/M steal).
+- Result (vs. Phase 3, mean of 3): SBCL klaus 1954 → 3381 fps;
+  LispWorks irq 626 → 1607 fps.  Full rows in `PERFORMANCE_LOG.md`.
+
+## Performance Phases 1-3 (PERFORMANCE_PLAN)
+
+- **Phase 1** — `(optimize (speed 3) (safety 1) (debug 1))` + `ftype`
+  declarations on the hot path (bus, CPU, chips).  LispWorks nop
+  250 → 653 fps; SBCL nop 1961 → 2339 fps.
+- **Phase 2** — page-dispatch table for `BUS-READ`/`BUS-WRITE`:
+  implemented, measured, **rejected** (LispWorks regressed up to
+  5.6%; the COND chain already short-circuits cheaply).  Not merged;
+  details in `PERFORMANCE_LOG.md`.
+- **Phase 3** — POKEY batched advance: `POKEY-ADVANCE` skips ahead to
+  the next timer-expiry event and the 17/9-bit RNG shifts lazily on
+  RANDOM reads; `POKEY-TICK` keeps a flat per-cycle loop (the
+  batching bookkeeping costs more than it saves at N = 1), with a
+  50,000-cycle equivalence test pinning the two paths together.
+- Klaus Dormann functional test added as a `klaus` benchmark workload.
+
 ## Frame-rate benchmark harness (PERFORMANCE_PLAN Phase 0)
 
 - `scripts/bench.lisp` — portable `:atari800-cl.bench` package building

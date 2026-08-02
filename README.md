@@ -11,7 +11,8 @@ the codebase is plain, conditional-free Common Lisp.
 ## Status
 
 Functional core, headless and cycle-aware enough to boot real
-Atari OS+BASIC ROMs and stream state to an external renderer.
+Atari OS+BASIC ROMs, render the display to an RGB framebuffer, and
+stream video frames to external clients.
 
 What's implemented:
 
@@ -33,11 +34,19 @@ What's implemented:
 - **POKEY** — four-channel timers with per-channel clock divider,
   IRQEN/IRQST latches (active-low) and timer-1/2/4 IRQs, 17- and
   9-bit polynomial RNG behind RANDOM, audio register scaffolding.
-- **Machine scheduler** — `MACHINE-RUN-FRAME` pumps 29 868 NTSC color
-  clocks per frame in lockstep with ANTIC and POKEY, services NMI and
-  IRQ each clock, runs the CPU when budget allows, and halts cleanly
-  on KIL.  A background run loop + command mailbox let other threads
-  drive the machine safely.
+- **Machine scheduler** — `MACHINE-RUN-FRAME` runs one NTSC frame
+  (29 868 clocks = 262 scanlines × 114 CPU cycles) scanline-by-scanline:
+  ANTIC fires each line's events and reports its stolen cycles, the CPU
+  executes whole instructions against the line's remaining budget with
+  POKEY advanced alongside, and the line is closed — halting cleanly on
+  KIL.  A background run loop + command mailbox let other threads drive
+  the machine safely.
+- **Pixel renderer** — a per-scanline renderer converts ANTIC
+  display-list state + GTIA registers into a 384×240 24-bit RGB
+  framebuffer (background, playfield modes 2-F, player/missile
+  compositing with PRIOR priority arbitration).  Completed frames are
+  pushed to AESP video subscribers, and
+  `scripts/capture-screenshot.py` saves PNG/PPM screenshots.
 - **Host input** — a thread-safe input-state feeds live joystick,
   console-key, paddle, and keyboard values into PIA/GTIA/POKEY reads.
 - **Protocol servers** — AESP (binary, 3 TCP ports) and a CLI (text,
@@ -46,11 +55,9 @@ What's implemented:
 
 What's *not* yet implemented:
 
-- Pixel-level ANTIC/GTIA rendering — there is no framebuffer; nothing
-  inside the emulator paints.  (AESP `VIDEO_SUBSCRIBE` replies with a
-  frame config but sends no frames yet.)
 - POKEY audio synthesis — register state is maintained; waveform
-  generation is left to a downstream consumer.
+  generation is left to a downstream consumer.  (AESP
+  `AUDIO_SUBSCRIBE` replies with a config but sends no samples.)
 - Serial I/O and SIO bus (cassette, disk, printer).
 - Light pen, cartridge mapper, and the right-cartridge slot.
 
@@ -258,11 +265,12 @@ through to its BASIC prompt entirely from the REPL:
 ;; => (:irq-pending NIL :nmi-pending NIL :i-flag-masked T)
 ```
 
-The emulator runs headless: there is no built-in video / audio
-output. A downstream renderer or audio player can drive the machine
-with `MACHINE-RUN-FRAME` and read the program-visible chip state
-(GTIA write registers, POKEY audio registers, ANTIC scanline) directly
-after each frame.
+The emulator runs headless: it opens no window and plays no sound.
+The built-in pixel renderer paints a 384×240 RGB framebuffer each
+frame, which AESP video subscribers receive as `VIDEO_FRAME` pushes;
+a downstream audio player can drive the machine with
+`MACHINE-RUN-FRAME` and read the program-visible POKEY register state
+directly after each frame.
 
 ## Protocol servers (AESP + CLI)
 
@@ -295,8 +303,10 @@ to the machine's command mailbox and executed on the emulator thread.
 — followed by the payload.  The MVP control surface: `PING`→`PONG`;
 `PAUSE`/`RESUME`/`RESET`→`ACK`; `STATUS`/`INFO`; the input events
 `KEY_DOWN`/`KEY_UP`/`JOYSTICK`/`CONSOLE_KEYS`/`PADDLE`→`ACK`;
-`VIDEO_SUBSCRIBE`→`FRAME_CONFIG` and `AUDIO_SUBSCRIBE`→`AUDIO_CONFIG`
-(no frame/PCM payloads yet); any other type → `ERROR`.
+`VIDEO_SUBSCRIBE`→`FRAME_CONFIG` followed by per-frame `VIDEO_FRAME`
+pushes of the rendered 384×240 RGB framebuffer, and
+`AUDIO_SUBSCRIBE`→`AUDIO_CONFIG` (no PCM payloads yet); any other
+type → `ERROR`.
 
 **CLI** (text).  Newline-terminated `CMD:<verb> [args]` requests yield
 `OK:<data>` or `ERR:<msg>` replies.  MVP verbs: `ping`, `version`,
@@ -311,8 +321,8 @@ printf 'CMD:ping\n' | nc -U /tmp/atari800-cl-$(pgrep -n sbcl).sock
 # => OK:pong
 ```
 
-Not yet implemented (both protocols): video frame payloads, audio PCM,
-`BOOT_FILE`, the debugger/disk/BASIC/state/screenshot command families.
+Not yet implemented (both protocols): audio PCM payloads, `BOOT_FILE`,
+the debugger/disk/BASIC/state/screenshot command families.
 
 ## Project layout
 
@@ -322,9 +332,23 @@ atari800-cl/
 ├── atari800-cl-tests.asd    # convenience alias for the test system
 ├── README.md
 ├── CHANGES.md               # phase-by-phase changelog
+├── PERFORMANCE_LOG.md       # benchmark results per optimization commit
+├── PERFORMANCE_PLAN.md      # performance work plan (Phases 0-3 done)
+├── SCANLINE_ACCURACY_PLAN.md # timing-accuracy roadmap (Phase 1 done)
+├── MISC_IMPROVEMENTS_PLAN.md
 ├── .gitignore
 ├── AI-Docs/
 │   └── AI-Prompts.md        # the build-by-prompt plan
+├── asm/                     # example 6502 programs (MADS syntax)
+├── minimal-xl/              # git submodule: minimal XL OS for bring-up
+├── scripts/
+│   ├── test-sbcl.sh         # noninteractive test runners
+│   ├── test-lispworks.sh
+│   ├── bench-sbcl.sh        # frame-rate benchmark harness
+│   ├── bench-lispworks.sh
+│   ├── mads-build.sh        # assemble MADS sources to XEX
+│   ├── atari-run.sh         # run a XEX and capture a screenshot
+│   └── capture-screenshot.py # AESP video-frame → PNG/PPM
 ├── src/
 │   ├── package.lisp         # all package definitions
 │   ├── compat.lisp          # LispWorks/SBCL portability layer (+ sockets)
@@ -340,6 +364,7 @@ atari800-cl/
 │   ├── gtia.lisp            # player/missile + collision latches
 │   ├── pokey.lisp           # timers + IRQ + RNG + audio scaffolding
 │   ├── irq.lisp             # NMI/IRQ routing helpers
+│   ├── renderer.lisp        # per-scanline 384×240 RGB pixel renderer
 │   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame + mailbox
 │   ├── transport.lisp       # TCP (usocket) + Unix-socket transport
 │   ├── aesp.lisp            # AESP binary protocol codec + 3-port server
@@ -358,6 +383,7 @@ atari800-cl/
 │   ├── test-mmu.lisp
 │   ├── test-pia.lisp
 │   ├── test-antic.lisp
+│   ├── test-renderer.lisp
 │   ├── test-gtia.lisp
 │   ├── test-pokey.lisp
 │   ├── test-machine.lisp
@@ -370,19 +396,22 @@ atari800-cl/
 
 ## Known limitations
 
-- **No pixel rendering or audio synthesis.** ANTIC and GTIA emulate
-  the program-visible state of the chips (display list parsing, mode
-  lines, P/M positions, collision latches), but the emulator does
-  *not* paint a framebuffer.  Likewise POKEY emulates timer / IRQ /
-  RNG accurately, but does not produce a PCM stream.  Pixel and audio
-  output are expected to live in a downstream renderer that reads the
-  chip state after each frame.
-- **Cycle accounting is approximate.**  ANTIC's DMA steal is lumped
-  at color-clock 0 of each scanline rather than spread across the
-  line, and `MACHINE-RUN-FRAME` uses a budget-style CPU advance
-  rather than a true cycle-accurate interleave.  Cycle-sensitive
-  tricks (raster effects, mid-scanline reprogramming) are out of
-  scope today.
+- **No audio synthesis.** POKEY emulates timer / IRQ / RNG
+  accurately, but does not produce a PCM stream; audio output is
+  expected to live in a downstream consumer that reads the register
+  state.
+- **Rendering is scanline-granular, not cycle-exact.**  The pixel
+  renderer paints each scanline once, from the chip state at the end
+  of the line; GTIA register changes *within* a line (mid-scanline
+  color splits and similar raster tricks) render with the final
+  values only.
+- **Cycle accounting is scanline-approximate.**  ANTIC's full DMA
+  steal is charged against each scanline's CPU budget, but the steal
+  is lumped at the start of the line rather than spread across it,
+  WSYNC ($D40A) writes are ignored, and playfield/display-list DMA
+  stealing is not yet counted (see `SCANLINE_ACCURACY_PLAN.md` for
+  the roadmap).  Cycle-position-sensitive tricks are out of scope
+  today.
 - **Decimal-mode quirks** for ADC/SBC follow the standard reference,
   but ARR's decimal-mode flag behaviour is not modelled (binary mode
   is always assumed for that one undocumented opcode).

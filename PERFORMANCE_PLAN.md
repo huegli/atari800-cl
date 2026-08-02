@@ -1,5 +1,12 @@
 # Performance & Benchmarking Plan
 
+> **Status (2026-08-02): complete and merged to main.**
+> Phase 0 (harness), Phase 1 (declarations), and Phase 3 (POKEY
+> batching) shipped; Phase 2 (page-dispatch table) was implemented,
+> measured, and rejected per its own <5% bar (LispWorks regressed).
+> Phase 4 (profiling pass) remains open as optional follow-up.
+> Measured results live in `PERFORMANCE_LOG.md`.
+
 Goal: make the emulator measurably faster without sacrificing the project's
 first two priorities (idiomatic portable CL; emulation accuracy). Every
 optimization here must be justified by a benchmark delta and must keep the
