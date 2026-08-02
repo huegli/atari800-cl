@@ -44,6 +44,12 @@ faster than a real Atari 800 XL).
 | 2026-07-02 | c69772d  | lispworks      | nop      | 1019.84 | 17.020     | Scanline scheduler (mean of 3)   |
 | 2026-07-02 | c69772d  | lispworks      | irq      | 1607.22 | 26.823     | Scanline scheduler (mean of 3)   |
 | 2026-07-02 | c69772d  | lispworks      | klaus    |  999.91 | 16.688     | Scanline sched, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 273cfe4  | sbcl           | nop      | 3932.65 | 65.632     | Merge scanline scheduler into pixel-renderer (mean of 3) |
+| 2026-08-02 | 273cfe4  | sbcl           | irq      | 4092.64 | 68.302     | Merge scanline scheduler into pixel-renderer (mean of 3) |
+| 2026-08-02 | 273cfe4  | sbcl           | klaus    | 3297.65 | 55.035     | Merge scanline sched into pixel-renderer, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 273cfe4  | lispworks      | nop      |  962.02 | 16.055     | Merge scanline scheduler into pixel-renderer (mean of 3) |
+| 2026-08-02 | 273cfe4  | lispworks      | irq      | 1542.98 | 25.751     | Merge scanline scheduler into pixel-renderer (mean of 3) |
+| 2026-08-02 | 273cfe4  | lispworks      | klaus    |  971.21 | 16.209     | Merge scanline sched into pixel-renderer, klaus+PASS, 3500 frames (mean of 3) |
 
 ## Merge atari800-cl-perf-plan into pixel-renderer (3e9601d)
 
@@ -74,6 +80,37 @@ taken on the perf branch without the renderer source loaded; the
 combined tree loads `src/renderer.lisp` but does not call into it during
 benchmarks. Conclusion: merge is neutral modulo variance; no follow-up
 needed.
+
+## Merge scanline scheduler into pixel-renderer (273cfe4)
+
+Merged main (scanline-granular scheduler, c69772d) into the renderer
+branch. The renderer's line-start screen-pointer snapshot and end-of-line
+screen-pointer/scan-y advancement moved into the shared
+%BEGIN-SCANLINE-EVENTS / %END-SCANLINE-EVENTS helpers, so both drivers
+(per-cycle ANTIC-TICK and the scanline API) carry them; the machine's
+per-scanline render callback now fires after ANTIC-END-SCANLINE.
+Measured delta vs. the renderer-less c69772d rows (mean of 3, same
+machine):
+
+| implementation | workload | c69772d fps | 273cfe4 fps | delta  |
+|----------------|----------|-------------|-------------|--------|
+| sbcl           | nop      | 4005.57     | 3932.65     | -1.8%  |
+| sbcl           | irq      | 4242.57     | 4092.64     | -3.5%  |
+| sbcl           | klaus    | 3380.79     | 3297.65     | -2.5%  |
+| lispworks      | nop      | 1019.84     |  962.02     | -5.7%  |
+| lispworks      | irq      | 1607.22     | 1542.98     | -4.0%  |
+| lispworks      | klaus    |  999.91     |  971.21     | -2.9%  |
+
+A small consistent cost (2-6%), on par with run-to-run variance but
+uniformly negative, so some of it is likely real: the rendering
+bookkeeping (screen-pointer snapshot, display-active check + mode decode
+for the pointer/scan-y advancement, and the per-line SCANLINE-FN NIL
+check) now executes once per scanline inside the shared line events even
+when no renderer is attached. Bench machines install no AESP server, so
+the callback itself never runs. Acceptable — the scheduler's headline
+gains (e.g. LispWorks irq 626 -> 1543 fps vs. the pre-scheduler renderer
+branch) dwarf it; revisit only if a profile ever shows the line events
+hot.
 
 ## Scanline scheduler note — fps gain includes an accuracy correction
 
