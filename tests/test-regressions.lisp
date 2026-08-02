@@ -388,3 +388,59 @@ steal-model functions ANTIC-BEGIN-SCANLINE uses."
           "CPU cycles consumed (~D) should be within one instruction of the ~
            expected granted budget ~D (expected steal ~D)"
           (cpu-cycles cpu) expected-budget expected-steal))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #12 — a WSYNC budget deficit carries through the stall.
+;;;
+;;; When the STA WSYNC instruction itself overshoots the line's remaining
+;;; CPU budget, the overshoot is a debt of already-executed cycles.  The
+;;; stall clamp must be (MIN CPU-BUDGET 0), not plain 0: forgiving the
+;;; debt hands the CPU free cycles on the next line.
+
+(test wsync-budget-deficit-carries-through-stall
+  "STA WSYNC executed with 2 cycles of budget left (a 4-cycle store, so
+budget lands at -2) must charge those 2 borrowed cycles against the next
+line: across exactly two scanlines the CPU consumes 209 cycles, not 211.
+
+Cycle ledger (DMACTL = 0, so every line grants 114 - 9 = 105):
+  line 1: LDA $00 (3) + 50 NOP (100) + STA $D40A (4) = 107; budget -2
+  line 2: budget -2 + 105 = 103 -> 51 NOP (102) run, 1 cycle left over
+  total: 209.  (A clamp that forgives the deficit grants 105 on line 2:
+  52 NOPs, total 211.)"
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000)))
+    ;; LDA $00, then offsets 2-51 stay the ROM's NOP fill (50 NOPs),
+    ;; then STA $D40A at offset 52.  Everything after is NOPs again.
+    (%poke os #x0000 #xA5) (%poke os #x0001 #x00)         ; LDA $00 (3 cyc)
+    (%poke os #x0034 #x8D) (%poke os #x0035 #x0A)         ; STA $D40A
+    (%poke os #x0036 #xD4)
+    (let* ((m   (make-test-machine :os-rom os))
+           (cpu (atari800-cl.machine:atari-machine-cpu m)))
+      (atari800-cl.machine:%run-clocks m (* 2 114))
+      (is (= 209 (cpu-cycles cpu))
+          "expected exactly 209 CPU cycles across the two lines ~
+           (211 means the WSYNC clamp forgave the 2-cycle deficit); got ~D"
+          (cpu-cycles cpu)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #13 — a stale out-of-band WSYNC write must not stall.
+;;;
+;;; Only the scheduler's per-instruction check gives WSYNC meaning; a
+;;; $D40A write arriving outside %RUN-CLOCKS (a debugger poke, or
+;;; MACHINE-TRACE-STEP executing a store) has no scanline context and
+;;; must be discarded on entry, not stall the next run's first line.
+
+(test stale-wsync-flag-does-not-stall-next-run
+  "Arming WSYNC via a direct bus write (outside the scheduler) must not
+stall the first instructions of the next %RUN-CLOCKS call."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000)))
+    ;; LDA #$FF ; STA $00 (marker).
+    (%poke os #x0000 #xA9) (%poke os #x0001 #xFF)         ; LDA #$FF
+    (%poke os #x0002 #x85) (%poke os #x0003 #x00)         ; STA $00
+    (let* ((m   (make-test-machine :os-rom os))
+           (bus (atari800-cl.machine:atari-machine-bus m)))
+      ;; Out-of-band arm: this write happens with no scheduler running.
+      (atari800-cl.bus:bus-write bus #xD40A #x00)
+      (atari800-cl.machine:%run-clocks m 114)
+      (is (= #xFF (atari800-cl.bus:bus-peek-ram bus #x00))
+          "the marker must be written in the first line -- a stale WSYNC ~
+           flag stalled the scheduler"))))

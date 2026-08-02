@@ -285,14 +285,22 @@ charges the full steal (114 - stolen granted per line), so the CPU now
 correctly loses all 9+ stolen cycles each line.
 
 WSYNC ($D40A): after each instruction, ANTIC-CONSUME-WSYNC is checked;
-if a WSYNC write is pending, CPU-BUDGET is clamped to 0 and the
-instruction loop stops for this line -- the CPU stalls to the end of
-the scanline (a first cut; the hardware-accurate release at cycle 105
-is SCANLINE_ACCURACY_PLAN.md's stretch Phase 4).  Back-to-back WSYNC
+if a WSYNC write is pending, CPU-BUDGET is clamped to (MIN CPU-BUDGET 0)
+and the instruction loop stops for this line -- the CPU stalls to the
+end of the scanline (a first cut; the hardware-accurate release at
+cycle 105 is SCANLINE_ACCURACY_PLAN.md's stretch Phase 4).  The clamp
+runs in both directions: a positive surplus carried from earlier lines
+must not leak past the stall (real WSYNC freezes the CPU no matter how
+far ahead it was), and a DEFICIT must survive it (the WSYNC-writing
+instruction may have overshot the line's remaining budget; those
+borrowed cycles still come out of the next line).  Back-to-back WSYNC
 writes therefore stall to the END of the NEXT line: the first stalls
 out the current line, and the second (executed as the first instruction
 of the following line, before any further budget has been consumed)
-immediately zeroes that line's budget too.
+immediately zeroes that line's budget too.  A WSYNC flag left armed by
+an out-of-band write -- a debugger poke of $D40A or MACHINE-TRACE-STEP
+executing a store, neither of which runs under this scheduler -- is
+discarded on entry: there is no scanline context to stall against.
 
 When N is not a multiple of 114, floor(N/114) full lines run, then one
 partial line of the remaining cycles: it begins with the usual
@@ -315,6 +323,12 @@ carry across calls."
          (cpu-budget 0)
          (clocks-run 0))
     (declare (type fixnum cpu-budget clocks-run))
+    ;; Discard a stale WSYNC flag armed outside this scheduler (debugger
+    ;; poke of $D40A, MACHINE-TRACE-STEP executing a store).  Within a
+    ;; run the flag is always consumed by the per-instruction check
+    ;; below, so anything pending on entry has no scanline context and
+    ;; must not stall the first line's first instruction.
+    (antic-consume-wsync antic)
     (loop while (< clocks-run n)
           do ;; Scanline-boundary abort check (only when a predicate was
              ;; supplied, and never before the first line).
@@ -348,20 +362,24 @@ carry across calls."
                           (illegal-opcode ()
                             (setf (cpu-halted cpu) t)))
                         ;; WSYNC ($D40A): a write halts the CPU until the
-                        ;; end of the current scanline.  Clamp (not merely
-                        ;; decrement) CPU-BUDGET to 0 -- real WSYNC freezes
-                        ;; the CPU regardless of any surplus budget carried
-                        ;; in from a previous line, so that surplus must not
-                        ;; leak past the stall.  POKEY-REMAINING is left
-                        ;; untouched here; the "top POKEY up to exactly this
-                        ;; line's cycle count" step below advances POKEY
-                        ;; through the skipped remainder, so POKEY still
-                        ;; sees every cycle of the line.  ANTIC-TICK (the
-                        ;; per-cycle reference path) never calls
-                        ;; ANTIC-CONSUME-WSYNC, so WSYNC has no effect
-                        ;; outside this scheduler.
+                        ;; end of the current scanline.  Clamp CPU-BUDGET
+                        ;; to (MIN CPU-BUDGET 0): a positive surplus
+                        ;; carried in from a previous line must not leak
+                        ;; past the stall (real WSYNC freezes the CPU
+                        ;; regardless of how far ahead it was), but a
+                        ;; NEGATIVE budget -- the WSYNC-writing instruction
+                        ;; overshot the line's remainder -- is a debt of
+                        ;; already-executed cycles and must carry into the
+                        ;; next line, not be forgiven.  POKEY-REMAINING is
+                        ;; left untouched here; the "top POKEY up to
+                        ;; exactly this line's cycle count" step below
+                        ;; advances POKEY through the skipped remainder,
+                        ;; so POKEY still sees every cycle of the line.
+                        ;; ANTIC-TICK (the per-cycle reference path) never
+                        ;; calls ANTIC-CONSUME-WSYNC, so WSYNC has no
+                        ;; effect outside this scheduler.
                         (when (antic-consume-wsync antic)
-                          (setf cpu-budget 0)
+                          (setf cpu-budget (min cpu-budget 0))
                           (return)))
                ;; Top POKEY up to exactly this line's cycle count.
                (when (plusp pokey-remaining)
