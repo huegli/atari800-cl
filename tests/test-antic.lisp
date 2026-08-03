@@ -436,3 +436,81 @@ scanline 8, that's cycle 0 of scanline 15."
     (declare (ignore cpu))
     (%tick-scanlines antic nil bus 50)
     (is (= 25 (atari800-cl.bus:bus-read bus #xD40B)))))
+
+;;; ---------------------------------------------------------------------------
+;;; P/M graphics DMA (ROADMAP.md Phase 6a)
+;;;
+;;; ANTIC fetches one byte per enabled object per scanline from P/M RAM
+;;; (PMBASE) and delivers it through PM-WRITE-FN (players 0-3, missiles
+;;; as object 4).  The GRACTL receive gate lives in the machine-wired
+;;; closure and is tested at machine level in tests/test-gtia.lisp.
+
+(defun %pm-fetch-calls (antic &key scanline)
+  "Set ANTIC's scanline, capture one ANTIC-BEGIN-SCANLINE's PM-WRITE-FN
+deliveries, and return them as an alist of (object . byte)."
+  (let ((calls '()))
+    (setf (atari800-cl.antic:antic-pm-write-fn antic)
+          (lambda (obj byte) (push (cons obj byte) calls)))
+    (setf (atari800-cl.antic:antic-scanline antic) scanline)
+    (atari800-cl.antic:antic-begin-scanline antic nil nil)
+    calls))
+
+(test pm-dma-single-line-addressing
+  "Single-line resolution (DMACTL bit 4): base = (PMBASE & #xF8) << 8;
+missiles at base+$300+scanline, player p at base+$400+$100*p+scanline."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl #x1C)    ; players + missiles + single-line
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD407 #x38)          ; PMBASE -> base $3800
+    ;; Scanline 20: missile byte and four distinct player bytes.
+    (atari800-cl.bus:bus-poke-ram bus (+ #x3800 #x300 20) #xAA)
+    (dotimes (p 4)
+      (atari800-cl.bus:bus-poke-ram bus (+ #x3800 #x400 (* #x100 p) 20)
+                                    (+ #x10 p)))
+    (let ((calls (%pm-fetch-calls antic :scanline 20)))
+      (is (= #xAA (cdr (assoc 4 calls))) "missile byte from base+$300+20")
+      (dotimes (p 4)
+        (is (= (+ #x10 p) (cdr (assoc p calls)))
+            "player ~D byte from base+$400+$100*~D+20" p p)))))
+
+(test pm-dma-double-line-addressing
+  "Double-line resolution (DMACTL bit 4 clear): base = (PMBASE & #xFC) << 8
+(1K boundary — bit 2 participates, unlike single-line); missiles at
+base+$180+(scanline>>1), player p at base+$200+$80*p+(scanline>>1)."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl #x0C)    ; players + missiles, double-line
+    (declare (ignore cpu))
+    ;; PMBASE $34: bit 2 is set, so the double-line base is $3400 — a
+    ;; single-line-style #xF8 mask would wrongly give $3000.
+    (atari800-cl.bus:bus-write bus #xD407 #x34)          ; PMBASE -> base $3400
+    ;; Scanline 21 -> index 10.
+    (atari800-cl.bus:bus-poke-ram bus (+ #x3400 #x180 10) #xBB)
+    (atari800-cl.bus:bus-poke-ram bus (+ #x3400 #x200 (* #x80 2) 10) #xC2)
+    (let ((calls (%pm-fetch-calls antic :scanline 21)))
+      (is (= #xBB (cdr (assoc 4 calls))) "missile byte from base+$180+10")
+      (is (= #xC2 (cdr (assoc 2 calls))) "player 2 byte from base+$200+$100+10"))))
+
+(test pm-dma-only-enabled-objects-fetch
+  "DMACTL bit 3 alone fetches players only; bit 2 alone missiles only."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl #x08)    ; players only
+    (declare (ignore cpu bus))
+    (let ((calls (%pm-fetch-calls antic :scanline 30)))
+      (is (null (assoc 4 calls)) "no missile fetch without DMACTL bit 2")
+      (is (assoc 0 calls) "player fetch with DMACTL bit 3")))
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl #x04)    ; missiles only
+    (declare (ignore cpu bus))
+    (let ((calls (%pm-fetch-calls antic :scanline 30)))
+      (is (assoc 4 calls) "missile fetch with DMACTL bit 2")
+      (is (null (assoc 0 calls)) "no player fetch without DMACTL bit 3"))))
+
+(test pm-dma-fetches-only-in-visible-region
+  "No P/M delivery outside scanlines 8-247."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl #x0C)
+    (declare (ignore cpu bus))
+    (is (null (%pm-fetch-calls antic :scanline 2))
+        "no fetch before the active region")
+    (is (null (%pm-fetch-calls antic :scanline 250))
+        "no fetch during VBLANK")))

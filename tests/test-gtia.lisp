@@ -172,3 +172,69 @@
     (is (= #x05 (atari800-cl.gtia:gtia-read g #xD01F)) "CONSOL live = $05")
     ;; A collision latch (offset 0) is not an input register: still from read-regs.
     (is (= 0 (atari800-cl.gtia:gtia-read g #xD000)) "M0PF latch untouched")))
+
+;;; ---------------------------------------------------------------------------
+;;; P/M graphics DMA delivery (ROADMAP.md Phase 6a — machine wiring)
+;;;
+;;; ANTIC fetches the bytes whenever DMACTL enables P/M DMA; whether
+;;; GTIA LATCHES them into GRAFP0-3/GRAFM is gated on GRACTL inside the
+;;; closure MAKE-ATARI-MACHINE wires.  The ANTIC-side addressing tests
+;;; live in tests/test-antic.lisp.
+
+(defun %pm-dma-machine (&key (gractl 3))
+  "Machine with single-line P/M DMA enabled (PMBASE $3800), a
+recognizable byte pattern poked at scanline 8's P/M addresses, and
+GRACTL set as given.  Runs 9 scanlines so scanline 8 has begun."
+  (let* ((m   (make-test-machine))
+         (bus (atari800-cl.machine:atari-machine-bus m)))
+    (atari800-cl.bus:bus-poke-ram bus (+ #x3800 #x300 8) #xA5)   ; missiles
+    (dotimes (p 4)
+      (atari800-cl.bus:bus-poke-ram bus (+ #x3800 #x400 (* #x100 p) 8)
+                                    (+ #x50 p)))                  ; players
+    (atari800-cl.bus:bus-write bus #xD407 #x38)                   ; PMBASE
+    (atari800-cl.bus:bus-write bus #xD01D gractl)                 ; GRACTL
+    (atari800-cl.bus:bus-write bus #xD400 #x1C)                   ; DMACTL: P+M, single-line
+    (atari800-cl.machine:%run-clocks m (* 9 114))
+    m))
+
+(test pm-dma-delivers-graf-bytes-when-gractl-enables
+  "With DMACTL P/M DMA on and GRACTL = 3, scanline 8's P/M RAM bytes
+land in GTIA's GRAFP0-3 and GRAFM write registers."
+  (let* ((m  (%pm-dma-machine :gractl 3))
+         (wr (atari800-cl.gtia:gtia-write-regs
+              (atari800-cl.machine:atari-machine-gtia m))))
+    (is (= #xA5 (aref wr atari800-cl.gtia:+w-grafm+))
+        "GRAFM must hold the fetched missile byte")
+    (dotimes (p 4)
+      (is (= (+ #x50 p) (aref wr (+ atari800-cl.gtia:+w-grafp0+ p)))
+          "GRAFP~D must hold the fetched player byte" p))))
+
+(test pm-dma-gractl-clear-blocks-delivery-but-cycles-still-stolen
+  "GRACTL = 0 blocks GRAF delivery entirely -- but the DMA cycles are
+still stolen (that is DMACTL's job, checked via the ANTIC steal
+counter)."
+  (let* ((m     (%pm-dma-machine :gractl 0))
+         (gtia  (atari800-cl.machine:atari-machine-gtia m))
+         (antic (atari800-cl.machine:atari-machine-antic m))
+         (wr    (atari800-cl.gtia:gtia-write-regs gtia)))
+    (is (zerop (aref wr atari800-cl.gtia:+w-grafm+))
+        "GRAFM must stay 0 with GRACTL clear")
+    (dotimes (p 4)
+      (is (zerop (aref wr (+ atari800-cl.gtia:+w-grafp0+ p)))
+          "GRAFP~D must stay 0 with GRACTL clear" p))
+    ;; 9 lines x (9 refresh + 5 P/M) = at least 126 stolen cycles.
+    (is (>= (atari800-cl.antic:antic-stolen-cycles antic) (* 9 14))
+        "P/M DMA cycles must be stolen regardless of GRACTL")))
+
+(test pm-dma-gractl-selects-players-and-missiles-independently
+  "GRACTL bit 1 alone latches players only; bit 0 alone missiles only."
+  (let* ((m  (%pm-dma-machine :gractl 2))     ; players only
+         (wr (atari800-cl.gtia:gtia-write-regs
+              (atari800-cl.machine:atari-machine-gtia m))))
+    (is (zerop (aref wr atari800-cl.gtia:+w-grafm+)))
+    (is (= #x50 (aref wr atari800-cl.gtia:+w-grafp0+))))
+  (let* ((m  (%pm-dma-machine :gractl 1))     ; missiles only
+         (wr (atari800-cl.gtia:gtia-write-regs
+              (atari800-cl.machine:atari-machine-gtia m))))
+    (is (= #xA5 (aref wr atari800-cl.gtia:+w-grafm+)))
+    (is (zerop (aref wr atari800-cl.gtia:+w-grafp0+)))))

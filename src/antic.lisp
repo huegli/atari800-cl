@@ -99,6 +99,7 @@
   (defconstant +dmactl-playfield-mask+ #x03)   ; 00=off, 01=narrow, 10=normal, 11=wide
   (defconstant +dmactl-missile-mask+   #x04)
   (defconstant +dmactl-player-mask+    #x08)
+  (defconstant +dmactl-pm-hires-mask+  #x10)   ; bit 4: 1=single-line, 0=double-line P/M
   (defconstant +dmactl-instructions+   #x20))  ; bit 5: DL fetching enabled
 
 ;;; ---------------------------------------------------------------------------
@@ -134,6 +135,15 @@ Slots:
                               ANTIC-END-SCANLINE scheduler path — the
                               per-cycle ANTIC-TICK reference path does not
                               consume it.
+  PM-WRITE-FN               — NIL, or a function (OBJECT BYTE) that receives
+                              the P/M graphics bytes ANTIC fetches each
+                              scanline when DMACTL bits 2/3 enable P/M DMA.
+                              OBJECT is 0-3 for players, 4 for the missile
+                              byte.  MAKE-ATARI-MACHINE wires this to a
+                              closure that stores into the GTIA's GRAFP0-3/
+                              GRAFM write registers, gated on GRACTL —
+                              chips never reference each other's packages
+                              directly (see the bus design in CLAUDE.md).
   CPU                       — CPU back-pointer for NMI routing.
   BUS                       — bus back-pointer (currently unused in tick)."
   (registers (make-array 32 :element-type '(unsigned-byte 8)
@@ -161,6 +171,7 @@ Slots:
   (frame-count   0 :type fixnum)
   (stolen-cycles 0 :type fixnum)
   (wsync-pending nil :type boolean)
+  (pm-write-fn nil :type (or null function))
   (cpu nil)
   (bus nil)
   ;; Rendering support --------------------------------------------------------
@@ -347,6 +358,60 @@ so the caller can charge it into the line's DMA steal."
          (not (zerop (antic-dmactl antic))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; P/M graphics DMA (ROADMAP.md Phase 6a)
+
+(defun %fetch-pm-graphics (antic)
+  "Fetch this scanline's player/missile graphics bytes from P/M RAM and
+deliver them through PM-WRITE-FN (players as objects 0-3, the combined
+missile byte as object 4).  A no-op unless PM-WRITE-FN is wired and
+DMACTL enables player (bit 3) and/or missile (bit 2) DMA.
+
+Addressing (Altirra Hardware Reference Manual; the plan's from-memory
+formula masked PMBASE with #xF8 for both resolutions, but double-line
+mode only needs a 1K boundary, so bit 2 participates there):
+  single-line (DMACTL bit 4 = 1): base = (PMBASE & #xF8) << 8 (2K boundary)
+      missiles at base+$300+scanline, player p at base+$400+$100*p+scanline
+  double-line (bit 4 = 0):        base = (PMBASE & #xFC) << 8 (1K boundary)
+      missiles at base+$180+(scanline>>1), player p at base+$200+$80*p+(scanline>>1)
+Addresses are masked to 16 bits.  Out of scope for now: VDELAY's
+one-line delay of double-line objects, and the GRACTL receive gate —
+that gate lives in the machine-wired closure, because GRACTL is a GTIA
+register (DMACTL only decides whether the cycles are stolen and the
+fetch happens; GRACTL decides whether GTIA latches the result)."
+  (declare (type antic antic))
+  (let ((fn (antic-pm-write-fn antic)))
+    (when fn
+      (let* ((dmactl     (antic-dmactl antic))
+             (players-p  (logtest dmactl +dmactl-player-mask+))
+             (missiles-p (logtest dmactl +dmactl-missile-mask+)))
+        (when (or players-p missiles-p)
+          (let* ((bus      (antic-bus antic))
+                 (pmbase   (aref (antic-registers antic) +reg-pmbase+))
+                 (single-p (logtest dmactl +dmactl-pm-hires-mask+))
+                 (base     (if single-p
+                               (ash (logand pmbase #xF8) 8)
+                               (ash (logand pmbase #xFC) 8)))
+                 (index    (if single-p
+                               (logand (antic-scanline antic) #xFF)
+                               (logand (ash (antic-scanline antic) -1) #x7F))))
+            (declare (type fixnum base index))
+            (when missiles-p
+              (funcall fn 4
+                       (atari800-cl.bus:bus-read
+                        bus (ldb (byte 16 0)
+                                 (+ base (if single-p #x300 #x180) index)))))
+            (when players-p
+              (dotimes (p 4)
+                (funcall fn p
+                         (atari800-cl.bus:bus-read
+                          bus (ldb (byte 16 0)
+                                   (+ base
+                                      (if single-p
+                                          (+ #x400 (* #x100 p))
+                                          (+ #x200 (* #x80 p)))
+                                      index))))))))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; NMI signalling
 
 (declaim (inline %raise-nmi))
@@ -388,6 +453,13 @@ stolen this line."
           (dpb (aref (antic-registers antic) +reg-dlisth+) (byte 8 8)
                (aref (antic-registers antic) +reg-dlistl+))
           (antic-dl-offset antic) 0))
+  ;; P/M graphics DMA: deliver this line's object bytes to GTIA (via the
+  ;; machine-wired PM-WRITE-FN) during the visible region.  The CYCLES
+  ;; for P/M DMA are charged by %SCANLINE-STEAL below whenever the
+  ;; DMACTL bits are set; this is only the data path.
+  (let ((s (antic-scanline antic)))
+    (when (and (>= s +active-start-scanline+) (< s +vbi-scanline+))
+      (%fetch-pm-graphics antic)))
   ;; If a new mode line is needed, fetch the next DL instruction.  Track
   ;; the bytes it consumed so they can be charged into this line's steal.
   (let ((dl-fetch-bytes 0))

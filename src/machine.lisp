@@ -137,6 +137,21 @@ at the bus.  The result is a machine that is ready for MACHINE-COLD-RESET."
     ;; Wire the CPU to the bus.
     (setf (cpu-bus-read  cpu) (lambda (addr) (bus-read  bus addr))
           (cpu-bus-write cpu) (lambda (addr val) (bus-write bus addr val)))
+    ;; Wire ANTIC's P/M graphics DMA into GTIA's GRAF registers.  ANTIC
+    ;; fetches the bytes (and DMACTL decides whether it fetches at all);
+    ;; GRACTL bit 1 gates whether GTIA latches player bytes, bit 0
+    ;; missile bytes — software that leaves GRACTL clear keeps poked
+    ;; GRAFPn values even while the DMA cycles are being stolen.
+    (setf (antic-pm-write-fn antic)
+          (lambda (object byte)
+            (declare (type fixnum object) (type (unsigned-byte 8) byte))
+            (let* ((wr     (gtia-write-regs gtia))
+                   (gractl (aref wr +w-gractl+)))
+              (if (= object 4)
+                  (when (logtest gractl #x01)          ; missiles
+                    (setf (aref wr +w-grafm+) byte))
+                  (when (logtest gractl #x02)          ; players
+                    (setf (aref wr (+ +w-grafp0+ object)) byte))))))
     machine))
 
 ;;; ---------------------------------------------------------------------------

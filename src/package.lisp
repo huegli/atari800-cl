@@ -306,6 +306,7 @@
            #:antic-write
            #:antic-wsync-pending
            #:antic-consume-wsync
+           #:antic-pm-write-fn
            #:reset-antic
            #:attach-antic
            #:mode-line-scanlines
