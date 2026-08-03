@@ -424,3 +424,133 @@ HPOSP0 = 10 (fully off-screen left) paints nothing; HPOSP1 = 220 with a
   (let ((payload (atari800-cl.aesp::%frame-config-payload)))
     (is (= 24 (aref payload 4))
         "Expected bpp=24 but got ~D" (aref payload 4))))
+
+;;; ---------------------------------------------------------------------------
+;;; Full PRIOR priority arbitration (ROADMAP.md Phase 6b)
+;;;
+;;; Playfield fixture for these tests: mode E with screen byte #x1B
+;;; (2bpp pixels 00,01,10,11), giving columns 32-33 BAK, 34-35 PF0,
+;;; 36-37 PF1, 38-39 PF2.  A normal-size player at HPOS 48 covers
+;;; columns 32-39 -- one column pair per playfield source.
+
+(defun %prior-fixture (prior &key (player 0) (grafp #xFF))
+  "Return (VALUES BUS ANTIC GTIA FB) with the mode-E tag playfield, one
+player at HPOS 48, and PRIOR set."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x1B)
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x0E
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22)
+    (atari800-cl.gtia:gtia-write gtia (+ #xD000 player) 48)      ; HPOSPn
+    (atari800-cl.gtia:gtia-write gtia (+ #xD00D player) grafp)   ; GRAFPn
+    (atari800-cl.gtia:gtia-write gtia (+ #xD012 player)          ; COLPMn
+                                 (+ #x28 (* player 2)))
+    (atari800-cl.gtia:gtia-write gtia #xD01B prior)              ; PRIOR
+    (values bus antic gtia fb)))
+
+(test prior-bit0-players-beat-all-playfields
+  "PRIOR bit 0: P0 P1 P2 P3 PF0 PF1 PF2 PF3 BAK -- the player draws
+over BAK, PF0, PF1, and PF2 alike."
+  (multiple-value-bind (bus antic gtia fb) (%prior-fixture #x01)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (let ((pm0-r (atari800-cl.renderer:atari-color->r #x28)))
+      (dolist (col '(32 34 36 38))
+        (is (= pm0-r (%fb-r fb col))
+            "column ~D: player 0 must beat every playfield source" col)))))
+
+(test prior-bit1-front-players-beat-playfield-back-players-lose
+  "PRIOR bit 1: P0 P1 PF0 PF1 PF2 PF3 P2 P3 BAK -- P0 still beats all
+playfields, but P2 hides behind them and shows only over BAK."
+  ;; P0 case.
+  (multiple-value-bind (bus antic gtia fb) (%prior-fixture #x02 :player 0)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 36))
+        "P0 must draw over PF1 under the bit-1 ordering"))
+  ;; P2 case.
+  (multiple-value-bind (bus antic gtia fb) (%prior-fixture #x02 :player 2)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x2C) (%fb-r fb 32))
+        "P2 must draw over BAK")
+    (is (= (atari800-cl.renderer:atari-color->r #x24) (%fb-r fb 34))
+        "PF0 must draw over P2")
+    (is (= (atari800-cl.renderer:atari-color->r #x68) (%fb-r fb 38))
+        "PF2 must draw over P2")))
+
+(test prior-bit2-playfields-beat-players
+  "PRIOR bit 2: PF0 PF1 PF2 PF3 P0 P1 P2 P3 BAK -- every playfield
+source hides the player; only BAK shows it."
+  (multiple-value-bind (bus antic gtia fb) (%prior-fixture #x04)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 32))
+        "player must still draw over BAK")
+    (is (= (atari800-cl.renderer:atari-color->r #x24) (%fb-r fb 34))
+        "PF0 must hide the player")
+    (is (= (atari800-cl.renderer:atari-color->r #x46) (%fb-r fb 36))
+        "PF1 must hide the player")
+    (is (= (atari800-cl.renderer:atari-color->r #x68) (%fb-r fb 38))
+        "PF2 must hide the player")))
+
+(test prior-bit3-players-between-playfield-pairs
+  "PRIOR bit 3: PF0 PF1 P0 P1 P2 P3 PF2 PF3 BAK -- the player hides
+behind PF0/PF1 but draws over PF2 and BAK."
+  (multiple-value-bind (bus antic gtia fb) (%prior-fixture #x08)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 32))
+        "player over BAK")
+    (is (= (atari800-cl.renderer:atari-color->r #x24) (%fb-r fb 34))
+        "PF0 over player")
+    (is (= (atari800-cl.renderer:atari-color->r #x46) (%fb-r fb 36))
+        "PF1 over player")
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 38))
+        "player over PF2")))
+
+(test prior-fifth-player-missiles-render-as-playfield-3
+  "PRIOR bit 4: the missiles render as one fifth player -- COLPF3 color,
+playfield-3 priority.  A player beats it under the bit-0 ordering
+(players beat PF3) but hides behind it under the bit-2 ordering
+(playfields beat players)."
+  ;; Fifth player alone over background: COLPF3 color shows.
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD019 #x8A)   ; COLPF3
+    (atari800-cl.gtia:gtia-write gtia #xD004 48)     ; HPOSM0
+    (atari800-cl.gtia:gtia-write gtia #xD011 #xC0)   ; GRAFM: missile 0
+    (atari800-cl.gtia:gtia-write gtia #xD01B #x11)   ; fifth + bit 0
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x8A) (%fb-r fb 32))
+        "fifth-player missile must render in COLPF3"))
+  ;; Player vs fifth player, both orderings.
+  (flet ((run (prior)
+           (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+             (atari800-cl.gtia:gtia-write gtia #xD019 #x8A)  ; COLPF3
+             (atari800-cl.gtia:gtia-write gtia #xD004 48)    ; HPOSM0
+             (atari800-cl.gtia:gtia-write gtia #xD011 #xC0)  ; GRAFM
+             (atari800-cl.gtia:gtia-write gtia #xD000 48)    ; HPOSP0
+             (atari800-cl.gtia:gtia-write gtia #xD00D #xFF)  ; GRAFP0
+             (atari800-cl.gtia:gtia-write gtia #xD012 #x28)  ; COLPM0
+             (atari800-cl.gtia:gtia-write gtia #xD01B prior)
+             (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+             (%fb-r fb 32))))
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (run #x11))
+        "bit-0 ordering: the player beats the fifth player (PF3)")
+    (is (= (atari800-cl.renderer:atari-color->r #x8A) (run #x14))
+        "bit-2 ordering: the fifth player (PF3) beats the player")))
+
+(test prior-multicolor-players-or-their-colors
+  "PRIOR bit 5: where P0 and P1 overlap, the drawn color is
+COLPM0 | COLPM1."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD000 80)     ; HPOSP0 -> cols 96-103
+    (atari800-cl.gtia:gtia-write gtia #xD001 82)     ; HPOSP1 -> cols 100-107
+    (atari800-cl.gtia:gtia-write gtia #xD00D #xFF)   ; GRAFP0
+    (atari800-cl.gtia:gtia-write gtia #xD00E #xFF)   ; GRAFP1
+    (atari800-cl.gtia:gtia-write gtia #xD012 #x32)   ; COLPM0
+    (atari800-cl.gtia:gtia-write gtia #xD013 #x44)   ; COLPM1
+    (atari800-cl.gtia:gtia-write gtia #xD01B #x21)   ; multicolor + bit 0
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x32) (%fb-r fb 96))
+        "P0 alone keeps COLPM0")
+    (is (= (atari800-cl.renderer:atari-color->r (logior #x32 #x44))
+           (%fb-r fb 100))
+        "the P0/P1 overlap must OR the two color registers")
+    (is (= (atari800-cl.renderer:atari-color->r #x44) (%fb-r fb 104))
+        "P1 alone keeps COLPM1")))

@@ -339,6 +339,8 @@
            #:make-gtia
            #:gtia-write-regs
            #:gtia-read-regs
+           #:gtia-pf-tag-row
+           #:gtia-pm-mask-row
            #:gtia-read
            #:gtia-write
            #:gtia-record-collision

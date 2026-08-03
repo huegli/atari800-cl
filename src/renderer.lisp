@@ -41,6 +41,43 @@
               :initial-element 0))
 
 ;;; ---------------------------------------------------------------------------
+;;; Playfield source tags + P/M priority (ROADMAP.md Phase 6b)
+;;;
+;;; PRIOR bits 0-3 select one of four fixed priority orderings between
+;;; the four player channels and the playfield sources.  To arbitrate,
+;;; the P/M compositor must know WHICH playfield register produced each
+;;; pixel, not just its color: the playfield renderers record a source
+;;; tag per output column into the GTIA's PF-TAG-ROW scratch (but only
+;;; on rows where P/M objects are actually active — see RENDER-SCANLINE).
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defconstant +tag-bak+ 0)
+  (defconstant +tag-pf0+ 1)
+  (defconstant +tag-pf1+ 2)
+  (defconstant +tag-pf2+ 3)
+  (defconstant +tag-pf3+ 4))
+
+(defparameter +pm-beats-pf-masks+
+  (make-array '(4 4)
+              :element-type '(unsigned-byte 8)
+              :initial-contents '((#b11111 #b11111 #b11111 #b11111)
+                                  (#b11111 #b11111 #b00001 #b00001)
+                                  (#b00001 #b00001 #b00001 #b00001)
+                                  (#b11001 #b11001 #b11001 #b11001)))
+  "Priority lookup: does player channel P draw over playfield tag T?
+
+Row = the normalized PRIOR priority select (index of the lowest set bit
+of PRIOR bits 0-3); column = player channel 0-3; value = a 5-bit mask
+over tags (bit T set means the player draws over tag T, tags being
+BAK=0, PF0-PF3=1-4).  Derived from the four orderings (top priority
+first; standard table, cross-check pending against Altirra/atari800 per
+the ROADMAP CONFIRM note):
+  PRIOR bit 0: P0 P1 P2 P3 PF0 PF1 PF2 PF3 BAK — players beat every tag
+  PRIOR bit 1: P0 P1 PF0-PF3 P2 P3 BAK         — P0/P1 beat all; P2/P3 only BAK
+  PRIOR bit 2: PF0-PF3 P0 P1 P2 P3 BAK         — players beat only BAK
+  PRIOR bit 3: PF0 PF1 P0-P3 PF2 PF3 BAK       — players beat BAK, PF2, PF3")
+
+;;; ---------------------------------------------------------------------------
 ;;; Atari NTSC color palette
 ;;;
 ;;; The Atari color register uses 7 significant bits:
@@ -178,9 +215,12 @@ Modes 6/7: 64 wide characters, glyph row at mod 8 of scan-y."
 ;;; ---------------------------------------------------------------------------
 ;;; Playfield renderers
 
-(defun %render-char-mode (fb pf-base screen-ptr scan-y mode gtia-wr bus chbase)
+(defun %render-char-mode (fb pf-base screen-ptr scan-y mode gtia-wr bus chbase
+                          &optional tags)
   "Render character modes 2-7 into PF-BASE columns of FB.
 Produces 320 output pixels (modes 2-5: 40 chars × 8px; modes 6-7: 20 chars × 16px).
+When TAGS (the GTIA's PF-TAG-ROW) is non-NIL, also record each output
+column's playfield source tag for P/M priority arbitration.
 
 A character row has at most two colors — the glyph-on color and the
 glyph-off color — both fixed per character: modes 2/3 pick them from
@@ -197,7 +237,8 @@ implementations.)"
            (type fixnum pf-base scan-y)
            (type (unsigned-byte 16) screen-ptr)
            (type (unsigned-byte 8) mode chbase)
-           (type bus bus))
+           (type bus bus)
+           (type (or null (simple-array (unsigned-byte 8) (384))) tags))
   (let* ((wide-p    (or (= mode 6) (= mode 7)))
          (attr-p    (or (= mode 2) (= mode 3)))
          (n-chars   (if wide-p 20 40))
@@ -221,32 +262,50 @@ implementations.)"
                             (case (ldb (byte 2 6) ch)
                               (0 colpf0) (1 colpf1) (2 colpf2) (t colpf3))))
              (off-color (if inv-p colpf2 colbk))
+             ;; Source tags mirror the color choice (inverse video's
+             ;; glyph-on pixels really are background-sourced, etc.).
+             (on-tag    (if attr-p
+                            (cond (inv-p +tag-bak+)
+                                  (alt-p +tag-pf1+)
+                                  (t     +tag-pf2+))
+                            (+ +tag-pf0+ (ldb (byte 2 6) ch))))
+             (off-tag   (if inv-p +tag-pf2+ +tag-bak+))
              (on-r  (atari-color->r on-color))
              (on-g  (atari-color->g on-color))
              (on-b  (atari-color->b on-color))
              (off-r (atari-color->r off-color))
              (off-g (atari-color->g off-color))
              (off-b (atari-color->b off-color))
-             (p     (+ pf-base (* cx px-per-ch 3))))
-        (declare (type fixnum p))
+             (p     (+ pf-base (* cx px-per-ch 3)))
+             (tx    (+ +playfield-left-border+ (* cx px-per-ch))))
+        (declare (type fixnum p tx))
         (dotimes (bx 8)
-          (multiple-value-bind (r g b)
+          (multiple-value-bind (r g b tag)
               (if (logbitp (- 7 bx) bits)
-                  (values on-r on-g on-b)
-                  (values off-r off-g off-b))
+                  (values on-r on-g on-b on-tag)
+                  (values off-r off-g off-b off-tag))
             (setf (aref fb p)       r
                   (aref fb (+ p 1)) g
                   (aref fb (+ p 2)) b)
+            (when tags (setf (aref tags tx) tag))
             (incf p 3)
+            (incf tx)
             ;; Wide-char modes: each glyph bit covers 2 output pixels.
             (when wide-p
               (setf (aref fb p)       r
                     (aref fb (+ p 1)) g
                     (aref fb (+ p 2)) b)
-              (incf p 3))))))))
+              (when tags (setf (aref tags tx) tag))
+              (incf p 3)
+              (incf tx))))))))
 
-(defun %render-bitmap-mode (fb pf-base screen-ptr mode gtia-wr bus)
+(defun %render-bitmap-mode (fb pf-base screen-ptr mode gtia-wr bus
+                            &optional tags)
   "Render map (bitmap) modes 8-F into PF-BASE columns of FB.
+When TAGS (the GTIA's PF-TAG-ROW) is non-NIL, also record each output
+column's playfield source tag for P/M priority arbitration (2bpp pixel
+values 0-3 map directly to tags BAK/PF0/PF1/PF2; 1bpp set pixels are
+PF0, except mode F's which are PF2).
 
 Geometry follows real hardware: each mode line consumes
 BYTES-PER-SCREEN-ROW bytes (the shared ANTIC table — 10 for modes 8-9,
@@ -272,7 +331,8 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
            (type fixnum pf-base)
            (type (unsigned-byte 16) screen-ptr)
            (type (unsigned-byte 8) mode)
-           (type bus bus))
+           (type bus bus)
+           (type (or null (simple-array (unsigned-byte 8) (384))) tags))
   (let ((colbk  (aref gtia-wr +w-colbk+))
         (colpf0 (aref gtia-wr +w-colpf0+))
         (colpf1 (aref gtia-wr (+ +w-colpf0+ 1)))
@@ -287,7 +347,10 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
                      (color (if (zerop v) colbk colpf2))
                      (out-x (+ (* bx 8) bit))
                      (p     (+ pf-base (* out-x 3))))
-                (%write-rgb fb p color)))))
+                (%write-rgb fb p color)
+                (when tags
+                  (setf (aref tags (+ +playfield-left-border+ out-x))
+                        (if (zerop v) +tag-bak+ +tag-pf2+)))))))
         ;; Modes 8-E: generic scaled decode from the shared byte table.
         (let* ((nbytes      (bytes-per-screen-row mode))
                (two-bpp-p   (case mode ((8 10 13 14) t) (t nil)))
@@ -299,31 +362,38 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
             (let ((byte (atari800-cl.bus:bus-read
                          bus (ldb (byte 16 0) (+ screen-ptr bx)))))
               (dotimes (px px-per-byte)
-                (let* ((color (if two-bpp-p
-                                  (case (ldb (byte 2 (- 6 (* px 2))) byte)
+                (multiple-value-bind (color tag)
+                    (if two-bpp-p
+                        ;; 2bpp: pixel value = tag value (BAK/PF0/PF1/PF2).
+                        (let ((bits (ldb (byte 2 (- 6 (* px 2))) byte)))
+                          (values (case bits
                                     (0 colbk) (1 colpf0) (2 colpf1) (t colpf2))
-                                  (if (zerop (ldb (byte 1 (- 7 px)) byte))
-                                      colbk
-                                      colpf0)))
-                       (out-x (* (+ (* bx px-per-byte) px) scale))
-                       (p     (+ pf-base (* out-x 3))))
-                  (dotimes (dp scale)
-                    (%write-rgb fb (+ p (* dp 3)) color))))))))))
+                                  bits))
+                        (if (zerop (ldb (byte 1 (- 7 px)) byte))
+                            (values colbk  +tag-bak+)
+                            (values colpf0 +tag-pf0+)))
+                  (let* ((out-x (* (+ (* bx px-per-byte) px) scale))
+                         (p     (+ pf-base (* out-x 3))))
+                    (dotimes (dp scale)
+                      (%write-rgb fb (+ p (* dp 3)) color)
+                      (when tags
+                        (setf (aref tags (+ +playfield-left-border+ out-x dp))
+                              tag))))))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Player/missile compositing
 
-(defun %paint-pm-span (fb row-base hpos px-w graf nbits color)
-  "Paint one P/M object's graphics bits into the row at byte offset
-ROW-BASE.  GRAF's NBITS bits are read MSB-first; each SET bit paints
-PX-W/NBITS consecutive output columns in COLOR, starting at framebuffer
-column HPOS*2 - 64 (HPOS 0 is off-screen left, HPOS 128 is center —
-the same mapping the per-pixel arbitration used).  Columns outside
-0-383 are clipped.  Clear bits paint nothing, so lower-priority objects
-already painted underneath show through, exactly like hardware."
-  (declare (type (simple-array (unsigned-byte 8) (*)) fb)
-           (type fixnum row-base px-w nbits)
-           (type (unsigned-byte 8) hpos graf color))
+(defun %mark-pm-span (pm-row hpos px-w graf nbits chan-bit min-x max-x)
+  "Mark one P/M object's coverage into PM-ROW (the GTIA's PM-MASK-ROW).
+GRAF's NBITS bits are read MSB-first; each SET bit ORs CHAN-BIT into
+PX-W/NBITS consecutive columns, starting at framebuffer column
+HPOS*2 - 64 (HPOS 0 is off-screen left, HPOS 128 is center).  Columns
+outside 0-383 are clipped.  Returns (VALUES MIN-X MAX-X) updated with
+the extent actually marked, so the arbitration pass can skip untouched
+columns."
+  (declare (type (simple-array (unsigned-byte 8) (384)) pm-row)
+           (type fixnum px-w nbits chan-bit min-x max-x)
+           (type (unsigned-byte 8) hpos graf))
   (let ((left         (- (* hpos 2) 64))
         (cols-per-bit (truncate px-w nbits)))
     (declare (type fixnum left cols-per-bit))
@@ -335,72 +405,140 @@ already painted underneath show through, exactly like hardware."
             (let ((x (+ x0 d)))
               (declare (type fixnum x))
               (when (and (>= x 0) (< x +framebuffer-width+))
-                (%write-rgb fb (+ row-base (* x 3)) color)))))))))
+                (setf (aref pm-row x) (logior (aref pm-row x) chan-bit))
+                (when (< x min-x) (setf min-x x))
+                (when (> x max-x) (setf max-x x))))))))
+    (values min-x max-x)))
 
-(defun %render-pm-layer (fb row-base prior gtia-wr)
-  "Composite player/missile graphics over the already-rendered playfield row.
+(defun %paint-fifth-player-missile (fb row-base tags hpos px-w graf colpf3)
+  "Paint one missile's pixels as PLAYFIELD 3 (the PRIOR bit-4 fifth
+player): each of GRAF's 2 bits paints PX-W/2 columns with COLPF3 and
+records tag PF3, so subsequent player arbitration treats the pixels
+exactly like playfield 3 — the atari800 model of 'the fifth player has
+playfield 3's priority'."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb)
+           (type (simple-array (unsigned-byte 8) (384)) tags)
+           (type fixnum row-base px-w)
+           (type (unsigned-byte 8) hpos graf colpf3))
+  (let ((left         (- (* hpos 2) 64))
+        (cols-per-bit (truncate px-w 2)))
+    (declare (type fixnum left cols-per-bit))
+    (dotimes (bit 2)
+      (when (logbitp (- 1 bit) graf)
+        (let ((x0 (+ left (* bit cols-per-bit))))
+          (declare (type fixnum x0))
+          (dotimes (d cols-per-bit)
+            (let ((x (+ x0 d)))
+              (declare (type fixnum x))
+              (when (and (>= x 0) (< x +framebuffer-width+))
+                (setf (aref tags x) +tag-pf3+)
+                (%write-rgb fb (+ row-base (* x 3)) colpf3)))))))))
 
-When PRIOR bit 1 is clear (the common case), P/M objects draw on top of
-the playfield.  When bit 1 is set, playfield colors take priority; we
-leave existing playfield pixels untouched (full multi-layer priority is
-ROADMAP.md Phase 6b).
+(defun %render-pm-layer (fb row-base prior gtia)
+  "Composite player/missile graphics over the already-rendered playfield
+row with the full PRIOR priority model (ROADMAP.md Phase 6b).
 
-Span-based: each enabled object paints its own <= 32-column span
-directly, painted lowest-priority first (missiles M3 down to M0, then
-players P3 down to P0) so the highest-priority object's color lands on
-top — reproducing the old per-pixel arbitration exactly (players beat
-missiles, lower index beats higher; an object's CLEAR bits paint
-nothing, so whatever is underneath shows through).  The previous
-implementation instead asked, for every one of the 384 output columns,
-which of the 8 objects covers it: 92,160 non-inlined %PM-PIXEL-COLOR
-calls per frame that re-read every object's loop-invariant HPOS/SIZE/
-GRAF registers per pixel — measured at 52% (SBCL) to 67% (LispWorks)
-of a display frame's entire cost with no P/M objects enabled.  A row
-whose GRAFP0-3/GRAFM are all zero now exits after five register reads.
+PRIOR bits 0-3 select the priority ordering between player channels and
+playfield sources — see +PM-BEATS-PF-MASKS+ for the four orderings.
+Exactly one bit is normally set; when several are set the lowest wins
+here, and when none are set the bit-0 ordering (P/M on top) is used.
+Real GTIA produces color-merged/black conflict colors in those two
+cases — a documented simplification.
 
-Object geometry (unchanged): player = 8 GRAFPn bits over 8/16/32
-columns (SIZEPn 1/2/4); missile m = 2 GRAFM bits (bits 7-2m, 6-2m) over
-2/4/8/16 columns (its 2-bit field in SIZEM); missile m is colored
-COLPMm."
-  (declare (type (simple-array (unsigned-byte 8) (*)) fb gtia-wr)
+Missile m normally has player m's priority and COLPMm's color, so its
+coverage is simply merged into channel m.  PRIOR bit 4 (fifth player)
+instead paints all four missiles as PLAYFIELD 3 — COLPF3 color, PF3
+source tag — before player arbitration, giving them exactly playfield
+3's priority (the atari800 model).  PRIOR bit 5 (multicolor players)
+ORs the color registers where P0/P1 overlap (and P2/P3 likewise).
+PRIOR bits 6-7 select the GTIA color modes:
+;; Phase 7: GTIA modes 9/10/11 hook in at the RENDER-SCANLINE level.
+
+Mechanics: enabled objects mark their coverage into the GTIA's
+PM-MASK-ROW scratch (one channel bit per column, bounded extent), then
+one arbitration pass over the marked extent resolves, per column, the
+highest-priority present channel against the playfield source tag the
+playfield renderers recorded in PF-TAG-ROW.  RENDER-SCANLINE only calls
+this (and only maintains the tag row) when some GRAF register is
+non-zero, so rows without P/M objects — the common case — cost nothing
+beyond that check."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb)
            (type (unsigned-byte 8) prior)
-           (type fixnum row-base))
-  (let ((pf-over-pm (logtest prior #x02)))
-    (unless pf-over-pm
-      (let ((grafp0 (aref gtia-wr +w-grafp0+))
-            (grafp1 (aref gtia-wr (+ +w-grafp0+ 1)))
-            (grafp2 (aref gtia-wr (+ +w-grafp0+ 2)))
-            (grafp3 (aref gtia-wr (+ +w-grafp0+ 3)))
-            (grafm  (aref gtia-wr +w-grafm+)))
-        ;; Row-level early-out: nothing to composite (the overwhelmingly
-        ;; common case for software that never touches P/M graphics).
-        (when (plusp (logior grafp0 grafp1 grafp2 grafp3 grafm))
-          ;; Missiles first — lowest priority — M3 down to M0.
-          (when (plusp grafm)
-            (let ((sizem (aref gtia-wr +w-sizem+)))
-              (loop for m fixnum from 3 downto 0
-                    do (let ((bits (ldb (byte 2 (- 6 (* m 2))) grafm)))
-                         (when (plusp bits)
-                           (%paint-pm-span fb row-base
-                                           (aref gtia-wr (+ +w-hposm0+ m))
-                                           (case (ldb (byte 2 (* m 2)) sizem)
-                                             (0 2) (1 4) (2 8) (t 16))
-                                           bits 2
-                                           (aref gtia-wr (+ +w-colpm0+ m))))))))
-          ;; Players P3 down to P0 — P0 painted last, so it wins overlaps.
-          (flet ((paint-player (p grafp)
-                   (declare (type fixnum p) (type (unsigned-byte 8) grafp))
-                   (when (plusp grafp)
-                     (%paint-pm-span fb row-base
-                                     (aref gtia-wr (+ +w-hposp0+ p))
-                                     (case (aref gtia-wr (+ +w-sizep0+ p))
-                                       (2 16) (4 32) (t 8))
-                                     grafp 8
-                                     (aref gtia-wr (+ +w-colpm0+ p))))))
-            (paint-player 3 grafp3)
-            (paint-player 2 grafp2)
-            (paint-player 1 grafp1)
-            (paint-player 0 grafp0)))))))
+           (type fixnum row-base)
+           (type gtia gtia))
+  (let* ((wr     (gtia-write-regs gtia))
+         (tags   (gtia-pf-tag-row gtia))
+         (pm     (gtia-pm-mask-row gtia))
+         (grafp0 (aref wr +w-grafp0+))
+         (grafp1 (aref wr (+ +w-grafp0+ 1)))
+         (grafp2 (aref wr (+ +w-grafp0+ 2)))
+         (grafp3 (aref wr (+ +w-grafp0+ 3)))
+         (grafm  (aref wr +w-grafm+)))
+    (when (plusp (logior grafp0 grafp1 grafp2 grafp3 grafm))
+      (let ((fifth-p (logtest prior #x10))
+            (multi-p (logtest prior #x20))
+            (srow    (cond ((logtest prior #x01) 0)
+                           ((logtest prior #x02) 1)
+                           ((logtest prior #x04) 2)
+                           ((logtest prior #x08) 3)
+                           (t 0)))
+            (min-x   +framebuffer-width+)
+            (max-x   -1))
+        (declare (type fixnum srow min-x max-x))
+        (fill pm 0)
+        ;; Missiles: as the fifth player they become playfield 3 pixels
+        ;; right now; otherwise their coverage joins player channel m.
+        (when (plusp grafm)
+          (let ((sizem (aref wr +w-sizem+)))
+            (dotimes (m 4)
+              (let ((bits (ldb (byte 2 (- 6 (* m 2))) grafm))
+                    (px-w (case (ldb (byte 2 (* m 2)) sizem)
+                            (0 2) (1 4) (2 8) (t 16))))
+                (when (plusp bits)
+                  (if fifth-p
+                      (%paint-fifth-player-missile
+                       fb row-base tags
+                       (aref wr (+ +w-hposm0+ m)) px-w bits
+                       (aref wr (+ +w-colpf0+ 3)))
+                      (multiple-value-setq (min-x max-x)
+                        (%mark-pm-span pm (aref wr (+ +w-hposm0+ m))
+                                       px-w bits 2 (ash 1 m)
+                                       min-x max-x))))))))
+        ;; Players: mark coverage per channel.
+        (flet ((mark-player (p grafp)
+                 (declare (type fixnum p) (type (unsigned-byte 8) grafp))
+                 (when (plusp grafp)
+                   (multiple-value-setq (min-x max-x)
+                     (%mark-pm-span pm (aref wr (+ +w-hposp0+ p))
+                                    (case (aref wr (+ +w-sizep0+ p))
+                                      (2 16) (4 32) (t 8))
+                                    grafp 8 (ash 1 p)
+                                    min-x max-x)))))
+          (mark-player 0 grafp0)
+          (mark-player 1 grafp1)
+          (mark-player 2 grafp2)
+          (mark-player 3 grafp3))
+        ;; Arbitration pass over the marked extent.
+        (loop for x fixnum from min-x to max-x
+              do (let ((mask (aref pm x)))
+                   (unless (zerop mask)
+                     (let* ((chan  (cond ((logtest mask #x01) 0)
+                                         ((logtest mask #x02) 1)
+                                         ((logtest mask #x04) 2)
+                                         (t 3)))
+                            (beats (aref +pm-beats-pf-masks+ srow chan)))
+                       (when (logbitp (aref tags x) beats)
+                         (let ((color (aref wr (+ +w-colpm0+ chan))))
+                           ;; Multicolor: overlapping P0/P1 (P2/P3) OR
+                           ;; their color registers.
+                           (when multi-p
+                             (cond ((and (= chan 0) (logtest mask #x02))
+                                    (setf color (logior color
+                                                        (aref wr (+ +w-colpm0+ 1)))))
+                                   ((and (= chan 2) (logtest mask #x08))
+                                    (setf color (logior color
+                                                        (aref wr (+ +w-colpm0+ 3)))))))
+                           (%write-rgb fb (+ row-base (* x 3)) color)))))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Top-level scanline renderer
@@ -434,7 +572,17 @@ taken at the start of the scanline before any end-of-line advancement)."
          (scan-y  (antic-scan-y antic))
          (sptr    (antic-render-screen-data-ptr antic))
          (row-base (* row +framebuffer-width+ 3))
-         (pf-base (+ row-base (* +playfield-left-border+ 3))))
+         (pf-base (+ row-base (* +playfield-left-border+ 3)))
+         ;; P/M compositing (and therefore the playfield source-tag row
+         ;; it arbitrates against) is only needed when some GRAF register
+         ;; is non-zero; rows without P/M objects skip all tag work.
+         (pm-active-p (plusp (logior (aref wr +w-grafp0+)
+                                     (aref wr (+ +w-grafp0+ 1))
+                                     (aref wr (+ +w-grafp0+ 2))
+                                     (aref wr (+ +w-grafp0+ 3))
+                                     (aref wr +w-grafm+))))
+         (tags    (and pm-active-p (gtia-pf-tag-row gtia))))
+    (when tags (fill tags +tag-bak+))
     ;; Steps 1+2: background + playfield.  The playfield renderers write
     ;; ALL 320 active columns themselves, so when one will run, only the
     ;; two 32-column borders need the background flood — flooding the
@@ -449,9 +597,10 @@ taken at the start of the scanline before any end-of-line advancement)."
                       +playfield-left-border+ +playfield-pixel-width+)
                    colbk)
        (if (<= mode 7)
-           (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase)
-           (%render-bitmap-mode fb pf-base sptr mode wr bus)))
+           (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase tags)
+           (%render-bitmap-mode fb pf-base sptr mode wr bus tags)))
       (t
        (%fill-row fb row-base colbk)))
-    ;; Step 3: player/missile compositing.
-    (%render-pm-layer fb row-base prior wr)))
+    ;; Step 3: player/missile compositing (full PRIOR arbitration).
+    (when pm-active-p
+      (%render-pm-layer fb row-base prior gtia))))

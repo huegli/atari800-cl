@@ -89,12 +89,31 @@ Slots:
                here so debuggers / tests can inspect software's writes.
   READ-REGS  — 32-byte array returned by GTIA-READ.  Collision latches
                live in offsets 0-15; triggers, PAL, and CONSOL provide
-               the inputs."
+               the inputs.
+  PF-TAG-ROW — 384-byte renderer scratch: which playfield source
+               produced each output column of the scanline being
+               rendered (0 = BAK, 1-4 = PF0-PF3).  On real hardware
+               ANTIC sends GTIA playfield color NUMBERS and GTIA does
+               the priority mux, so GTIA owning this row is the
+               software analogue; it also keeps concurrent machines
+               isolated (one renderer runs per machine/thread).
+               Filled by the playfield renderers and consumed by
+               %RENDER-PM-LAYER within one RENDER-SCANLINE call — only
+               valid when P/M objects are active on the row.
+  PM-MASK-ROW — 384-byte renderer scratch: per-column bitmask of which
+               P/M channels (bit p = player p / missile p) cover the
+               column.  Same lifetime as PF-TAG-ROW."
   (write-regs (make-array 32 :element-type '(unsigned-byte 8)
                              :initial-element 0)
               :type (simple-array (unsigned-byte 8) (32)))
   (read-regs  (%make-gtia-read-regs)
               :type (simple-array (unsigned-byte 8) (32)))
+  (pf-tag-row (make-array 384 :element-type '(unsigned-byte 8)
+                              :initial-element 0)
+              :type (simple-array (unsigned-byte 8) (384)))
+  (pm-mask-row (make-array 384 :element-type '(unsigned-byte 8)
+                               :initial-element 0)
+               :type (simple-array (unsigned-byte 8) (384)))
   ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, the
   ;; TRIG0..3 and CONSOL read offsets reflect live input instead of the
   ;; static read-regs defaults.
