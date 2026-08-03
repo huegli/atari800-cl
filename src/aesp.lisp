@@ -24,7 +24,15 @@
 ;;;;   CONSOLE_KEYS   : [bits] bits: 0 start,1 select,2 option.
 ;;;;   PADDLE         : [port][value].
 ;;;;   FRAME_CONFIG   : width(u16) height(u16) bpp(u8) fps(u8) = 384,240,4,60.
-;;;;   AUDIO_CONFIG   : sample-rate(u32) bits(u8) channels(u8) = 44100,8,1.
+;;;;   AUDIO_CONFIG   : sample-rate(u32) bits(u8) channels(u8) = 44744,8,1.
+;;;;   AUDIO_PCM      : raw mono unsigned-8 samples; the payload length IS
+;;;;                    the sample count (746-747 per NTSC frame at
+;;;;                    44,744 Hz).  Pushed once per emulated frame from
+;;;;                    the same post-frame hook as VIDEO_FRAME, so the
+;;;;                    Nth AUDIO_PCM and the Nth VIDEO_FRAME describe the
+;;;;                    same frame — that 1:1 pairing is what A/V capture
+;;;;                    relies on for sync, since the payload carries no
+;;;;                    frame number of its own.
 
 (in-package #:atari800-cl.aesp)
 
@@ -56,6 +64,11 @@
   (defconstant +aesp-frame-config+      #x62)
   (defconstant +aesp-video-subscribe+   #x63)
   (defconstant +aesp-video-unsubscribe+ #x64)
+  ;; AUDIO_PCM is the protocol's own code for a PCM push (0x80 in
+  ;; tools/protocol-comparison/protocol_spec.py's AESP_MESSAGES table);
+  ;; ROADMAP.md Phase 10 offered #x85 only as a fallback for the case
+  ;; where the protocol did NOT define one, so the spec's code wins.
+  (defconstant +aesp-audio-pcm+         #x80)  ; server-push: mono u8 samples
   (defconstant +aesp-audio-config+      #x81)
   (defconstant +aesp-audio-subscribe+   #x83)
   (defconstant +aesp-audio-unsubscribe+ #x84)
@@ -181,9 +194,13 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
     b))
 
 (defun %audio-config-payload ()
-  "AUDIO_CONFIG: sample-rate(u32) bits(u8) channels(u8) = 44100,8,1."
+  "AUDIO_CONFIG: sample-rate(u32) bits(u8) channels(u8) = 44744,8,1.
+The rate is the synthesiser's actual output rate (ATARI800-CL.AUDIO's
++AUDIO-SAMPLE-RATE+ — the 1.79 MHz CPU clock / 40), not the 44,100 this
+declared before there were samples to describe.  Wire layout is
+unchanged."
   (let ((b (%make-octets 6)))
-    (%u32-be b 0 44100)
+    (%u32-be b 0 atari800-cl.audio:+audio-sample-rate+)
     (setf (aref b 4) 8 (aref b 5) 1)
     b))
 
@@ -222,7 +239,12 @@ the bound port numbers (useful when started on ephemeral port 0).
 Extra slots for rendering:
   FRAMEBUFFER   — 384×240 24-bit RGB pixel array written by the scanline
                   callback and pushed to VIDEO-CLIENTS after each frame.
-  VIDEO-CLIENTS — connections on the video port; frame data is pushed here."
+  VIDEO-CLIENTS — connections on the video port; frame data is pushed here.
+  AUDIO-CLIENTS — connections on the audio port; PCM is pushed here.
+  AUDIO-UNIT    — the AUDIO-UNIT attached to the machine while at least
+                  one audio client is connected, else NIL.  Only the
+                  emulator thread reads or writes it (see
+                  %SYNC-AUDIO-ATTACHMENT)."
   machine
   host
   control-listener video-listener audio-listener
@@ -232,7 +254,9 @@ Extra slots for rendering:
   (clients       '())
   (running       t)
   (framebuffer   nil)
-  (video-clients '()))
+  (video-clients '())
+  (audio-clients '())
+  (audio-unit    nil))
 
 (defun %add-thread (server th)
   (with-lock ((aesp-server-lock server)) (push th (aesp-server-threads server)))
@@ -253,6 +277,57 @@ Extra slots for rendering:
   (with-lock ((aesp-server-lock server))
     (setf (aesp-server-video-clients server)
           (remove conn (aesp-server-video-clients server)))))
+
+(defun %register-audio-client (server conn)
+  (with-lock ((aesp-server-lock server))
+    (push conn (aesp-server-audio-clients server))))
+
+(defun %unregister-audio-client (server conn)
+  (with-lock ((aesp-server-lock server))
+    (setf (aesp-server-audio-clients server)
+          (remove conn (aesp-server-audio-clients server)))))
+
+(defun %sync-audio-attachment (server machine have-clients-p)
+  "Attach an audio unit to MACHINE while audio clients are connected and
+detach it when the last one leaves, so machines nobody is listening to
+do not pay for synthesis.
+
+Called ONLY from the post-frame hook, i.e. on the emulator thread.
+ROADMAP.md Phase 10 sketched doing this in the subscribe/unsubscribe
+path under the server lock, but the acceptor and reader threads must
+never touch the machine directly — that is the whole point of the
+command mailbox — and a MACHINE-SUBMIT from an acceptor would deadlock
+whenever no run loop is draining.  Deferring the decision to the
+emulator thread is race-free and needs no lock at all; the cost is that
+synthesis starts at the end of the frame during which the first client
+connected, so that client's first PCM push arrives one frame later."
+  (let ((unit (aesp-server-audio-unit server)))
+    (cond
+      ((and have-clients-p (null unit))
+       (setf (aesp-server-audio-unit server) (machine-attach-audio machine)))
+      ((and (not have-clients-p) unit)
+       (machine-attach-audio machine nil)
+       (setf (aesp-server-audio-unit server) nil)))))
+
+(defun %push-audio-frame (server machine)
+  "Drain the machine's accumulated PCM and send it to every audio-port
+client as one AUDIO_PCM message (payload = the raw mono u8 samples).
+Called on the emulator thread from ATARI-MACHINE-POST-FRAME-FN, right
+after %PUSH-VIDEO-FRAME, so the Nth AUDIO_PCM pairs with the Nth
+VIDEO_FRAME.  Clients that error during the write are silently dropped."
+  (let ((clients (with-lock ((aesp-server-lock server))
+                   (copy-list (aesp-server-audio-clients server)))))
+    (%sync-audio-attachment server machine (and clients t))
+    (when clients
+      (let ((samples (machine-audio-drain machine)))
+        ;; Empty on the frame synthesis was switched on: nothing to send.
+        (when (plusp (length samples))
+          (dolist (conn clients)
+            (handler-case
+                (write-aesp-message (tcp-stream conn) +aesp-audio-pcm+ samples)
+              (error ()
+                (%unregister-audio-client server conn)
+                (ignore-errors (tcp-close conn))))))))))
 
 (defun %push-video-frame (server machine)
   "Encode and send the current framebuffer to all video-port clients.
@@ -326,9 +401,10 @@ on EOF / closed socket / any stream error."
                  (%handle-control server stream type payload))))
          (end-of-file () nil)
          (error () nil))
-    (if (eq kind :video)
-        (%unregister-video-client server conn)
-        (%unregister-client server conn))
+    (case kind
+      (:video (%unregister-video-client server conn))
+      (:audio (%unregister-audio-client server conn))
+      (t      (%unregister-client server conn)))
     (tcp-close conn)))
 
 (defun %aesp-acceptor (server listener kind)
@@ -340,9 +416,10 @@ ends the loop."
                   (error () (return)))))
       (cond
         ((not (aesp-server-running server)) (tcp-close conn) (return))
-        (t (if (eq kind :video)
-               (%register-video-client server conn)
-               (%register-client server conn))
+        (t (case kind
+             (:video (%register-video-client server conn))
+             (:audio (%register-audio-client server conn))
+             (t      (%register-client server conn)))
            (%add-thread server
              (make-thread (lambda () (%aesp-reader server conn (tcp-stream conn) kind))
                           :name (format nil "aesp-~(~A~)-reader" kind))))))))
@@ -387,7 +464,9 @@ AESP-SERVER-*-PORT accessors)."
                            (atari-machine-gtia m)
                            (atari-machine-bus  m)))))))
             (setf (atari-machine-post-frame-fn machine)
-                  (lambda (m) (%push-video-frame server m)))
+                  (lambda (m)
+                    (%push-video-frame server m)
+                    (%push-audio-frame server m)))
             (%add-thread server (make-thread (lambda () (%aesp-acceptor server cl :control))
                                              :name "aesp-control-acceptor"))
             (%add-thread server (make-thread (lambda () (%aesp-acceptor server vl :video))
@@ -406,15 +485,24 @@ client connections (unblocking the readers), then join the threads, forcibly
 destroying any that outlive TIMEOUT seconds.  Returns SERVER."
   (setf (aesp-server-running server) nil)
   ;; Clear machine callbacks so the server struct is no longer referenced
-  ;; from the machine after stop.
+  ;; from the machine after stop.  Detach audio too: nothing will drain it
+  ;; once the post-frame hook is gone, so leaving it attached would make
+  ;; the machine synthesise into a buffer that only grows.  Both happen
+  ;; here rather than on the emulator thread because the callbacks are
+  ;; already cleared, so no frame can be mid-push.
   (setf (atari-machine-scanline-fn   (aesp-server-machine server)) nil
         (atari-machine-post-frame-fn (aesp-server-machine server)) nil)
+  (when (aesp-server-audio-unit server)
+    (machine-attach-audio (aesp-server-machine server) nil)
+    (setf (aesp-server-audio-unit server) nil))
   (tcp-close (aesp-server-control-listener server))
   (tcp-close (aesp-server-video-listener server))
   (tcp-close (aesp-server-audio-listener server))
   (dolist (conn (copy-list (aesp-server-clients server)))
     (tcp-close conn))
   (dolist (conn (copy-list (aesp-server-video-clients server)))
+    (ignore-errors (tcp-close conn)))
+  (dolist (conn (copy-list (aesp-server-audio-clients server)))
     (ignore-errors (tcp-close conn)))
   (let ((deadline (+ (get-internal-real-time)
                      (truncate (* timeout internal-time-units-per-second)))))

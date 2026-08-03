@@ -544,6 +544,7 @@
            #:+aesp-console-keys+ #:+aesp-paddle+
            #:+aesp-frame-config+ #:+aesp-video-subscribe+ #:+aesp-video-unsubscribe+
            #:+aesp-video-frame+
+           #:+aesp-audio-pcm+
            #:+aesp-audio-config+ #:+aesp-audio-subscribe+ #:+aesp-audio-unsubscribe+
            #:+aesp-err-server-busy+ #:+aesp-err-not-implemented+
            ;; Server

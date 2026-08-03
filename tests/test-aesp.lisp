@@ -33,6 +33,23 @@
     (is (= 11 (length bytes)))
     (is (equalp (%octets #xAE #x50 #x01 #x06 #x00 #x00 #x00 #x03 1 2 3) bytes))))
 
+(test aesp-audio-pcm-uses-the-protocol-code-and-raw-sample-payload
+  "AUDIO_PCM is the protocol's own 0x80 (protocol_spec.py's AESP_MESSAGES
+table), and its payload is raw mono u8 samples with no prefix — the
+payload length IS the sample count."
+  (is (= #x80 atari800-cl.aesp:+aesp-audio-pcm+)
+      "AUDIO_PCM must use the protocol's code, not a locally invented one")
+  (let ((samples (make-array 747 :element-type '(unsigned-byte 8))))
+    (dotimes (i 747)
+      (setf (aref samples i) (mod (* i 7) 256)))
+    (let ((bytes (atari800-cl.aesp:encode-aesp-message
+                  atari800-cl.aesp:+aesp-audio-pcm+ samples)))
+      (multiple-value-bind (type len) (atari800-cl.aesp:decode-aesp-header bytes)
+        (is (= atari800-cl.aesp:+aesp-audio-pcm+ type))
+        (is (= 747 len) "payload length must equal the sample count"))
+      (is (equalp samples (subseq bytes atari800-cl.aesp:+aesp-header-size+))
+          "the payload must be the samples verbatim"))))
+
 (test aesp-decode-header-roundtrip
   "DECODE-AESP-HEADER recovers the type and length ENCODE put in."
   (let ((bytes (atari800-cl.aesp:encode-aesp-message #x44 (%octets 9 9 9 9 9))))
@@ -165,14 +182,85 @@ the machine to running."
 
 (test aesp-server-subscribe-replies-config
   "VIDEO_SUBSCRIBE returns FRAME_CONFIG (384,240,24,60); AUDIO_SUBSCRIBE
-returns AUDIO_CONFIG (44100,8,1)."
+returns AUDIO_CONFIG (44744,8,1) — the synthesiser's real rate, $0000AEC8,
+not the 44,100 declared before there were samples to describe."
   (with-aesp-server (m srv s)
     (multiple-value-bind (ty pl) (%aesp-request s atari800-cl.aesp:+aesp-video-subscribe+)
       (is (= atari800-cl.aesp:+aesp-frame-config+ ty))
       (is (equalp (%octets #x01 #x80 #x00 #xF0 #x18 #x3C) pl)))
     (multiple-value-bind (ty pl) (%aesp-request s atari800-cl.aesp:+aesp-audio-subscribe+)
       (is (= atari800-cl.aesp:+aesp-audio-config+ ty))
-      (is (equalp (%octets #x00 #x00 #xAC #x44 #x08 #x01) pl)))))
+      (is (equalp (%octets #x00 #x00 #xAE #xC8 #x08 #x01) pl))
+      (is (= atari800-cl.audio:+audio-sample-rate+
+             (logior (ash (aref pl 0) 24) (ash (aref pl 1) 16)
+                     (ash (aref pl 2) 8)  (aref pl 3)))
+          "the declared rate must be the synthesiser's actual rate"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Audio streaming (ROADMAP.md Phase 10)
+
+(defun %run-frames-via-mailbox (machine n)
+  "Run N frames on the emulator thread through the command mailbox."
+  (dotimes (i n)
+    (atari800-cl.machine:machine-submit
+     machine (lambda (m) (atari800-cl.machine:machine-run-frame m)))))
+
+(test aesp-server-pushes-audio-pcm-to-audio-clients
+  "A client on the audio port receives one AUDIO_PCM per frame carrying a
+frame's worth of samples (746-747 at 44,744 Hz).  Synthesis is attached
+at the end of the frame during which the first client connects, so the
+first push arrives one frame later."
+  (with-aesp-server (m srv s)
+    (let* ((conn (atari800-cl.transport:tcp-connect
+                  "127.0.0.1" (atari800-cl.aesp:aesp-server-audio-port srv)))
+           (stream (atari800-cl.transport:tcp-stream conn)))
+      (unwind-protect
+           (progn
+             ;; Wait for the acceptor thread to register the connection.
+             (is-true (%wait-until
+                       (lambda ()
+                         (atari800-cl.aesp::aesp-server-audio-clients srv)))
+                      "the audio client must be registered before frames run")
+             ;; Frame 1 attaches synthesis; frames 2-3 carry samples.
+             (%run-frames-via-mailbox m 3)
+             (is-true (atari800-cl.aesp::aesp-server-audio-unit srv)
+                      "an audio unit must be attached while a client is connected")
+             (multiple-value-bind (ty pl) (atari800-cl.aesp:read-aesp-message stream)
+               (is (= atari800-cl.aesp:+aesp-audio-pcm+ ty)
+                   "expected AUDIO_PCM, got #x~2,'0X" ty)
+               (is (<= 746 (length pl) 747)
+                   "expected one frame of samples (746-747), got ~D" (length pl))))
+        (ignore-errors (atari800-cl.transport:tcp-close conn))))))
+
+(test aesp-server-without-audio-clients-does-not-synthesise
+  "With nobody listening on the audio port, no audio unit is attached and
+the machine accumulates no samples — synthesis costs nothing."
+  (with-aesp-server (m srv s)
+    (%run-frames-via-mailbox m 2)
+    (is-false (atari800-cl.aesp::aesp-server-audio-unit srv)
+              "no audio unit may be attached without a subscriber")
+    (is (zerop (length (atari800-cl.machine:machine-audio-drain m)))
+        "an unattached machine must accumulate no samples")))
+
+(test aesp-server-detaches-audio-when-last-client-leaves
+  "Closing the last audio client detaches synthesis again on the next
+frame, so a machine nobody is listening to stops paying for it."
+  (with-aesp-server (m srv s)
+    (let ((conn (atari800-cl.transport:tcp-connect
+                 "127.0.0.1" (atari800-cl.aesp:aesp-server-audio-port srv))))
+      (is-true (%wait-until
+                (lambda () (atari800-cl.aesp::aesp-server-audio-clients srv))))
+      (%run-frames-via-mailbox m 1)
+      (is-true (atari800-cl.aesp::aesp-server-audio-unit srv))
+      ;; Drop the client and let the reader thread unregister it.
+      (ignore-errors (atari800-cl.transport:tcp-close conn))
+      (is-true (%wait-until
+                (lambda ()
+                  (null (atari800-cl.aesp::aesp-server-audio-clients srv))))
+               "the reader thread must unregister a closed audio client")
+      (%run-frames-via-mailbox m 1)
+      (is-false (atari800-cl.aesp::aesp-server-audio-unit srv)
+                "the audio unit must be detached once the last client leaves"))))
 
 (test aesp-server-unknown-type-errors
   "An unknown message type yields ERROR with the not-implemented code."
