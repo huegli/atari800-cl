@@ -3,6 +3,48 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 10 — AESP audio streaming + WAV capture
+
+The synthesised PCM from Phase 9 now leaves the process.
+
+**Message type.**  ROADMAP.md offered `#x85` as a fallback "if the
+protocol defines no audio-frame type" — it does: `AUDIO_PCM` = `0x80`
+in `tools/protocol-comparison/protocol_spec.py`'s `AESP_MESSAGES`
+table, so that is what `+AESP-AUDIO-PCM+` uses.  Payload is raw mono
+unsigned-8 samples with no prefix, so the payload length IS the sample
+count (746-747 per frame).  Pushed from the same post-frame hook as
+VIDEO_FRAME, so the Nth AUDIO_PCM and the Nth VIDEO_FRAME describe the
+same frame — the 1:1 pairing Phase 11's muxing will rely on.
+
+**AUDIO_CONFIG** now declares the synthesiser's real rate, 44,744 Hz
+(`$0000AEC8`), instead of the 44,100 it claimed before there were any
+samples to describe.  Wire layout is unchanged.
+
+**Attachment lifecycle.**  Audio-port connections are tracked in a new
+`AUDIO-CLIENTS` list; synthesis is attached while at least one is
+connected and detached when the last leaves, so a machine nobody is
+listening to does not pay for it.  This deviates from the plan's
+"attach on first subscribe, guard with the server lock": acceptor and
+reader threads must never touch the machine directly (that is what the
+command mailbox is for), and a MACHINE-SUBMIT from an acceptor would
+deadlock whenever no run loop is draining.  Instead the post-frame
+hook — already on the emulator thread — reconciles the attachment each
+frame.  Race-free and lock-free; the cost is that synthesis switches on
+at the end of the frame during which the first client connects, so that
+client's first push arrives one frame later.  `STOP-AESP-SERVER`
+detaches too, since nothing would drain the buffer afterwards.
+
+**`scripts/capture-audio.py`** subscribes on the control port for
+AUDIO_CONFIG, collects N frames of AUDIO_PCM, and writes a WAV through
+Python's `wave` module.  Verified end to end against a real server
+voicing two POKEY channels.
+
+Tests: AUDIO_PCM codec roundtrip (including that the code is the
+protocol's 0x80 and that payload length equals sample count), the
+corrected AUDIO_CONFIG payload, and three live-server tests — PCM
+arrives with a frame's worth of samples, no unit is attached without a
+subscriber, and the unit is detached once the last client leaves.
+
 ## ROADMAP Phase 9 — POKEY audio synthesis core
 
 New `src/audio.lisp` / `atari800-cl.audio`, loaded between `pokey` and

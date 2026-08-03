@@ -46,7 +46,15 @@
 > (the maximum possible advance density: one advance per 2-cycle
 > instruction) and within noise everywhere else, via an interleaved
 > A/B against the pre-phase commit; see `PERFORMANCE_LOG.md`.
-> Phase 10 (AESP audio streaming + WAV capture) is next.
+> **Phase 10 done (2026-08-03)**: AUDIO_PCM streams over the AESP audio
+> port and `scripts/capture-audio.py` writes WAVs. Two deviations, both
+> deliberate: the message code is the protocol's own `0x80` (this
+> document's `#x85` was explicitly a fallback for "if the protocol
+> defines none" — `tools/protocol-comparison/protocol_spec.py` defines
+> `AUDIO_PCM` = `0x80`), and the attach/detach decision is made by the
+> post-frame hook on the emulator thread rather than in the
+> subscribe path under the server lock, because acceptor threads must
+> not touch the machine. Phase 11 (A/V recording tooling) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -112,7 +120,7 @@ and say so in the commit message.
 | 7     | GTIA modes 9/10/11                           | 6          | no       | done   |
 | 8     | POKEY timer fidelity                         | —          | no       | done   |
 | 9     | POKEY audio synthesis core                   | 8          | yes      | done   |
-| 10    | AESP audio streaming + WAV capture           | 9          | no       |
+| 10    | AESP audio streaming + WAV capture           | 9          | no       | done   |
 | 11    | A/V recording tooling (`record.sh` → mp4)    | 4, 10      | no       |
 | 12    | Tom Harte ProcessorTests harness             | —          | no       |
 

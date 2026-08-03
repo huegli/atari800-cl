@@ -52,6 +52,11 @@ What's implemented:
   compositing with PRIOR priority arbitration).  Completed frames are
   pushed to AESP video subscribers, and
   `scripts/capture-screenshot.py` saves PNG/PPM screenshots.
+- **Audio** — POKEY synthesises its four channels (poly4/5/9/17
+  distortions, volume-only mode) into mono 8-bit PCM at 44 744 Hz.
+  Frames are pushed to AESP audio subscribers as `AUDIO_PCM`, and
+  `scripts/capture-audio.py` saves WAVs.  Synthesis is attached only
+  while someone is listening.
 - **Host input** — a thread-safe input-state feeds live joystick,
   console-key, paddle, and keyboard values into PIA/GTIA/POKEY reads.
 - **Protocol servers** — AESP (binary, 3 TCP ports) and a CLI (text,
@@ -270,12 +275,15 @@ through to its BASIC prompt entirely from the REPL:
 ;; => (:irq-pending NIL :nmi-pending NIL :i-flag-masked T)
 ```
 
-The emulator runs headless: it opens no window and plays no sound.
-The built-in pixel renderer paints a 384×240 RGB framebuffer each
-frame, which AESP video subscribers receive as `VIDEO_FRAME` pushes;
-a downstream audio player can drive the machine with
-`MACHINE-RUN-FRAME` and read the program-visible POKEY register state
-directly after each frame.
+The emulator runs headless: it opens no window and plays no sound
+itself.  The built-in pixel renderer paints a 384×240 RGB framebuffer
+each frame, which AESP video subscribers receive as `VIDEO_FRAME`
+pushes, and POKEY synthesises mono 8-bit PCM which audio subscribers
+receive as `AUDIO_PCM` pushes.  In-process, attach synthesis with
+`a800:machine-attach-audio` and collect samples with
+`a800:machine-audio-drain` after each frame; to capture from outside,
+use `scripts/capture-audio.py` (WAV) and `scripts/capture-screenshot.py`
+(PNG/PPM).
 
 ## Raster effects (WSYNC)
 
@@ -325,8 +333,12 @@ to the machine's command mailbox and executed on the emulator thread.
 `KEY_DOWN`/`KEY_UP`/`JOYSTICK`/`CONSOLE_KEYS`/`PADDLE`→`ACK`;
 `VIDEO_SUBSCRIBE`→`FRAME_CONFIG` followed by per-frame `VIDEO_FRAME`
 pushes of the rendered 384×240 RGB framebuffer, and
-`AUDIO_SUBSCRIBE`→`AUDIO_CONFIG` (no PCM payloads yet); any other
-type → `ERROR`.
+`AUDIO_SUBSCRIBE`→`AUDIO_CONFIG` (44 744 Hz, 8-bit, mono) followed by
+per-frame `AUDIO_PCM` pushes of 746–747 raw mono samples to audio-port
+clients; any other type → `ERROR`.  The Nth `AUDIO_PCM` pairs with the
+Nth `VIDEO_FRAME` — both are pushed from the same post-frame hook, so
+A/V capture needs no timestamps.  Synthesis runs only while an audio
+client is connected.
 
 **CLI** (text).  Newline-terminated `CMD:<verb> [args]` requests yield
 `OK:<data>` or `ERR:<msg>` replies.  MVP verbs: `ping`, `version`,
@@ -341,7 +353,7 @@ printf 'CMD:ping\n' | nc -U /tmp/atari800-cl-$(pgrep -n sbcl).sock
 # => OK:pong
 ```
 
-Not yet implemented (both protocols): audio PCM payloads, `BOOT_FILE`,
+Not yet implemented (both protocols): `BOOT_FILE`, `AUDIO_SYNC`, and
 the debugger/disk/BASIC/state/screenshot command families.
 
 ## Project layout
@@ -368,7 +380,8 @@ atari800-cl/
 │   ├── bench-lispworks.sh
 │   ├── mads-build.sh        # assemble MADS sources to XEX
 │   ├── atari-run.sh         # run a XEX and capture a screenshot
-│   └── capture-screenshot.py # AESP video-frame → PNG/PPM
+│   ├── capture-screenshot.py # AESP video-frame → PNG/PPM
+│   └── capture-audio.py     # AESP AUDIO_PCM → WAV
 ├── src/
 │   ├── package.lisp         # all package definitions
 │   ├── compat.lisp          # LispWorks/SBCL portability layer (+ sockets)
@@ -417,11 +430,11 @@ atari800-cl/
 
 ## Known limitations
 
-- **Audio is synthesised but not streamed.** POKEY produces mono 8-bit
-  PCM at 44 744 Hz (`machine-attach-audio` / `machine-audio-drain`),
-  but nothing pushes it over AESP yet.  Not modelled inside the
-  synthesis: AUDCTL's two high-pass filters (bits 1-2), two-tone
-  serial mode, and real POKEY's non-linear volume/mixer curve.
+- **Audio synthesis is approximate.** POKEY produces mono 8-bit PCM at
+  44 744 Hz, streamed over AESP as `AUDIO_PCM`, but does not model
+  AUDCTL's two high-pass filters (bits 1-2), two-tone serial mode, or
+  real POKEY's non-linear volume/mixer curve (this mixer is linear and
+  bipolar).
 - **Rendering is scanline-granular, not cycle-exact.**  The pixel
   renderer paints each scanline once, from the chip state at the end
   of the line; GTIA register changes *within* a line (mid-scanline
