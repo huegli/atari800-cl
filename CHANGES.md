@@ -3,6 +3,46 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 6 — P/M DMA, full GTIA priority, GTIA cleanups
+
+Three commits.
+
+**6a — ANTIC fetches P/M graphics into GTIA.**  Previously ANTIC stole
+P/M DMA cycles but never fetched data; GRAF registers only changed when
+software poked them.  `%FETCH-PM-GRAPHICS` now reads one byte per
+enabled object per scanline (8-247) from P/M RAM and delivers it
+through ANTIC's new `PM-WRITE-FN` closure slot, which
+`MAKE-ATARI-MACHINE` wires into GTIA's GRAFP0-3/GRAFM gated on GRACTL
+(players bit 1, missiles bit 0) — DMACTL causes the fetch and the
+cycle steal, GRACTL decides whether GTIA latches the bytes.
+Single-line addressing: base = (PMBASE & $F8) << 8, missiles at
++$300+scanline, player p at +$400+$100p+scanline; double-line: base =
+(PMBASE & $FC) << 8 (1K boundary — the ROADMAP's from-memory formula
+said $F8 for both), missiles at +$180+(scanline>>1), player p at
++$200+$80p+(scanline>>1).  VDELAY is out of scope (documented).
+
+**6b — Full PRIOR priority, fifth player, multicolor players.**  The
+playfield renderers now record a per-column source tag (BAK/PF0-3)
+into a GTIA-owned `PF-TAG-ROW` scratch (only on rows with active P/M
+objects), and `%RENDER-PM-LAYER` arbitrates each covered column's
+highest-priority player channel against that tag using the four PRIOR
+bit 0-3 orderings (`+PM-BEATS-PF-MASKS+`).  Missile m has player m's
+priority and color; PRIOR bit 4 instead renders all missiles as
+playfield 3 (COLPF3 + PF3 tag — the atari800 fifth-player model);
+PRIOR bit 5 ORs COLPM0|COLPM1 / COLPM2|COLPM3 on overlap.  Zero or
+multiple select bits fall back to bit-0 / lowest-bit behaviour (real
+GTIA color-merges conflicts — documented simplification).  Bits 6-7
+(GTIA modes) are Phase 7.
+
+**6c — GTIA cleanups** (MISC_IMPROVEMENTS_PLAN items 6 + 7).  The PAL
+register ($D014) now reads $0F on NTSC (atari800 gtia.c encoding; bits
+1-3 all-ones = NTSC).  The old value of 1 answered "PAL" to the
+documented AND #$0E region probe.  The read-side reset defaults are
+deduped into one `%INIT-READ-REGS` shared by construction and
+`RESET-GTIA`.
+
+Suite grows to 1906 checks, green on both implementations.
+
 ## Renderer: per-character color-pair hoisting in char modes
 
 After the P/M fix, glyph rendering was the display frame's dominant

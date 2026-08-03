@@ -12,8 +12,16 @@
 > A follow-up commit restored the hardware byte counts, fixed the
 > renderer's map-mode geometry/colors to match, and made map modes
 > fetch on the first scanline of a mode line only (ANTIC line-buffers
-> them), per the Altirra Hardware Reference. Phase 6 (P/M DMA + full
-> GTIA priority) is next.
+> them), per the Altirra Hardware Reference.
+>
+> **Phase 6 done (2026-08-02)**, three commits as planned: ANTIC P/M
+> DMA into GTIA (double-line PMBASE masks #xFC, not this document's
+> #xF8 — 1K boundary per the Altirra HRM), full PRIOR priority via
+> GTIA-owned playfield source tags (fifth player = missiles rendered
+> as playfield 3, the atari800 model; multicolor OR; the priority
+> orderings below still carry their CONFIRM flag), and the GTIA
+> cleanups (PAL register now the $0F NTSC pattern; reset defaults
+> deduped). Phase 7 (GTIA modes 9/10/11) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -75,7 +83,7 @@ and say so in the commit message.
 | 3     | WSYNC ($D40A)                                | 2          | yes      | done   |
 | 4     | Raster-bars demo + rendered acceptance test  | 3          | no       | done   |
 | 5     | Playfield DMA steal tables                   | 3          | yes      | done   |
-| 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      |        |
+| 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      | done   |
 | 7     | GTIA modes 9/10/11                           | 6          | no       |
 | 8     | POKEY timer fidelity                         | —          | no       |
 | 9     | POKEY audio synthesis core                   | 8          | yes      |

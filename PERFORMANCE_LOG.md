@@ -90,6 +90,28 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 01cc84b   | lispworks     | irq      | 1442.17 | 24.069     | Renderer: char color-pair hoist (mean of 3) |
 | 2026-08-02 | 01cc84b   | lispworks     | display  |  332.01 |  5.541     | Renderer: char color-pair hoist — +30% (mean of 3) |
 | 2026-08-02 | 01cc84b   | lispworks     | klaus    |  938.18 | 15.657     | Renderer char hoist, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 8255be7   | sbcl          | nop      | 3476.34 | 58.018     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
+| 2026-08-02 | 8255be7   | sbcl          | irq      | 3706.60 | 61.859     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
+| 2026-08-02 | 8255be7   | sbcl          | display  | 1923.10 | 32.094     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
+| 2026-08-02 | 8255be7   | sbcl          | klaus    | 3116.40 | 52.009     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 8255be7   | lispworks     | nop      |  929.82 | 15.518     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
+| 2026-08-02 | 8255be7   | lispworks     | irq      | 1442.76 | 24.078     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
+| 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
+| 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
+
+## ROADMAP Phase 6 — P/M DMA + full PRIOR priority
+
+Hot-path phases 6a (per-line P/M fetch) and 6b (source-tag recording +
+priority arbitration) benched together at the 6c commit.  All
+workloads are neutral vs. the 01cc84b rows (SBCL display -0.4%, LW
+-1.9%, others within the same spread): the display workload enables
+neither DMACTL's P/M bits (no fetch runs) nor any GRAF register (the
+P/M layer and the tag recording are both behind the per-row five-
+register early-out), so the only new steady-state cost is that check.
+A P/M-active bench row will come for free once a demo workload uses
+sprites; the P/M-on decomposition variant from the renderer-
+optimization session measured active-sprite compositing at ~9% of the
+optimized frame.
 
 ## Renderer optimization — per-character color-pair hoisting
 

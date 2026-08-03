@@ -1,8 +1,10 @@
 # Miscellaneous Improvements Plan
 
-> **Status (2026-08-02): items 1, 2, 3, 8 done** (ROADMAP.md Phase 1).
-> Items 4-7, 9-11 remain open; see ROADMAP.md for where each is
-> scheduled (item 4 -> Phase 12, items 5 -> Phase 8, 6+7 -> Phase 6c).
+> **Status (2026-08-02): items 1, 2, 3, 6, 7, 8 done** (items 1-3, 8 via
+> ROADMAP.md Phase 1; items 6-7 via ROADMAP.md Phase 6c — PAL register
+> now reads the $0F NTSC pattern, read-side defaults deduped into
+> %INIT-READ-REGS). Items 4-5, 9-11 remain open; see ROADMAP.md for
+> where each is scheduled (item 4 -> Phase 12, item 5 -> Phase 8).
 
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent
