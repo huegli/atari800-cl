@@ -554,3 +554,132 @@ COLPM0 | COLPM1."
         "the P0/P1 overlap must OR the two color registers")
     (is (= (atari800-cl.renderer:atari-color->r #x44) (%fb-r fb 104))
         "P1 alone keeps COLPM1")))
+
+;;; ---------------------------------------------------------------------------
+;;; GTIA color modes 9/10/11 (ROADMAP.md Phase 7)
+;;;
+;;; PRIOR bits 6-7 reinterpret an ANTIC mode-F fetch: the 40 bytes
+;;; become 80 four-bit nibbles, each one wide pixel = 4 output columns.
+
+(defun %fb-rgb (fb column)
+  "The (R G B) triple of framebuffer column COLUMN in row 0."
+  (let ((base (* column 3)))
+    (list (aref fb base) (aref fb (+ base 1)) (aref fb (+ base 2)))))
+
+(defun %color-rgb (c)
+  "The (R G B) triple the palette produces for Atari color byte C."
+  (list (atari800-cl.renderer:atari-color->r c)
+        (atari800-cl.renderer:atari-color->g c)
+        (atari800-cl.renderer:atari-color->b c)))
+
+(defun %gtia-mode-fixture (prior colbk &rest bytes)
+  "Return (VALUES BUS ANTIC GTIA FB) set up for an ANTIC mode-F line
+reading screen RAM at $4000, with PRIOR and COLBK programmed and BYTES
+poked into that screen RAM."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (loop for b in bytes for i from 0
+          do (atari800-cl.bus:bus-poke-ram bus (+ #x4000 i) b))
+    (atari800-cl.gtia:gtia-write gtia #xD01A colbk)   ; COLBK
+    (atari800-cl.gtia:gtia-write gtia #xD01B prior)   ; PRIOR
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x0F
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22)
+    (values bus antic gtia fb)))
+
+(test gtia-mode-9-nibble-is-luminance-of-colbk-hue
+  "PRIOR bits 6-7 = 01 (mode 9): each nibble replaces COLBK's luminance
+bits, keeping COLBK's hue, and paints 4 output columns."
+  ;; COLBK = $30 (hue 3, luminance 0).  Bytes $2F, $40 -> nibbles 2, F, 4, 0.
+  (multiple-value-bind (bus antic gtia fb)
+      (%gtia-mode-fixture #x40 #x30 #x2F #x40)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (equal (%color-rgb #x32) (%fb-rgb fb 32))
+        "nibble 2 must render color $32 at the first active column")
+    (is (equal (%color-rgb #x32) (%fb-rgb fb 35))
+        "each nibble spans 4 output columns (32-35)")
+    (is (equal (%color-rgb #x3F) (%fb-rgb fb 36))
+        "nibble F must render color $3F starting at column 36")
+    (is (equal (%color-rgb #x34) (%fb-rgb fb 40))
+        "byte 1's high nibble 4 must render color $34")
+    (is (equal (%color-rgb #x30) (%fb-rgb fb 44))
+        "byte 1's low nibble 0 must render COLBK's own luminance 0")))
+
+(test gtia-mode-9-luminance-pairs-collapse
+  "Known limitation: this project's palette is 128 entries indexed by
+(color >> 1), so mode 9's 16 nibble values collapse to 8 luminances in
+pairs.  The color BYTES are hardware-correct -- widening the palette to
+256 entries is all that is needed to recover 16 distinct shades, and
+this test is the reminder to revisit if that ever happens."
+  (multiple-value-bind (bus antic gtia fb)
+      (%gtia-mode-fixture #x40 #x30 #xEF)   ; nibbles E and F
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (equal (%fb-rgb fb 32) (%fb-rgb fb 36))
+        "nibbles E and F differ only in color bit 0, which the palette drops")
+    (is (not (equal (%fb-rgb fb 32) (%color-rgb #x30)))
+        "...but they must still differ from luminance 0")))
+
+(test gtia-mode-10-nibble-selects-color-register
+  "PRIOR bits 6-7 = 10 (mode 10): nibble 0-3 selects COLPM0-3, 4-7
+COLPF0-3, 8 COLBK.  Out-of-range nibbles 9-15 clamp to COLBK (CONFIRM
+pending -- see %RENDER-GTIA-MODE)."
+  (multiple-value-bind (bus antic gtia fb)
+      ;; Bytes: $05 -> nibbles 0,5 ; $83 -> 8,3 ; $9F -> 9,F.
+      (%gtia-mode-fixture #x80 #x1C #x05 #x83 #x9F)
+    (atari800-cl.gtia:gtia-write gtia #xD012 #x3A)   ; COLPM0
+    (atari800-cl.gtia:gtia-write gtia #xD015 #x7E)   ; COLPM3
+    (atari800-cl.gtia:gtia-write gtia #xD017 #x56)   ; COLPF1
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (equal (%color-rgb #x3A) (%fb-rgb fb 32)) "nibble 0 -> COLPM0")
+    (is (equal (%color-rgb #x56) (%fb-rgb fb 36)) "nibble 5 -> COLPF1")
+    (is (equal (%color-rgb #x1C) (%fb-rgb fb 40)) "nibble 8 -> COLBK")
+    (is (equal (%color-rgb #x7E) (%fb-rgb fb 44)) "nibble 3 -> COLPM3")
+    (is (equal (%color-rgb #x1C) (%fb-rgb fb 48)) "nibble 9 clamps to COLBK")
+    (is (equal (%color-rgb #x1C) (%fb-rgb fb 52)) "nibble F clamps to COLBK")))
+
+(test gtia-mode-11-nibble-is-hue-at-colbk-luminance
+  "PRIOR bits 6-7 = 11 (mode 11): the nibble supplies the hue and COLBK
+the luminance.  Nibble 0 is hue 0 at COLBK's luminance -- a gray, which
+is why mode 11 cannot display black unless COLBK's luminance is 0."
+  ;; COLBK = $08 (hue 0, luminance 8).  Byte $50 -> nibbles 5, 0.
+  (multiple-value-bind (bus antic gtia fb)
+      (%gtia-mode-fixture #xC0 #x08 #x50)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (equal (%color-rgb #x58) (%fb-rgb fb 32))
+        "nibble 5 must render hue 5 at COLBK's luminance")
+    (is (equal (%color-rgb #x08) (%fb-rgb fb 36))
+        "nibble 0 must render hue 0 at COLBK's luminance")
+    (is (plusp (first (%fb-rgb fb 36)))
+        "nibble 0 must be a gray, not black -- mode 11's no-black quirk")))
+
+(test gtia-modes-ignored-on-non-f-antic-modes
+  "GTIA bits set on an ANTIC mode other than F render that mode
+normally (hardware produces garbage there; we do not model it)."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x1B)   ; 2bpp: 00 01 10 11
+    (atari800-cl.gtia:gtia-write gtia #xD01B #x40)   ; PRIOR: GTIA mode 9
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x0E
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (equal (%color-rgb #x00) (%fb-rgb fb 32)) "mode E pixel 00 -> COLBK")
+    (is (equal (%color-rgb #x24) (%fb-rgb fb 34)) "mode E pixel 01 -> COLPF0")
+    (is (equal (%color-rgb #x46) (%fb-rgb fb 36)) "mode E pixel 10 -> COLPF1")
+    (is (equal (%color-rgb #x68) (%fb-rgb fb 38)) "mode E pixel 11 -> COLPF2")))
+
+(test gtia-mode-selected-per-scanline
+  "The GTIA mode is read from PRIOR per scanline, so a DLI that rewrites
+PRIOR mid-frame switches modes from that line on."
+  (multiple-value-bind (bus antic gtia fb)
+      (%gtia-mode-fixture #x40 #x30 #x50)          ; mode 9, nibble 5
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (equal (%color-rgb #x35) (%fb-rgb fb 32))
+        "row 0 under mode 9: nibble 5 is a luminance")
+    ;; Now switch to mode 11 and render the next row.
+    (atari800-cl.gtia:gtia-write gtia #xD01B #xC0)
+    (atari800-cl.renderer:render-scanline fb 1 antic gtia bus)
+    (let ((row1 (let ((base (* 1 384 3)))
+                  (list (aref fb (+ base (* 32 3)))
+                        (aref fb (+ base (* 32 3) 1))
+                        (aref fb (+ base (* 32 3) 2))))))
+      (is (equal (%color-rgb #x50) row1)
+          "row 1 under mode 11: the same nibble 5 is now a hue"))))

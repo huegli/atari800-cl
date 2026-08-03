@@ -381,6 +381,74 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
                               tag))))))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; GTIA color modes 9/10/11 (ROADMAP.md Phase 7)
+
+(defun %render-gtia-mode (fb pf-base screen-ptr gtia-mode gtia-wr bus
+                          &optional tags)
+  "Render one ANTIC mode-F scanline reinterpreted by a GTIA color mode.
+
+GTIA-MODE is the PRIOR bits 6-7 selector: 1 = GTIA mode 9 (16
+luminances of one hue), 2 = mode 10 (9 colors), 3 = mode 11 (16 hues at
+one luminance).  ANTIC still fetches mode F's 40 bytes, but GTIA
+consumes them as 80 four-bit nibbles instead of 320 one-bit pixels, so
+each nibble is one wide pixel — 4 output columns at this renderer's
+320-column playfield scale.
+
+Nibble → color byte:
+  Mode 9:  (COLBK & $F0) | nibble — the nibble replaces COLBK's
+           luminance bits, keeping its hue.  NOTE: this project's
+           palette is 128 entries indexed by (color >> 1), i.e. color
+           bit 0 is ignored (see ATARI-COLOR->R and the deliberate
+           PALETTE-BIT0-IGNORED test), so the 16 nibble values collapse
+           to 8 distinct luminances in pairs.  The color BYTE produced
+           here is hardware-correct; widening the palette to 256
+           entries would recover all 16 shades and is the only change
+           needed (GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE pins the
+           current behaviour).
+  Mode 10: the nibble selects a color REGISTER — 0-3 → COLPM0-3,
+           4-7 → COLPF0-3, 8 → COLBK.  Those nine registers are
+           contiguous in the write window ($12-$1A), so the nibble
+           indexes them directly.  Values 9-15 are outside the
+           documented range; we clamp them to 8 (COLBK), matching a
+           minimal 'bit 3 set selects background' decode.  **CONFIRM**
+           against Altirra/atari800 gtia.c — unverified here.
+  Mode 11: (nibble << 4) | (COLBK & $0F) — the nibble supplies the hue
+           and COLBK the luminance.  Nibble 0 is therefore hue 0 at
+           COLBK's luminance (a gray, not black): GTIA mode 11 cannot
+           display black unless COLBK's luminance is itself 0.
+
+When TAGS is non-NIL every column is tagged PF2, the same source tag a
+normal mode-F pixel carries, so Phase 6b's P/M priority arbitration
+behaves sensibly.  Per-pixel priority nuances within the GTIA modes —
+notably mode 10's COLPM0-3 selections, which on hardware carry player
+priority rather than playfield priority — are NOT modelled."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb gtia-wr)
+           (type fixnum pf-base gtia-mode)
+           (type (unsigned-byte 16) screen-ptr)
+           (type bus bus)
+           (type (or null (simple-array (unsigned-byte 8) (384))) tags))
+  (let ((colbk (aref gtia-wr +w-colbk+)))
+    (dotimes (bx 40)
+      (let ((byte (atari800-cl.bus:bus-read
+                   bus (ldb (byte 16 0) (+ screen-ptr bx)))))
+        (dotimes (half 2)
+          (let* ((nibble (if (zerop half)
+                             (ldb (byte 4 4) byte)
+                             (ldb (byte 4 0) byte)))
+                 (color  (case gtia-mode
+                           (1 (logior (logand colbk #xF0) nibble))
+                           (2 (aref gtia-wr (+ +w-colpm0+ (min nibble 8))))
+                           (t (logior (ash nibble 4) (logand colbk #x0F)))))
+                 (out-x  (* (+ (* bx 2) half) 4))
+                 (p      (+ pf-base (* out-x 3))))
+            (declare (type fixnum out-x p))
+            (dotimes (d 4)
+              (%write-rgb fb (+ p (* d 3)) color)
+              (when tags
+                (setf (aref tags (+ +playfield-left-border+ out-x d))
+                      +tag-pf2+)))))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Player/missile compositing
 
 (defun %mark-pm-span (pm-row hpos px-w graf nbits chan-bit min-x max-x)
@@ -554,8 +622,16 @@ Steps:
   2. If DMACTL != 0 and the current DL mode >= 2, render a 320-pixel active
      playfield at columns 32-351.  Character modes 2-7 look up glyphs in the
      character ROM at CHBASE; bitmap modes 8-F read pixels from screen RAM.
+     When PRIOR bits 6-7 select a GTIA color mode AND the ANTIC mode is F,
+     the line goes to %RENDER-GTIA-MODE instead (modes 9/10/11).
   3. Composite player/missile graphics using PRIOR for priority
      (span-based; see %RENDER-PM-LAYER).
+
+GTIA color modes are evaluated per scanline, so a DLI that rewrites
+PRIOR mid-frame switches modes exactly where the hardware would.  With
+the GTIA bits set on an ANTIC mode OTHER than F, hardware reinterprets
+whatever color-clock stream that mode emits and generally produces
+garbage; we render the ANTIC mode normally and leave it at that.
 
 The screen-data address is read from ANTIC-RENDER-SCREEN-DATA-PTR (a snapshot
 taken at the start of the scanline before any end-of-line advancement)."
@@ -596,9 +672,15 @@ taken at the start of the scanline before any end-of-line advancement)."
                    (- +framebuffer-width+
                       +playfield-left-border+ +playfield-pixel-width+)
                    colbk)
-       (if (<= mode 7)
-           (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase tags)
-           (%render-bitmap-mode fb pf-base sptr mode wr bus tags)))
+       (let ((gtia-mode (ldb (byte 2 6) prior)))
+         (cond
+           ((<= mode 7)
+            (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase tags))
+           ;; GTIA color modes reinterpret an ANTIC mode-F fetch.
+           ((and (plusp gtia-mode) (= mode 15))
+            (%render-gtia-mode fb pf-base sptr gtia-mode wr bus tags))
+           (t
+            (%render-bitmap-mode fb pf-base sptr mode wr bus tags)))))
       (t
        (%fill-row fb row-base colbk)))
     ;; Step 3: player/missile compositing (full PRIOR arbitration).
