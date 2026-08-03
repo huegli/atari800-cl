@@ -81,6 +81,29 @@ Returns MACHINE for chaining."
   "Return the number of frames MACHINE has run since construction."
   (atari800-cl.machine:atari-machine-frame-count machine))
 
+;;; ---------------------------------------------------------------------------
+;;; Audio
+
+(defconstant +audio-sample-rate+ atari800-cl.audio:+audio-sample-rate+
+  "Sample rate of the PCM MACHINE-AUDIO-DRAIN returns, in Hz (44,744 =
+the 1.79 MHz CPU clock / 40).  Samples are mono, unsigned 8-bit.")
+
+(defun machine-attach-audio (machine &optional (audio nil audio-supplied-p))
+  "Attach POKEY audio synthesis to MACHINE and return the audio unit.
+With no second argument a fresh unit is created; pass NIL to detach.
+Once attached, each RUN-FRAME accumulates 746-747 samples; collect them
+with MACHINE-AUDIO-DRAIN.  Machines without audio attached pay nothing
+beyond a NIL test per POKEY advance."
+  (if audio-supplied-p
+      (atari800-cl.machine:machine-attach-audio machine audio)
+      (atari800-cl.machine:machine-attach-audio machine)))
+
+(defun machine-audio-drain (machine)
+  "Return a fresh (SIMPLE-ARRAY (UNSIGNED-BYTE 8)) of the mono 8-bit PCM
+samples MACHINE has accumulated since the last drain, emptying its
+buffer.  Empty when no audio unit is attached (see MACHINE-ATTACH-AUDIO)."
+  (atari800-cl.machine:machine-audio-drain machine))
+
 (defun load-os-rom (machine pathname)
   "Load PATHNAME as the OS ROM image of MACHINE.
 Reads the binary file and installs the bytes into the system bus.

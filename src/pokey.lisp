@@ -149,6 +149,19 @@ Slots:
                                 timers.  POKEY-ADVANCE only accumulates
                                 this; %SYNC-RNG catches the LFSRs up when
                                 the RANDOM register is actually read.
+  AUDIO                       — optional audio unit (an opaque object to
+                                this package; see src/audio.lisp, which
+                                loads later and installs itself with
+                                ATTACH-AUDIO).  NIL means no synthesis,
+                                and the whole audio path then costs one
+                                NIL test per advance.
+  AUDIO-ADVANCE-FN            — (lambda (audio n)) called with the cycles
+                                elapsed, before their expiries are
+                                processed.
+  AUDIO-UNDERFLOW-FN          — (lambda (audio ch)) called when channel
+                                CH's counter underflows, CH being the
+                                channel that OWNS the underflow (the high
+                                channel of a linked pair).
   CPU                         — CPU back-pointer for IRQ routing."
   (audf  (make-array 4 :element-type '(unsigned-byte 8) :initial-element 0)
          :type (simple-array (unsigned-byte 8) (4)))
@@ -167,6 +180,9 @@ Slots:
   (poly17-state #x1FFFF :type fixnum)
   (poly9-state  #x01FF  :type fixnum)
   (rng-lag      0       :type fixnum)
+  (audio nil)
+  (audio-advance-fn   nil :type (or null function))
+  (audio-underflow-fn nil :type (or null function))
   (cpu nil)
   ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, POT0..3,
   ;; KBCODE, and SKSTAT reads reflect live input instead of the stubs.
@@ -235,12 +251,14 @@ the file header for provenance."
         (+ (aref audf ch)
            (if fast-p +timer-reload-offset-fast+ 0)))))
 
-(declaim (inline %underflow-irq-channel))
+(declaim (inline %underflow-owner-channel))
 
-(defun %underflow-irq-channel (pokey ch)
-  "The channel whose IRQEN bit answers for CH's underflow.  Normally CH
-itself; for a linked pair the IRQ comes from the HIGH channel (timer 2
-for channels 1+2, timer 4 for 3+4)."
+(defun %underflow-owner-channel (pokey ch)
+  "The channel that OWNS the effects of CH's underflow — both the IRQEN
+bit that gates its interrupt and the AUDC that shapes its audio output.
+Normally CH itself; for a linked pair both belong to the HIGH channel
+(timer 2 / AUDC2 for channels 1+2, timer 4 / AUDC4 for 3+4), which is
+why 16-bit software leaves the low channel's volume at zero."
   (declare (type pokey pokey) (type fixnum ch))
   (if (%linked-low-p pokey ch) (1+ ch) ch))
 
@@ -261,33 +279,53 @@ for channels 1+2, timer 4 for 3+4)."
 ;;; That is observably identical to per-cycle stepping because nothing but
 ;;; the RANDOM register (and RESET-POKEY) reads the LFSR state.)
 
-;;; LFSR periods.  Both tap configurations below are maximal-length, so an
-;;; N-bit register cycles through all 2^N - 1 non-zero states — which is
-;;; what lets %SYNC-RNG reduce a large lag with MOD instead of stepping the
-;;; full count.  Pinned by the pokey-poly*-period tests in
-;;; tests/test-pokey.lisp; if the taps ever change, those tests fail before
-;;; the MOD shortcut can silently diverge.
-(defconstant +poly17-period+ (1- (expt 2 17)))   ; 131071
-(defconstant +poly9-period+  (1- (expt 2 9)))    ; 511
+;;; LFSR taps and periods.  All four tap configurations are
+;;; maximal-length, so an N-bit register cycles through all 2^N - 1
+;;; non-zero states — which is what lets %SYNC-RNG reduce a large lag
+;;; with MOD instead of stepping the full count.  Pinned by the
+;;; pokey-poly*-period tests in tests/test-pokey.lisp and the
+;;; audio-poly*-maximal test in tests/test-audio.lisp; if the taps ever
+;;; change, those tests fail before the MOD shortcut can silently
+;;; diverge.
+;;;
+;;; The 4- and 5-bit polys are not used by the RANDOM register at all —
+;;; they are POKEY's audio distortion generators (src/audio.lisp builds
+;;; its bit tables from them).  Their constants live here so every poly
+;;; in the chip is defined in one place, alongside the shared STEP-LFSR.
+(defconstant +poly4-tap+   1)
+(defconstant +poly5-tap+   2)
+(defconstant +poly9-tap+   4)
+(defconstant +poly17-tap+  5)
 
-(declaim (inline %step-poly17 %step-poly9))
+(defconstant +poly4-period+  (1- (expt 2 4)))    ; 15
+(defconstant +poly5-period+  (1- (expt 2 5)))    ; 31
+(defconstant +poly9-period+  (1- (expt 2 9)))    ; 511
+(defconstant +poly17-period+ (1- (expt 2 17)))   ; 131071
+
+(declaim (inline step-lfsr %step-poly17 %step-poly9))
+
+(defun step-lfsr (state width tap)
+  "Advance a right-shifting LFSR by one bit and return the new state.
+STATE is WIDTH bits wide; the feedback bit is (bit 0 XOR bit TAP) and is
+shifted into the top bit.  The single shared stepping primitive for
+every POKEY polynomial counter — the RANDOM register's 17/9-bit polys
+here, and src/audio.lisp's 4/5/9/17-bit distortion tables — so the tap
+logic is never spelled twice."
+  (declare (type fixnum state width tap))
+  (let ((fb (logxor (ldb (byte 1 0) state) (ldb (byte 1 tap) state))))
+    (logior (ash fb (1- width)) (ash state -1))))
 
 (defun %step-poly17 (pokey)
-  "Advance the 17-bit LFSR by one bit (taps: bit 0 XOR bit 5, shifting
-right, feedback into bit 16).  Cheap shift-register approximation of the
-Atari poly (sufficient for the prompt's tests)."
+  "Advance the 17-bit LFSR by one bit (see STEP-LFSR)."
   (declare (type pokey pokey))
-  (let* ((p17 (pokey-poly17-state pokey))
-         (fb17 (logxor (ldb (byte 1 0) p17) (ldb (byte 1 5) p17))))
-    (setf (pokey-poly17-state pokey) (dpb fb17 (byte 1 16) (ash p17 -1)))))
+  (setf (pokey-poly17-state pokey)
+        (step-lfsr (pokey-poly17-state pokey) 17 +poly17-tap+)))
 
 (defun %step-poly9 (pokey)
-  "Advance the 9-bit LFSR by one bit (taps: bit 0 XOR bit 4, shifting
-right, feedback into bit 8)."
+  "Advance the 9-bit LFSR by one bit (see STEP-LFSR)."
   (declare (type pokey pokey))
-  (let* ((p9 (pokey-poly9-state pokey))
-         (fb9 (logxor (ldb (byte 1 0) p9) (ldb (byte 1 4) p9))))
-    (setf (pokey-poly9-state pokey) (dpb fb9 (byte 1 8) (ash p9 -1)))))
+  (setf (pokey-poly9-state pokey)
+        (step-lfsr (pokey-poly9-state pokey) 9 +poly9-tap+)))
 
 (defun %sync-rng (pokey)
   "Catch both LFSRs up to real time.  Steps each poly (RNG-LAG mod its
@@ -349,14 +387,20 @@ clears — even though IRQST reads back as 'nothing pending'."
 
 (declaim (inline %expire-channel))
 
-(defun %expire-channel (pokey cpu ch)
+(defun %expire-channel (pokey cpu ch audio)
   "Process channel CH's sub-counter expiry: reload the sub-counter from
 %CHANNEL-DIVISOR, then decrement the timer count — or, on underflow,
-reload it via %TIMER-RELOAD-VALUE and try to fire the IRQ belonging to
-this underflow (the pair's HIGH channel when CH is a linked low byte).
-Returns T if an IRQ was actually raised.  This is the single shared
-expiry path for both POKEY-TICK and POKEY-ADVANCE, so the two cannot
-drift apart.
+reload it via %TIMER-RELOAD-VALUE, clock AUDIO's output flip-flop, and
+try to fire the IRQ belonging to this underflow (both belong to the
+pair's HIGH channel when CH is a linked low byte).  Returns T if an IRQ
+was actually raised.  This is the single shared expiry path for both
+POKEY-TICK and POKEY-ADVANCE, so the two cannot drift apart.
+
+AUDIO is passed in rather than read from POKEY so callers that have
+already tested the slot can pass a literal NIL: this function is
+inlined, so the audio branch then folds away completely and a machine
+without audio attached executes exactly the code it did before
+synthesis existed.
 
 A linked pair's HIGH channel takes its clock from the low byte's borrow,
 which the pair's single 16-bit countdown already accounts for, so its
@@ -371,10 +415,15 @@ own divided-clock expiry does nothing but reload the sub-counter."
        (declare (type fixnum new))
        (cond
          ((minusp new)
-          ;; Underflow: reload and try to fire the responsible IRQ.
+          ;; Underflow: reload, clock the audio output flip-flop, and try
+          ;; to fire the responsible IRQ.
           (setf (aref (pokey-timer-counts pokey) ch)
                 (%timer-reload-value pokey ch))
-          (%fire-timer-irq pokey cpu (%underflow-irq-channel pokey ch)))
+          (let ((owner (%underflow-owner-channel pokey ch)))
+            (when audio
+              (funcall (the function (pokey-audio-underflow-fn pokey))
+                       audio owner))
+            (%fire-timer-irq pokey cpu owner)))
          (t
           (setf (aref (pokey-timer-counts pokey) ch) new)
           nil))))))
@@ -388,22 +437,42 @@ this cycle.  The LFSRs are stepped lazily (RNG-LAG accrues one cycle; see
 %SYNC-RNG).
 
 Deliberately keeps its own simple per-cycle loop instead of delegating to
-(POKEY-ADVANCE pokey cpu 1): this is the hottest POKEY entry point
-(29,868 calls per frame from the machine scheduler), and POKEY-ADVANCE's
-event-skipping bookkeeping costs more than it saves at N = 1 (measured:
-LispWorks lost ~20% frame rate through the general path).  Both paths
-share %EXPIRE-CHANNEL and are pinned equivalent by
-pokey-tick-vs-advance-equivalence in tests/test-pokey.lisp."
+(POKEY-ADVANCE pokey cpu 1): POKEY-ADVANCE's event-skipping bookkeeping
+costs more than it saves at N = 1 (measured, back when this was the
+scheduler's entry point: LispWorks lost ~20% frame rate through the
+general path).  The machine scheduler now drives POKEY through
+POKEY-ADVANCE instead — one call per instruction — leaving this the
+per-cycle reference path used by tests and by any caller stepping a
+cycle at a time.  Both paths share %EXPIRE-CHANNEL and are pinned
+equivalent by pokey-tick-vs-advance-equivalence in
+tests/test-pokey.lisp."
   (declare (type pokey pokey))
   (incf (pokey-rng-lag pokey))
-  (let ((irq-raised nil))
-    (dotimes (ch 4)
-      (declare (type fixnum ch))
-      ;; Decrement the divider pre-counter; tick the timer only when it
-      ;; expires.
-      (when (zerop (decf (aref (pokey-sub-counters pokey) ch)))
-        (when (%expire-channel pokey cpu ch)
-          (setf irq-raised t))))
+  (let ((irq-raised nil)
+        (audio (pokey-audio pokey)))
+    ;; The audio test happens ONCE, here, and each branch then runs a
+    ;; loop with no audio bookkeeping in it: passing a literal NIL to the
+    ;; inlined %EXPIRE-CHANNEL folds its audio branch away entirely, so
+    ;; the detached path is the code that existed before synthesis did.
+    (macrolet ((tick-body (audio-form)
+                 ;; Deliberately unhygienic: expands inside the LET above
+                 ;; so it can drive IRQ-RAISED.
+                 `(dotimes (ch 4)
+                    (declare (type fixnum ch))
+                    ;; Decrement the divider pre-counter; tick the timer
+                    ;; only when it expires.
+                    (when (zerop (decf (aref (pokey-sub-counters pokey) ch)))
+                      (when (%expire-channel pokey cpu ch ,audio-form)
+                        (setf irq-raised t))))))
+      (cond
+        (audio
+         ;; This cycle elapses BEFORE any expiry it triggers is processed,
+         ;; so the sample(s) it produces reflect the output bits as they
+         ;; stood during the cycle.
+         (funcall (the function (pokey-audio-advance-fn pokey)) audio 1)
+         (tick-body audio))
+        (t
+         (tick-body nil))))
     irq-raised))
 
 (defun pokey-advance (pokey cpu n)
@@ -429,18 +498,43 @@ cheaper than this function's chunk bookkeeping."
   (declare (type pokey pokey) (type fixnum n))
   (incf (pokey-rng-lag pokey) n)
   (let ((subs (pokey-sub-counters pokey))
+        (audio (pokey-audio pokey))
         (irq-raised nil))
-    (loop while (plusp n)
-          do (let ((chunk (min n
-                               (aref subs 0) (aref subs 1)
-                               (aref subs 2) (aref subs 3))))
-               (declare (type fixnum chunk))
-               (decf n chunk)
-               (dotimes (ch 4)
-                 (declare (type fixnum ch))
-                 (when (zerop (decf (aref subs ch) chunk))
-                   (when (%expire-channel pokey cpu ch)
-                     (setf irq-raised t))))))
+    ;; As in POKEY-TICK: test for audio ONCE and run a loop with no audio
+    ;; bookkeeping inside it, so a detached machine executes the same
+    ;; per-chunk code it did before synthesis existed.  This is the
+    ;; hottest POKEY entry point (the scanline scheduler calls it once
+    ;; per instruction), and an inner-loop test measurably cost the
+    ;; nop workload ~7% on both implementations.
+    (macrolet ((advance-loop (&body audio-hook)
+                 ;; Deliberately unhygienic: AUDIO-HOOK is spliced where
+                 ;; CHUNK is in scope, and the body drives IRQ-RAISED and
+                 ;; N from the enclosing LET.
+                 `(loop while (plusp n)
+                        do (let ((chunk (min n
+                                             (aref subs 0) (aref subs 1)
+                                             (aref subs 2) (aref subs 3))))
+                             (declare (type fixnum chunk))
+                             (decf n chunk)
+                             ,@audio-hook
+                             (dotimes (ch 4)
+                               (declare (type fixnum ch))
+                               (when (zerop (decf (aref subs ch) chunk))
+                                 (when (%expire-channel pokey cpu ch
+                                                        ,(if audio-hook
+                                                             'audio
+                                                             nil))
+                                   (setf irq-raised t))))))))
+      (cond
+        (audio
+         ;; The chunk's cycles elapse before the expiries they trigger,
+         ;; matching POKEY-TICK's ordering exactly (the output bits are
+         ;; constant across a chunk, since only an expiry changes them).
+         (advance-loop
+          (funcall (the function (pokey-audio-advance-fn pokey))
+                   audio chunk)))
+        (t
+         (advance-loop))))
     irq-raised))
 
 ;;; ---------------------------------------------------------------------------

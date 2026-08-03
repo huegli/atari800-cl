@@ -202,7 +202,27 @@ vector at $FFFC to set the initial PC.  Returns MACHINE."
   machine)
 
 ;;; ---------------------------------------------------------------------------
-;;; Frame scheduler
+;;; Audio (ROADMAP.md Phase 9)
+
+(defun machine-attach-audio (machine &optional (audio (make-audio-unit)))
+  "Attach an AUDIO-UNIT to MACHINE's POKEY so running frames accumulate
+PCM samples, and return it.  With no argument a fresh unit is created;
+pass NIL to detach (synthesis then costs nothing but a NIL test per
+POKEY advance).  Drain the accumulated samples with MACHINE-AUDIO-DRAIN
+— typically once per frame, which yields 746 or 747 samples at
++AUDIO-SAMPLE-RATE+."
+  (declare (type atari-machine machine))
+  (attach-audio (atari-machine-pokey machine) audio))
+
+(defun machine-audio-drain (machine)
+  "Return a fresh (SIMPLE-ARRAY (UNSIGNED-BYTE 8)) of the PCM samples
+MACHINE has accumulated since the last drain, emptying the buffer.
+Returns an empty vector when no audio unit is attached."
+  (declare (type atari-machine machine))
+  (let ((audio (pokey-audio (atari-machine-pokey machine))))
+    (if audio
+        (audio-drain audio)
+        (make-array 0 :element-type '(unsigned-byte 8)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Debug / instrumentation helpers (Prompt 11)

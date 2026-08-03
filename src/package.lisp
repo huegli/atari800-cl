@@ -386,7 +386,39 @@
            #:reset-pokey
            #:attach-pokey
            #:attach-pokey-input
-           #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+))
+           #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+
+           ;; Audio hooks (installed by src/audio.lisp's ATTACH-AUDIO)
+           #:pokey-audio
+           #:pokey-audio-advance-fn #:pokey-audio-underflow-fn
+           ;; Shared polynomial-counter primitive + tap/period constants
+           #:step-lfsr
+           #:+poly4-tap+ #:+poly5-tap+ #:+poly9-tap+ #:+poly17-tap+
+           #:+poly4-period+ #:+poly5-period+
+           #:+poly9-period+ #:+poly17-period+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.audio — POKEY audio synthesis (ROADMAP.md Phase 9)
+;;;
+;;; Everything downstream of a POKEY counter underflow: the per-channel
+;;; output flip-flops, the polynomial distortion generators, and the
+;;; mixer that turns them into mono 8-bit PCM at ~44.7 kHz.  Loads AFTER
+;;; pokey (whose STEP-LFSR builds the poly tables and whose struct holds
+;;; the attachment) and BEFORE machine (which exposes the facade).
+
+(defpackage #:atari800-cl.audio
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.pokey)
+  (:documentation "POKEY audio synthesis: four-channel PCM at ~44.7 kHz.")
+  (:export #:audio-unit
+           #:make-audio-unit
+           #:audio-unit-pokey
+           #:audio-advance
+           #:audio-channel-underflow
+           #:audio-drain
+           #:reset-audio-unit
+           #:attach-audio
+           #:+audio-sample-rate+
+           #:+audio-cycles-per-sample+
+           #:+audio-centre-level+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.irq — NMI / IRQ routing helpers
@@ -431,7 +463,7 @@
   (:use #:cl #:atari800-cl.compat
         #:atari800-cl.cpu #:atari800-cl.bus #:atari800-cl.mmu
         #:atari800-cl.pia #:atari800-cl.antic #:atari800-cl.gtia
-        #:atari800-cl.pokey #:atari800-cl.irq)
+        #:atari800-cl.pokey #:atari800-cl.audio #:atari800-cl.irq)
   (:documentation "Atari 800 XL top-level machine + frame scheduler.")
   (:export #:atari-machine
            #:make-atari-machine
@@ -446,6 +478,8 @@
            #:machine-run-frame
            #:machine-cold-reset
            #:machine-install-roms
+           #:machine-attach-audio
+           #:machine-audio-drain
            #:load-rom-file
            #:+clocks-per-frame+
            ;; Concurrency: mailbox + run loop + host input
@@ -562,6 +596,10 @@
            #:run-machine
            #:run-frame
            #:machine-frame-count
+           ;; Audio
+           #:machine-attach-audio
+           #:machine-audio-drain
+           #:+audio-sample-rate+
            #:load-os-rom
            #:load-basic-rom
            ;; Background run loop + protocol servers
