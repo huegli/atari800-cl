@@ -137,10 +137,10 @@ clear DLI-ARMED, regardless of how many CPU cycles we tick after."
   "Writing IRQEN = 0 after a timer IRQ must drop CPU-PENDING-IRQ, and
 re-enabling the (now acknowledged) source must not re-assert it."
   (multiple-value-bind (pok cpu bus) (%make-pokey-fixture :audctl #x40)
-    (atari800-cl.bus:bus-write bus #xD200 0)       ; AUDF1 = 0 — fires on first tick
+    (atari800-cl.bus:bus-write bus #xD200 0)       ; AUDF1 = 0 — shortest period
     (atari800-cl.bus:bus-write bus #xD20E #x01)    ; IRQEN: timer 1
     (atari800-cl.bus:bus-write bus #xD209 0)       ; STIMER
-    (atari800-cl.pokey:pokey-tick pok cpu)
+    (%tick-n-pokey pok cpu 4)                      ; AUDF1 + 4 at 1.79 MHz
     (is-true (cpu-pending-irq cpu)
              "Timer 1 underflow must assert the IRQ line")
     ;; Acknowledge by disabling the source.
@@ -160,7 +160,7 @@ asserted; acknowledging the second must finally drop it."
     (atari800-cl.bus:bus-write bus #xD202 0)       ; AUDF2 = 0 (64 kHz, divisor 28)
     (atari800-cl.bus:bus-write bus #xD20E #x03)    ; IRQEN: timers 1 + 2
     (atari800-cl.bus:bus-write bus #xD209 0)       ; STIMER
-    (%tick-n-pokey pok cpu 28)                     ; tick 1 fires ch1; tick 28 fires ch2
+    (%tick-n-pokey pok cpu 28)                     ; tick 4 fires ch1; tick 28 fires ch2
     (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok) #x03))
         "Both timer IRQST bits must be pending (low) before the acks")
     ;; Disable timer 2 only — timer 1 is still enabled AND pending.
@@ -178,7 +178,7 @@ asserted; acknowledging the second must finally drop it."
     (atari800-cl.bus:bus-write bus #xD200 0)
     (atari800-cl.bus:bus-write bus #xD20E #x01)
     (atari800-cl.bus:bus-write bus #xD209 0)
-    (atari800-cl.pokey:pokey-tick pok cpu)
+    (%tick-n-pokey pok cpu 4)                      ; AUDF1 + 4 at 1.79 MHz
     (is-true (cpu-pending-irq cpu))
     (atari800-cl.pokey:reset-pokey pok)
     (is-false (cpu-pending-irq cpu)

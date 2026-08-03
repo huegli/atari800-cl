@@ -159,7 +159,7 @@ to the NEXT line and leave RAM $81 still 0 after one line here)."
            (cpu (atari800-cl.machine:atari-machine-cpu m))
            (bus (atari800-cl.machine:atari-machine-bus m)))
       ;; POKEY timer 1 at the 1.79 MHz clock (divisor 1), AUDF1 = 30:
-      ;; underflow + IRQ after 31 POKEY cycles — mid-line.
+      ;; underflow + IRQ after AUDF1 + 4 = 34 POKEY cycles — mid-line.
       (atari800-cl.bus:bus-write bus #xD208 #x40)        ; AUDCTL: ch1 fast
       (atari800-cl.bus:bus-write bus #xD200 30)          ; AUDF1
       (atari800-cl.bus:bus-write bus #xD20E #x01)        ; IRQEN: timer 1

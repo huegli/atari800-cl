@@ -27,12 +27,38 @@
 ;;;;   countdown.  Channels 1 and 3 can use the 1.79 MHz CPU clock
 ;;;;   directly (AUDCTL bit 6 / bit 5); all other channels run at
 ;;;;   either 64 kHz (CPU/28) or 15 kHz (CPU/114, AUDCTL bit 0 = 1).
-;;;;   On underflow the counter reloads from AUDF and, for channels
-;;;;   1, 2, and 4 with the matching IRQEN bit (0, 1, or 3) set,
-;;;;   the chip raises a CPU IRQ and clears that bit in IRQST.
+;;;;   On underflow the counter reloads and, for channels 1, 2, and 4
+;;;;   with the matching IRQEN bit (0, 1, or 3) set, the chip raises a
+;;;;   CPU IRQ and clears that bit in IRQST.
 ;;;;
 ;;;;   Writing IRQEN restores any IRQST latch bits cleared by past
 ;;;;   underflows ("acknowledge" semantics).
+;;;;
+;;;; Reload offsets (ROADMAP.md Phase 8 / MISC_IMPROVEMENTS_PLAN.md item 5):
+;;;;   The period is NOT simply AUDF+1 in every configuration — POKEY's
+;;;;   counter reload costs extra cycles that depend on the clock:
+;;;;     - 1.79 MHz, unlinked:      AUDF + 4 CPU cycles
+;;;;     - 1.79 MHz, 16-bit linked: 256*AUDF_hi + AUDF_lo + 7 CPU cycles
+;;;;     - 64 kHz / 15 kHz:         AUDF + 1 of the DIVIDED clock
+;;;;   Implemented by loading the countdown with %TIMER-RELOAD-VALUE
+;;;;   (the period minus one divided-clock tick, since the counter
+;;;;   underflows on the transition past zero).  These figures are
+;;;;   stated by MISC_IMPROVEMENTS_PLAN.md item 5 from the Altirra
+;;;;   Hardware Reference; they are **CONFIRM**-flagged there and were
+;;;;   implemented as stated — no independent source was available in
+;;;;   this environment to re-derive them.
+;;;;
+;;;; Linked 16-bit channels (AUDCTL bits 4 and 3):
+;;;;   Bit 4 joins channels 1+2, bit 3 joins 3+4.  The pair behaves as
+;;;;   ONE 16-bit counter clocked by the LOW channel's clock select:
+;;;;   the low byte borrows from the high byte rather than reloading
+;;;;   independently, so the period is 256*AUDF_hi + AUDF_lo + offset
+;;;;   (NOT the product of two independent periods).  We model that
+;;;;   directly — the pair's whole countdown lives in the LOW channel's
+;;;;   TIMER-COUNTS slot, and the high channel's own divided clock
+;;;;   drives nothing (its TIMER-COUNTS entry is inert while linked).
+;;;;   The IRQ for a linked pair comes from the HIGH channel's IRQEN
+;;;;   bit: timer 2 ($02) for channels 1+2, timer 4 ($08) for 3+4.
 ;;;;
 ;;;; RNG model:
 ;;;;   Two LFSRs are conceptually clocked once per CPU cycle.  AUDCTL
@@ -55,6 +81,22 @@
 
 (defconstant +pokey-64khz-divisor+ 28)
 (defconstant +pokey-15khz-divisor+ 114)
+
+;;; Countdown reload offsets (see the file header).  The counter
+;;; underflows one tick after reaching zero, so a reload of R yields a
+;;; period of R+1 divided-clock ticks: the +4 / +7 hardware periods at
+;;; 1.79 MHz are reload offsets of +3 / +6, and the divided clocks'
+;;; AUDF+1 period needs no offset at all.
+(defconstant +timer-reload-offset-fast+       3)   ; 1.79 MHz, unlinked
+(defconstant +timer-reload-offset-fast-16bit+ 6)   ; 1.79 MHz, linked pair
+
+;;; AUDCTL bits.
+(defconstant +audctl-15khz+        #x01)   ; slow base clock
+(defconstant +audctl-link-34+      #x08)   ; join channels 3+4 (16-bit)
+(defconstant +audctl-link-12+      #x10)   ; join channels 1+2 (16-bit)
+(defconstant +audctl-ch3-fast+     #x20)   ; channel 3 at 1.79 MHz
+(defconstant +audctl-ch1-fast+     #x40)   ; channel 1 at 1.79 MHz
+(defconstant +audctl-poly9+        #x80)   ; RANDOM uses the 9-bit poly
 
 ;;; IRQEN / IRQST bit masks
 (defconstant +irq-timer1+ #x01)
@@ -136,18 +178,71 @@ Slots:
 (declaim (inline %channel-divisor))
 
 (defun %channel-divisor (pokey ch)
-  "How many CPU cycles between two ticks of channel CH's timer."
+  "How many CPU cycles between two ticks of channel CH's timer.
+For a linked 16-bit pair this is consulted for the LOW channel, whose
+clock select drives the whole pair."
   (declare (type pokey pokey) (type fixnum ch))
   (let ((ac (pokey-audctl pokey)))
     (cond
       ;; Channel 1 (index 0) on 1.79 MHz when AUDCTL bit 6 set.
-      ((and (= ch 0) (logtest ac #x40)) 1)
+      ((and (= ch 0) (logtest ac +audctl-ch1-fast+)) 1)
       ;; Channel 3 (index 2) on 1.79 MHz when AUDCTL bit 5 set.
-      ((and (= ch 2) (logtest ac #x20)) 1)
+      ((and (= ch 2) (logtest ac +audctl-ch3-fast+)) 1)
       ;; 15 kHz instead of 64 kHz when AUDCTL bit 0 set.
-      ((logtest ac #x01) +pokey-15khz-divisor+)
+      ((logtest ac +audctl-15khz+) +pokey-15khz-divisor+)
       ;; Default: 64 kHz.
       (t +pokey-64khz-divisor+))))
+
+;;; ---------------------------------------------------------------------------
+;;; Linked 16-bit pairs + countdown reload
+
+(declaim (inline %linked-low-p %linked-high-p))
+
+(defun %linked-low-p (pokey ch)
+  "T when CH is the LOW byte of a linked 16-bit pair: channel 1 with
+AUDCTL bit 4 set, or channel 3 with bit 3 set.  The pair's entire
+countdown lives in this channel's TIMER-COUNTS slot."
+  (declare (type pokey pokey) (type fixnum ch))
+  (let ((ac (pokey-audctl pokey)))
+    (or (and (= ch 0) (logtest ac +audctl-link-12+))
+        (and (= ch 2) (logtest ac +audctl-link-34+)))))
+
+(defun %linked-high-p (pokey ch)
+  "T when CH is the HIGH byte of a linked 16-bit pair (channel 2 or 4).
+Such a channel is clocked by its partner's borrow rather than by its own
+divided clock, so its timer does not run independently."
+  (declare (type pokey pokey) (type fixnum ch))
+  (let ((ac (pokey-audctl pokey)))
+    (or (and (= ch 1) (logtest ac +audctl-link-12+))
+        (and (= ch 3) (logtest ac +audctl-link-34+)))))
+
+(defun %timer-reload-value (pokey ch)
+  "The value loaded into channel CH's countdown on underflow or STIMER.
+
+Unlinked: AUDF, plus +TIMER-RELOAD-OFFSET-FAST+ when the channel runs at
+1.79 MHz, giving hardware's AUDF+4 cycle period (the divided clocks keep
+their AUDF+1 period and need no offset).  Linked low channel: the full
+16-bit value 256*AUDF_high + AUDF_low, plus
++TIMER-RELOAD-OFFSET-FAST-16BIT+ at 1.79 MHz for the N+7 period.  See
+the file header for provenance."
+  (declare (type pokey pokey) (type fixnum ch))
+  (let* ((audf   (pokey-audf pokey))
+         (fast-p (= 1 (%channel-divisor pokey ch))))
+    (if (%linked-low-p pokey ch)
+        (+ (ash (aref audf (1+ ch)) 8)
+           (aref audf ch)
+           (if fast-p +timer-reload-offset-fast-16bit+ 0))
+        (+ (aref audf ch)
+           (if fast-p +timer-reload-offset-fast+ 0)))))
+
+(declaim (inline %underflow-irq-channel))
+
+(defun %underflow-irq-channel (pokey ch)
+  "The channel whose IRQEN bit answers for CH's underflow.  Normally CH
+itself; for a linked pair the IRQ comes from the HIGH channel (timer 2
+for channels 1+2, timer 4 for 3+4)."
+  (declare (type pokey pokey) (type fixnum ch))
+  (if (%linked-low-p pokey ch) (1+ ch) ch))
 
 (declaim (inline %irq-bit-for-channel))
 
@@ -257,23 +352,32 @@ clears — even though IRQST reads back as 'nothing pending'."
 (defun %expire-channel (pokey cpu ch)
   "Process channel CH's sub-counter expiry: reload the sub-counter from
 %CHANNEL-DIVISOR, then decrement the timer count — or, on underflow,
-reload it from AUDF and try to fire the channel's IRQ.  Returns T if an
-IRQ was actually raised.  This is the single shared expiry path for both
-POKEY-TICK and POKEY-ADVANCE, so the two cannot drift apart."
+reload it via %TIMER-RELOAD-VALUE and try to fire the IRQ belonging to
+this underflow (the pair's HIGH channel when CH is a linked low byte).
+Returns T if an IRQ was actually raised.  This is the single shared
+expiry path for both POKEY-TICK and POKEY-ADVANCE, so the two cannot
+drift apart.
+
+A linked pair's HIGH channel takes its clock from the low byte's borrow,
+which the pair's single 16-bit countdown already accounts for, so its
+own divided-clock expiry does nothing but reload the sub-counter."
   (declare (type pokey pokey) (type fixnum ch))
   (setf (aref (pokey-sub-counters pokey) ch)
         (%channel-divisor pokey ch))
-  (let ((new (1- (aref (pokey-timer-counts pokey) ch))))
-    (declare (type fixnum new))
-    (cond
-      ((minusp new)
-       ;; Underflow: reload from AUDF and try to fire IRQ.
-       (setf (aref (pokey-timer-counts pokey) ch)
-             (aref (pokey-audf pokey) ch))
-       (%fire-timer-irq pokey cpu ch))
-      (t
-       (setf (aref (pokey-timer-counts pokey) ch) new)
-       nil))))
+  (cond
+    ((%linked-high-p pokey ch) nil)
+    (t
+     (let ((new (1- (aref (pokey-timer-counts pokey) ch))))
+       (declare (type fixnum new))
+       (cond
+         ((minusp new)
+          ;; Underflow: reload and try to fire the responsible IRQ.
+          (setf (aref (pokey-timer-counts pokey) ch)
+                (%timer-reload-value pokey ch))
+          (%fire-timer-irq pokey cpu (%underflow-irq-channel pokey ch)))
+         (t
+          (setf (aref (pokey-timer-counts pokey) ch) new)
+          nil))))))
 
 (declaim (ftype (function (pokey (or null cpu) fixnum) boolean) pokey-advance)
          (ftype (function (pokey (or null cpu)) boolean) pokey-tick))
@@ -367,11 +471,13 @@ cheaper than this function's chunk bookkeeping."
       (t #xFF))))
 
 (defun %reload-all-timers (pokey)
-  "STIMER semantics: reload every timer counter from its AUDF and reset
-each channel's sub-divider to a fresh starting value."
+  "STIMER semantics: reload every timer counter via %TIMER-RELOAD-VALUE
+(so the first period after STIMER carries the same hardware offset as
+every later one, and a linked pair starts from its composed 16-bit
+value) and reset each channel's sub-divider to a fresh starting value."
   (declare (type pokey pokey))
   (dotimes (ch 4)
-    (setf (aref (pokey-timer-counts pokey) ch) (aref (pokey-audf pokey) ch)
+    (setf (aref (pokey-timer-counts pokey) ch) (%timer-reload-value pokey ch)
           (aref (pokey-sub-counters pokey) ch) (%channel-divisor pokey ch))))
 
 (defun pokey-write (pokey address value)
