@@ -21,7 +21,15 @@
 > as playfield 3, the atari800 model; multicolor OR; the priority
 > orderings below still carry their CONFIRM flag), and the GTIA
 > cleanups (PAL register now the $0F NTSC pattern; reset defaults
-> deduped). Phase 7 (GTIA modes 9/10/11) is next.
+> deduped).
+>
+> **Phase 7 done (2026-08-03)**: GTIA color modes 9/10/11 render over
+> ANTIC mode F, selected per scanline from PRIOR bits 6-7. Mode 10's
+> nibbles 9-15 (clamped to COLBK) keep this document's CONFIRM flag.
+> One limitation newly pinned by test: the 128-entry palette collapses
+> mode 9's 16 luminances into 8 pairs — the color bytes are
+> hardware-correct, so a 256-entry palette would recover them.
+> Phase 8 (POKEY timer fidelity) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -84,7 +92,7 @@ and say so in the commit message.
 | 4     | Raster-bars demo + rendered acceptance test  | 3          | no       | done   |
 | 5     | Playfield DMA steal tables                   | 3          | yes      | done   |
 | 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      | done   |
-| 7     | GTIA modes 9/10/11                           | 6          | no       |
+| 7     | GTIA modes 9/10/11                           | 6          | no       | done   |
 | 8     | POKEY timer fidelity                         | —          | no       |
 | 9     | POKEY audio synthesis core                   | 8          | yes      |
 | 10    | AESP audio streaming + WAV capture           | 9          | no       |

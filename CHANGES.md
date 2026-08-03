@@ -3,6 +3,39 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 7 — GTIA color modes 9/10/11
+
+PRIOR bits 6-7 now reinterpret an ANTIC mode-F fetch: the same 40 bytes
+become 80 four-bit nibbles, each one wide pixel (4 output columns at
+this renderer's 320-column playfield scale).  `%RENDER-GTIA-MODE`
+implements the three modes:
+
+- **Mode 9** (PRIOR $40): nibble replaces COLBK's luminance bits,
+  keeping its hue — `(COLBK & $F0) | nibble`.
+- **Mode 10** (PRIOR $80): nibble selects a color register, 0-3 →
+  COLPM0-3, 4-7 → COLPF0-3, 8 → COLBK.  Those nine registers are
+  contiguous in the write window ($12-$1A), so the nibble indexes them
+  directly — the same decode the hardware does.  Nibbles 9-15 clamp to
+  COLBK (**CONFIRM** pending against Altirra/atari800).
+- **Mode 11** (PRIOR $C0): nibble supplies the hue, COLBK the
+  luminance — `(nibble << 4) | (COLBK & $0F)`.  Nibble 0 is hue 0 at
+  COLBK's luminance, which is why mode 11 cannot display black unless
+  COLBK's luminance is 0 (pinned by a test).
+
+The mode is read per scanline, so a DLI rewriting PRIOR switches modes
+mid-frame; a test renders two rows under different PRIOR values to pin
+that.  GTIA bits set on a non-F ANTIC mode render that mode normally
+(hardware emits garbage there; not modelled).  GTIA-mode pixels carry
+mode F's PF2 source tag for Phase 6b priority arbitration — mode 10's
+COLPM0-3 selections do not carry player priority as they would on
+hardware (documented).
+
+Known limitation, newly pinned by `GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE`:
+this project's palette is 128 entries indexed by `(color >> 1)`, so
+mode 9's 16 nibble values collapse to 8 luminances in pairs.  The color
+bytes produced are hardware-correct; widening the palette to 256
+entries is the only change needed to recover all 16 shades.
+
 ## ROADMAP Phase 6 — P/M DMA, full GTIA priority, GTIA cleanups
 
 Three commits.
