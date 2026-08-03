@@ -286,6 +286,64 @@ is active."
         "Expected COLPM0 at column 96, got ~D" (aref fb (* 96 3)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Character-mode color selection (pins the per-character color-pair
+;;; hoisting in %RENDER-CHAR-MODE)
+
+(test render-mode-2-inverse-and-alternate-chars
+  "Mode 2 attribute bits: bit 7 (inverse) swaps glyph-on/off colors,
+bit 6 (alternate) draws set glyph bits in COLPF1."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    ;; Char set at $6000; char 1's glyph row 0 = #xF0 (left half set).
+    (atari800-cl.bus:bus-poke-ram bus #x6008 #xF0)
+    ;; Screen row at $4000: normal char 1, inverse char 1 (#x81),
+    ;; alternate char 1 (#x41).
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x01)
+    (atari800-cl.bus:bus-poke-ram bus #x4001 #x81)
+    (atari800-cl.bus:bus-poke-ram bus #x4002 #x41)
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x02
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22
+          (aref (atari800-cl.antic:antic-registers antic)
+                atari800-cl.antic:+reg-chbase+)                  #x60)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (let ((bk-r  (atari800-cl.renderer:atari-color->r #x00))
+          (pf1-r (atari800-cl.renderer:atari-color->r #x46))
+          (pf2-r (atari800-cl.renderer:atari-color->r #x68)))
+      ;; Char 0 (cols 32-39): set bits -> PF2, clear bits -> BAK.
+      (is (= pf2-r (%fb-r fb 32)) "normal: glyph-on must be COLPF2")
+      (is (= bk-r  (%fb-r fb 36)) "normal: glyph-off must be COLBK")
+      ;; Char 1 (cols 40-47), inverse: colors swapped.
+      (is (= bk-r  (%fb-r fb 40)) "inverse: glyph-on must be COLBK")
+      (is (= pf2-r (%fb-r fb 44)) "inverse: glyph-off must be COLPF2")
+      ;; Char 2 (cols 48-55), alternate: glyph-on is COLPF1.
+      (is (= pf1-r (%fb-r fb 48)) "alternate: glyph-on must be COLPF1")
+      (is (= bk-r  (%fb-r fb 52)) "alternate: glyph-off must be COLBK"))))
+
+(test render-mode-6-wide-chars-select-color-from-char-bits
+  "Mode 6: 20 chars of 16 px; the char's top two bits select the on
+color (00 -> COLPF0, 01 -> COLPF1) and each glyph bit spans 2 columns."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.bus:bus-poke-ram bus #x6008 #x80)   ; char 1 row 0: bit 7 only
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x01)   ; char 1, top bits 00
+    (atari800-cl.bus:bus-poke-ram bus #x4001 #x41)   ; char 1, top bits 01
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x06
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22
+          (aref (atari800-cl.antic:antic-registers antic)
+                atari800-cl.antic:+reg-chbase+)                  #x60)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (let ((bk-r  (atari800-cl.renderer:atari-color->r #x00))
+          (pf0-r (atari800-cl.renderer:atari-color->r #x24))
+          (pf1-r (atari800-cl.renderer:atari-color->r #x46)))
+      ;; Char 0 (cols 32-47): bit 7 covers columns 32-33 in COLPF0.
+      (is (= pf0-r (%fb-r fb 32)) "top bits 00 -> COLPF0")
+      (is (= pf0-r (%fb-r fb 33)) "wide char: glyph bit spans 2 columns")
+      (is (= bk-r  (%fb-r fb 34)) "cleared glyph bits -> COLBK")
+      ;; Char 1 (cols 48-63): bit 7 covers columns 48-49 in COLPF1.
+      (is (= pf1-r (%fb-r fb 48)) "top bits 01 -> COLPF1")
+      (is (= bk-r  (%fb-r fb 50))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Span-based P/M compositing semantics
 ;;;
 ;;; %RENDER-PM-LAYER paints per-object spans lowest-priority-first

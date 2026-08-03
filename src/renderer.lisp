@@ -180,13 +180,26 @@ Modes 6/7: 64 wide characters, glyph row at mod 8 of scan-y."
 
 (defun %render-char-mode (fb pf-base screen-ptr scan-y mode gtia-wr bus chbase)
   "Render character modes 2-7 into PF-BASE columns of FB.
-Produces 320 output pixels (modes 2-5: 40 chars × 8px; modes 6-7: 20 chars × 16px)."
+Produces 320 output pixels (modes 2-5: 40 chars × 8px; modes 6-7: 20 chars × 16px).
+
+A character row has at most two colors — the glyph-on color and the
+glyph-off color — both fixed per character: modes 2/3 pick them from
+the character's attribute bits (bit 7 inverse video swaps them, bit 6
+selects COLPF1), modes 4-7 pick the on-color from the character's top
+two bits (COLPF0-3) with COLBK off.  Both RGB triples are therefore
+resolved ONCE per character, and the 8-bit glyph loop only stores raw
+bytes.  (The previous version dispatched on the mode and did three
+palette lookups per output pixel, which decomposition measured at
+~60-70% of the whole display-workload frame once P/M compositing was
+fixed — hoisting it doubled the workload again on both
+implementations.)"
   (declare (type (simple-array (unsigned-byte 8) (*)) fb gtia-wr)
            (type fixnum pf-base scan-y)
            (type (unsigned-byte 16) screen-ptr)
            (type (unsigned-byte 8) mode chbase)
            (type bus bus))
   (let* ((wide-p    (or (= mode 6) (= mode 7)))
+         (attr-p    (or (= mode 2) (= mode 3)))
          (n-chars   (if wide-p 20 40))
          (px-per-ch (if wide-p 16 8))
          (colbk     (aref gtia-wr +w-colbk+))
@@ -198,32 +211,39 @@ Produces 320 output pixels (modes 2-5: 40 chars × 8px; modes 6-7: 20 chars × 1
       (let* ((ch    (atari800-cl.bus:bus-read
                      bus (ldb (byte 16 0) (+ screen-ptr cx))))
              (bits  (%char-row-bits bus chbase ch (ldb (byte 8 0) scan-y) mode))
-             (inv-p (and (logtest ch #x80) (or (= mode 2) (= mode 3))))
-             (alt-p (and (logtest ch #x40) (or (= mode 2) (= mode 3)))))
+             (inv-p (and attr-p (logtest ch #x80)))
+             (alt-p (and attr-p (logtest ch #x40)))
+             ;; Per-character color pair (see docstring).
+             (on-color  (if attr-p
+                            (cond (inv-p colbk)
+                                  (alt-p colpf1)
+                                  (t     colpf2))
+                            (case (ldb (byte 2 6) ch)
+                              (0 colpf0) (1 colpf1) (2 colpf2) (t colpf3))))
+             (off-color (if inv-p colpf2 colbk))
+             (on-r  (atari-color->r on-color))
+             (on-g  (atari-color->g on-color))
+             (on-b  (atari-color->b on-color))
+             (off-r (atari-color->r off-color))
+             (off-g (atari-color->g off-color))
+             (off-b (atari-color->b off-color))
+             (p     (+ pf-base (* cx px-per-ch 3))))
+        (declare (type fixnum p))
         (dotimes (bx 8)
-          (let* ((bit-val (ldb (byte 1 (- 7 bx)) bits))
-                 (color
-                  (case mode
-                    ((2 3)
-                     (cond
-                       (inv-p (if (zerop bit-val) colpf2 colbk))
-                       (alt-p (if (zerop bit-val) colbk  colpf1))
-                       (t     (if (zerop bit-val) colbk  colpf2))))
-                    ((4 5)
-                     (if (zerop bit-val) colbk
-                         (case (ldb (byte 2 6) ch)
-                           (0 colpf0) (1 colpf1) (2 colpf2) (t colpf3))))
-                    ((6 7)
-                     (if (zerop bit-val) colbk
-                         (case (ldb (byte 2 6) ch)
-                           (0 colpf0) (1 colpf1) (2 colpf2) (t colpf3))))
-                    (t colbk)))
-                 ;; For wide-char modes each glyph bit covers 2 output pixels.
-                 (out-x (+ (* cx px-per-ch) (* bx (if wide-p 2 1))))
-                 (p     (+ pf-base (* out-x 3))))
-            (%write-rgb fb p color)
+          (multiple-value-bind (r g b)
+              (if (logbitp (- 7 bx) bits)
+                  (values on-r on-g on-b)
+                  (values off-r off-g off-b))
+            (setf (aref fb p)       r
+                  (aref fb (+ p 1)) g
+                  (aref fb (+ p 2)) b)
+            (incf p 3)
+            ;; Wide-char modes: each glyph bit covers 2 output pixels.
             (when wide-p
-              (%write-rgb fb (+ p 3) color))))))))
+              (setf (aref fb p)       r
+                    (aref fb (+ p 1)) g
+                    (aref fb (+ p 2)) b)
+              (incf p 3))))))))
 
 (defun %render-bitmap-mode (fb pf-base screen-ptr mode gtia-wr bus)
   "Render map (bitmap) modes 8-F into PF-BASE columns of FB.
