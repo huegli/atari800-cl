@@ -29,7 +29,14 @@
 > One limitation newly pinned by test: the 128-entry palette collapses
 > mode 9's 16 luminances into 8 pairs — the color bytes are
 > hardware-correct, so a 256-entry palette would recover them.
-> Phase 8 (POKEY timer fidelity) is next.
+>
+> **Phase 8 done (2026-08-03)**: POKEY reload offsets (AUDF+4 at
+> 1.79 MHz, +7 for linked pairs, AUDF+1 on the divided clocks) and
+> linked 16-bit channels with the IRQ taken from the high channel.
+> The period figures keep their CONFIRM flag — implemented as this
+> plan states them, recorded in `src/pokey.lisp`'s header.
+> Phase 9 (POKEY audio synthesis) is next, and its frequencies now
+> come out right the first time.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -93,7 +100,7 @@ and say so in the commit message.
 | 5     | Playfield DMA steal tables                   | 3          | yes      | done   |
 | 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      | done   |
 | 7     | GTIA modes 9/10/11                           | 6          | no       | done   |
-| 8     | POKEY timer fidelity                         | —          | no       |
+| 8     | POKEY timer fidelity                         | —          | no       | done   |
 | 9     | POKEY audio synthesis core                   | 8          | yes      |
 | 10    | AESP audio streaming + WAV capture           | 9          | no       |
 | 11    | A/V recording tooling (`record.sh` → mp4)    | 4, 10      | no       |

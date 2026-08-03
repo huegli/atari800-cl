@@ -3,6 +3,52 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 8 — POKEY timer fidelity
+
+MISC_IMPROVEMENTS_PLAN.md item 5.  Two divergences from hardware, both
+in the timer period model, fixed together because they change what the
+existing timer tests mean.
+
+**Reload offsets.**  The period was AUDF+1 in every configuration; on
+hardware POKEY's counter reload costs extra cycles at the fast clock:
+
+| clock                    | period                              |
+|--------------------------|-------------------------------------|
+| 1.79 MHz, unlinked       | AUDF + 4 CPU cycles                 |
+| 1.79 MHz, 16-bit linked  | 256*AUDF_hi + AUDF_lo + 7 cycles    |
+| 64 kHz / 15 kHz          | AUDF + 1 of the *divided* clock     |
+
+`%TIMER-RELOAD-VALUE` is now the single source of the countdown reload,
+used by both underflow and STIMER.  The figures come from the plan
+(quoting the Altirra Hardware Reference), which flags them **CONFIRM**;
+no independent source was available here, so they are implemented as
+stated and the flag is carried into `src/pokey.lisp`'s header.
+
+**Linked 16-bit channels.**  AUDCTL bit 4 joins channels 1+2 and bit 3
+joins 3+4.  A linked pair is ONE 16-bit counter clocked by the low
+channel's clock select — the low byte borrows from the high byte rather
+than reloading independently, so the period is `256*hi + lo + offset`,
+not the product of two independent periods.  The pair's whole countdown
+lives in the low channel's slot; the high channel's own divided clock
+drives nothing while linked, and the pair's IRQ comes from the HIGH
+channel's IRQEN bit (timer 2 for 1+2, timer 4 for 3+4).
+
+Tests that changed meaning are renamed and re-derived with citations:
+`pokey-timer1-fires-irq-after-audf1+1-ticks` →
+`...-audf1+4-ticks`, plus the AUDF=0-at-1.79 MHz tick counts in three
+IRQ-line regression tests and a comment in the machine suite.  New
+tests cover the fast-clock STIMER offset, both linked pairs' periods
+and IRQ sources, a linked pair on the divided clock (no fast offset),
+and unchanged independent behaviour when the link bits are clear.  The
+`pokey-tick`/`pokey-advance` equivalence script gains four linked-mode
+phases (fast pair, the same pair moved to 64 kHz, the 3+4 pair, then
+unlinking), so the batched advance is pinned against the per-cycle loop
+through every new path.
+
+Suite: 1946 checks green on both implementations.  The `irq` bench
+workload uses the 64 kHz clock, whose period is unchanged, so benchmark
+numbers are unaffected.
+
 ## ROADMAP Phase 7 — GTIA color modes 9/10/11
 
 PRIOR bits 6-7 now reinterpret an ANTIC mode-F fetch: the same 40 bytes

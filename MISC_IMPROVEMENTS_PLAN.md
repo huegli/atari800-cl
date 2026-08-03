@@ -1,10 +1,13 @@
 # Miscellaneous Improvements Plan
 
-> **Status (2026-08-02): items 1, 2, 3, 6, 7, 8 done** (items 1-3, 8 via
-> ROADMAP.md Phase 1; items 6-7 via ROADMAP.md Phase 6c — PAL register
-> now reads the $0F NTSC pattern, read-side defaults deduped into
-> %INIT-READ-REGS). Items 4-5, 9-11 remain open; see ROADMAP.md for
-> where each is scheduled (item 4 -> Phase 12, item 5 -> Phase 8).
+> **Status (2026-08-03): items 1, 2, 3, 5, 6, 7, 8 done** (items 1-3, 8
+> via ROADMAP.md Phase 1; items 6-7 via ROADMAP.md Phase 6c — PAL
+> register now reads the $0F NTSC pattern, read-side defaults deduped
+> into %INIT-READ-REGS; item 5 via ROADMAP.md Phase 8 — reload offsets
+> and linked 16-bit channels, with the plan's CONFIRM-flagged period
+> figures implemented as stated and the flag carried into
+> src/pokey.lisp's header). Items 4, 9-11 remain open; item 4 is
+> ROADMAP.md Phase 12.
 
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent
