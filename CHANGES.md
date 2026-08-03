@@ -3,6 +3,52 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Renderer: per-character color-pair hoisting in char modes
+
+After the P/M fix, glyph rendering was the display frame's dominant
+term (71% SBCL / 60% LispWorks): `%render-char-mode` dispatched on the
+ANTIC mode and did three palette lookups (via `%write-rgb`) for every
+one of 61,440 glyph pixels per frame.  A character row only ever has
+two colors — glyph-on and glyph-off, both fixed per character — so
+both RGB triples are now resolved once per character (six palette
+lookups instead of 24-48) and the inner 8-bit loop just stores bytes.
+New tests pin the previously-untested attribute paths (mode-2 inverse
+and alternate video, mode-6 wide chars + color select from the char's
+top bits) before the rewrite.
+
+Measured (display, mean of 3): SBCL 1124.8 -> 1931.6 fps (+72%; 3.68x
+vs. the 525.5 before this optimization pass), LispWorks 255.2 -> 332.0
+fps (+30%; 4.97x vs. 66.7, now ~5.5x realtime). Suite 1853/1853 green
+on both implementations.
+
+## Renderer: span-based P/M compositing + border-only background fill
+
+A decomposition of the new `display` bench workload showed P/M
+compositing eating 52% (SBCL) / 67% (LispWorks) of a display frame's
+entire cost WITH NO P/M OBJECTS ENABLED: `%render-pm-layer` made a
+non-inlined `%pm-pixel-color` call for every one of 384x240 = 92,160
+pixels per frame, each re-reading all 8 objects' loop-invariant
+HPOS/SIZE/GRAF registers.
+
+- `%render-pm-layer` rewritten span-based: each enabled object paints
+  its own <= 32-column span, lowest-priority first (M3..M0, P3..P0), so
+  the highest-priority color lands on top — bit-for-bit the same output
+  as the per-pixel arbitration (new tests pin overlap priority, player
+  sizing, missile geometry/colors, and edge clipping). A row with all
+  GRAF registers zero exits after five register reads.
+- `render-scanline` floods only the two 32-column borders when a
+  playfield renderer will cover the 320 active columns anyway (the full
+  384-pixel flood was overwritten immediately on every playfield line).
+- `src/renderer.lisp` now carries the same explicit hot-path
+  `(declaim (optimize (speed 3) (safety 1) (debug 1)))` as the other
+  hot files instead of relying on the policy leaking from earlier
+  files in the serial build (~8% on LispWorks when recompiled alone).
+
+Measured (display workload, mean of 3): SBCL 525.5 -> 1124.8 fps
+(2.14x), LispWorks 66.7 -> 255.2 fps (3.82x, from ~1.1x realtime to
+~4.3x). nop/irq/klaus unchanged within session noise. Suite 1842/1842
+green on both implementations.
+
 ## Phases 1-5 review fixes (3) — display bench workload + misc hardening
 
 Closes out the remaining recommendations from the Phases 1-5 review:

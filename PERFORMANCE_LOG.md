@@ -74,6 +74,72 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | f7ca0d6  | lispworks      | irq      | 1462.81 | 24.413     | Phases 1-5 review fixes (mean of 3)  |
 | 2026-08-02 | f7ca0d6  | lispworks      | display  |   66.74 |  1.114     | NEW workload: DMA-active + renderer (mean of 3) |
 | 2026-08-02 | f7ca0d6  | lispworks      | klaus    |  924.15 | 15.424     | Phases 1-5 review fixes, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | e4cce02   | sbcl          | nop      | 3500.02 | 58.412     | Renderer: span P/M + border fill (mean of 3) |
+| 2026-08-02 | e4cce02   | sbcl          | irq      | 3688.69 | 61.560     | Renderer: span P/M + border fill (mean of 3) |
+| 2026-08-02 | e4cce02   | sbcl          | display  | 1124.78 | 18.772     | Renderer: span P/M + border fill — 2.14x (mean of 3) |
+| 2026-08-02 | e4cce02   | sbcl          | klaus    | 3048.00 | 50.868     | Renderer opt, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | e4cce02   | lispworks     | nop      |  895.83 | 14.950     | Renderer: span P/M + border fill (mean of 3) |
+| 2026-08-02 | e4cce02   | lispworks     | irq      | 1411.38 | 23.555     | Renderer: span P/M + border fill (mean of 3) |
+| 2026-08-02 | e4cce02   | lispworks     | display  |  255.15 |  4.258     | Renderer: span P/M + border fill — 3.82x (mean of 3) |
+| 2026-08-02 | e4cce02   | lispworks     | klaus    |  905.07 | 15.105     | Renderer opt, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 01cc84b   | sbcl          | nop      | 3501.11 | 58.430     | Renderer: char color-pair hoist (mean of 3) |
+| 2026-08-02 | 01cc84b   | sbcl          | irq      | 3716.16 | 62.019     | Renderer: char color-pair hoist (mean of 3) |
+| 2026-08-02 | 01cc84b   | sbcl          | display  | 1931.61 | 32.236     | Renderer: char color-pair hoist — +72% (mean of 3) |
+| 2026-08-02 | 01cc84b   | sbcl          | klaus    | 3111.00 | 51.919     | Renderer char hoist, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-02 | 01cc84b   | lispworks     | nop      |  912.57 | 15.230     | Renderer: char color-pair hoist (mean of 3) |
+| 2026-08-02 | 01cc84b   | lispworks     | irq      | 1442.17 | 24.069     | Renderer: char color-pair hoist (mean of 3) |
+| 2026-08-02 | 01cc84b   | lispworks     | display  |  332.01 |  5.541     | Renderer: char color-pair hoist — +30% (mean of 3) |
+| 2026-08-02 | 01cc84b   | lispworks     | klaus    |  938.18 | 15.657     | Renderer char hoist, klaus+PASS, 3500 frames (mean of 3) |
+
+## Renderer optimization — per-character color-pair hoisting
+
+With P/M compositing fixed, decomposition showed glyph rendering as
+the display frame's dominant term (71% SBCL / 60% LispWorks): a mode
+CASE dispatch plus three palette lookups per output pixel.  A char row
+has at most two colors, both fixed per character, so both RGB triples
+are now resolved once per character and the glyph loop only stores
+bytes.  display mean of 3: SBCL 1124.8 -> 1931.6 fps (+72%), LispWorks
+255.2 -> 332.0 fps (+30%).  Cumulative over the whole optimization
+pass (vs. the f7ca0d6 rows): SBCL 3.68x, LispWorks 4.97x (~1.1x
+realtime -> ~5.5x).  nop/irq/klaus unchanged within session noise.
+
+Prototype-methodology note for future sessions: measuring a renderer
+variant by LOADing a redefinition source file works on SBCL (LOAD
+compiles) but silently runs INTERPRETED on LispWorks — the LW
+prototype of this change benched at 2.5 fps until recompiled.  Use
+COMPILE-FILE + LOAD (or bench the committed code) on LispWorks.
+
+Remaining display-frame profile after both renderer commits (SBCL /
+LispWorks, from the same-image decomposition): CPU+chips emulation
+~0.20 / ~0.81 ms, playfield render now the remainder — further
+candidates are per-row glyph batching and cheaper border fills, but
+Phase 6b's PRIOR rewrite will restructure these loops anyway (it must
+emit per-pixel source tags), so fold further playfield tuning into
+that phase rather than optimizing twice.
+
+## Renderer optimization — span-based P/M compositing + border-only fill
+
+Decomposing the display workload (scanline callback stubbed vs. P/M
+layer stubbed) showed P/M compositing at 52% (SBCL) / 67% (LispWorks)
+of the whole frame with NO P/M objects enabled: 92,160 non-inlined
+per-pixel %PM-PIXEL-COLOR calls per frame, each re-reading all 8
+objects' loop-invariant registers.  The fix: row-level early-out (all
+GRAF registers zero -> five register reads and done) + span painting
+(each enabled object paints its own <= 32-column span,
+lowest-priority first).  Also: the full-row background flood is now
+borders-only on playfield lines (320 of 384 pixels were being flooded
+and immediately overwritten), and renderer.lisp carries the explicit
+hot-path optimize declaim like the other hot files.
+
+display workload, mean of 3, vs. the f7ca0d6 rows: SBCL 525.5 ->
+1124.8 fps (2.14x, projection was ~2x), LispWorks 66.7 -> 255.2 fps
+(3.82x, projection was ~3x; ~1.1x realtime -> ~4.3x realtime, restoring
+headroom for Phase 6 priority work and Phase 9 audio).  nop/irq/klaus
+moved -3..-5% — consistent with this session's steady downward drift
+(see the b4e8d51 re-baseline note above), and those workloads never
+enter the changed code (render path only).  P/M semantics are pinned
+by four new renderer tests (overlap priority, sizing, missile
+geometry, edge clipping); suite 1842/1842 on both implementations.
 
 ## Phases 1-5 review fixes — map-mode/WSYNC corrections + display workload
 
