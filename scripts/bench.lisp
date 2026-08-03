@@ -22,6 +22,13 @@
 ;;;;             AESP server wires it.  Exercises the DMA-active steal
 ;;;;             accounting plus per-line rendering — the path real
 ;;;;             display programs (and A/V capture) actually run.
+;;;;   AUDIO   — the NOP sled with POKEY audio synthesis attached and all
+;;;;             four channels voiced (two on the 1.79 MHz clock, so
+;;;;             underflows — and therefore flip-flop clocking — are
+;;;;             frequent), draining once per frame as an AESP audio
+;;;;             client would.  The other workloads all run with audio
+;;;;             DETACHED, so the pair of rows shows both that the
+;;;;             no-audio path stays free and what synthesis costs.
 ;;;;   KLAUS   — Klaus Dormann 6502 functional test binary loaded into
 ;;;;             RAM at $0000, run until the success trap at $3469.
 ;;;;             Skips gracefully if roms/6502_functional_test.bin is absent.
@@ -227,6 +234,36 @@ Called by RUN-WORKLOAD after cold reset, before the warm-up frames."
                  fb row a gtia (atari800-cl.machine:atari-machine-bus m))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Audio workload setup
+;;;
+;;; Measures the synthesis path: an attached audio unit, all four
+;;; channels voiced with different distortions, two of them on the
+;;; 1.79 MHz clock so their flip-flops are clocked every few cycles.
+;;; Every other workload runs with audio detached, which is what makes
+;;; the detached/attached row pair meaningful.
+
+(defun %setup-audio-workload (machine)
+  "Attach an audio unit to MACHINE, voice all four POKEY channels, and
+drain once per frame (as an AESP audio client will in Phase 10)."
+  (let ((bus (atari800-cl.machine:atari-machine-bus machine)))
+    (atari800-cl.machine:machine-attach-audio machine)
+    ;; AUDCTL: channels 1 and 3 on the 1.79 MHz clock.
+    (atari800-cl.bus:bus-write bus #xD208 #x60)
+    ;; Four channels, four distortions, all at full volume.
+    (atari800-cl.bus:bus-write bus #xD200 60)   ; AUDF1
+    (atari800-cl.bus:bus-write bus #xD201 #xAF) ; AUDC1: pure tone
+    (atari800-cl.bus:bus-write bus #xD202 80)   ; AUDF2
+    (atari800-cl.bus:bus-write bus #xD203 #x8F) ; AUDC2: poly17 noise
+    (atari800-cl.bus:bus-write bus #xD204 100)  ; AUDF3
+    (atari800-cl.bus:bus-write bus #xD205 #xCF) ; AUDC3: poly4
+    (atari800-cl.bus:bus-write bus #xD206 120)  ; AUDF4
+    (atari800-cl.bus:bus-write bus #xD207 #x2F) ; AUDC4: poly5-gated tone
+    (atari800-cl.bus:bus-write bus #xD209 0)    ; STIMER
+    ;; Drain per frame so the buffer never grows past one frame's worth.
+    (setf (atari800-cl.machine:atari-machine-post-frame-fn machine)
+          (lambda (m) (atari800-cl.machine:machine-audio-drain m)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Klaus Dormann functional test workload
 
 (defun %load-klaus-binary-into-bus (bus bytes)
@@ -343,10 +380,10 @@ Returns the printed line as a string."
         (force-output *standard-output*)
         line))))
 
-(defun run-benchmarks (&key (workloads '(:nop :irq :display :klaus)))
+(defun run-benchmarks (&key (workloads '(:nop :irq :display :audio :klaus)))
   "Run every workload named in WORKLOADS (default :nop, :irq, :display,
-:klaus) and print one BENCH line per workload.  The :klaus workload
-skips gracefully if the functional test binary is not found.
+:audio, :klaus) and print one BENCH line per workload.  The :klaus
+workload skips gracefully if the functional test binary is not found.
 Returns a list of the printed lines (NIL entries for skipped workloads
 are removed)."
   (let ((roms (list (cons :nop (make-nop-rom))
@@ -361,6 +398,10 @@ are removed)."
         ((eq w :display)
          (push (run-workload "display" (make-nop-rom)
                              :setup-fn #'%setup-display-workload)
+               lines))
+        ((eq w :audio)
+         (push (run-workload "audio" (make-nop-rom)
+                             :setup-fn #'%setup-audio-workload)
                lines))
         (t
          (let ((rom (cdr (assoc w roms))))

@@ -3,6 +3,52 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 9 — POKEY audio synthesis core
+
+New `src/audio.lisp` / `atari800-cl.audio`, loaded between `pokey` and
+`irq`, turns POKEY register state into mono 8-bit PCM at 44,744 Hz (one
+sample every 40 CPU cycles → 746-747 samples per NTSC frame).
+
+**Synthesis.**  Each channel has a one-bit output flip-flop clocked by
+its timer's underflow.  AUDC bits 7-5 decide what the clock does,
+gated through polynomial counters free-running at 1.79 MHz: bit 7
+bypasses the 5-bit gate poly, bit 5 toggles the flip-flop (square
+wave), bit 6 loads it from poly4, otherwise it loads from poly17 (or
+poly9 when AUDCTL bit 7 selects the short poly) — the eight documented
+distortions.  AUDC bit 4 (volume-only) bypasses the flip-flop and emits
+the volume as DC.  Mixing: each channel deflects the level by ±volume,
+doubled and centred on 128.
+
+**Poly tables** are built at load time from POKEY's own `STEP-LFSR` and
+tap constants, which Phase 9 factored out of the RANDOM register's two
+steppers — so the audio distortion polys and the RNG polys cannot drift
+apart.  The 4- and 5-bit taps are new and their maximal-length property
+is pinned by test, as the 9/17-bit ones already were.
+
+**Wiring.**  POKEY gains an `AUDIO` slot plus two function slots that
+`ATTACH-AUDIO` fills in, so POKEY never names the audio package (the
+same closure discipline the bus uses for the chips).  A cycle run
+elapses in the audio unit BEFORE the expiries at its end are processed,
+which is what makes `pokey-tick` and `pokey-advance` produce identical
+audio.  A linked 16-bit pair is voiced by its HIGH channel's AUDC — the
+same channel that owns its IRQ.
+
+**Facade.**  `a800:machine-attach-audio` (fresh unit by default, NIL to
+detach) and `a800:machine-audio-drain` (fresh sample vector, empties
+the buffer), plus `a800:+audio-sample-rate+`.
+
+Out of scope, documented in the file header rather than approximated:
+AUDCTL's two high-pass filters (bits 1-2), two-tone serial mode, and
+real POKEY's non-linear mixer/volume curve.
+
+New `audio` bench workload (all four channels voiced, two on the
+1.79 MHz clock, draining per frame) measures the synthesis path; every
+other workload runs with audio detached, so the row pair shows both
+that the no-audio path stays free and what synthesis costs.  See
+`PERFORMANCE_LOG.md`.
+
+Suite: 1983 checks green on both implementations.
+
 ## ROADMAP Phase 8 — POKEY timer fidelity
 
 MISC_IMPROVEMENTS_PLAN.md item 5.  Two divergences from hardware, both

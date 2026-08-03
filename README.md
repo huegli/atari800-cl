@@ -32,8 +32,13 @@ What's implemented:
   player-vs-playfield / missile-vs-player / missile-vs-playfield
   collision recording, HITCLR, trigger / CONSOL / PAL defaults.
 - **POKEY** — four-channel timers with per-channel clock divider,
-  IRQEN/IRQST latches (active-low) and timer-1/2/4 IRQs, 17- and
-  9-bit polynomial RNG behind RANDOM, audio register scaffolding.
+  hardware reload offsets (AUDF+4 at 1.79 MHz) and linked 16-bit
+  channel pairs, IRQEN/IRQST latches (active-low) and timer-1/2/4
+  IRQs, 17- and 9-bit polynomial RNG behind RANDOM.
+- **POKEY audio** — four-channel synthesis into mono 8-bit PCM at
+  44 744 Hz: poly4/5/9/17 distortions, volume-only mode, and mixing,
+  attached on demand with `machine-attach-audio` and collected with
+  `machine-audio-drain` (746–747 samples per frame).
 - **Machine scheduler** — `MACHINE-RUN-FRAME` runs one NTSC frame
   (29 868 clocks = 262 scanlines × 114 CPU cycles) scanline-by-scanline:
   ANTIC fires each line's events and reports its stolen cycles, the CPU
@@ -55,9 +60,9 @@ What's implemented:
 
 What's *not* yet implemented:
 
-- POKEY audio synthesis — register state is maintained; waveform
-  generation is left to a downstream consumer.  (AESP
-  `AUDIO_SUBSCRIBE` replies with a config but sends no samples.)
+- Streaming the synthesised audio over AESP — samples are produced and
+  drainable in-process, but `AUDIO_SUBSCRIBE` still replies with a
+  config and sends no frames.
 - Serial I/O and SIO bus (cassette, disk, printer).
 - Light pen, cartridge mapper, and the right-cartridge slot.
 
@@ -377,7 +382,8 @@ atari800-cl/
 │   ├── illegal.lisp         # 105 NMOS undocumented opcodes
 │   ├── antic.lisp           # NTSC display-list / DMA engine
 │   ├── gtia.lisp            # player/missile + collision latches
-│   ├── pokey.lisp           # timers + IRQ + RNG + audio scaffolding
+│   ├── pokey.lisp           # timers + IRQ + RNG
+│   ├── audio.lisp           # POKEY audio synthesis → 8-bit PCM
 │   ├── irq.lisp             # NMI/IRQ routing helpers
 │   ├── renderer.lisp        # per-scanline 384×240 RGB pixel renderer
 │   ├── machine.lisp         # top-level ATARI-MACHINE + run-frame + mailbox
@@ -411,10 +417,11 @@ atari800-cl/
 
 ## Known limitations
 
-- **No audio synthesis.** POKEY emulates timer / IRQ / RNG
-  accurately, but does not produce a PCM stream; audio output is
-  expected to live in a downstream consumer that reads the register
-  state.
+- **Audio is synthesised but not streamed.** POKEY produces mono 8-bit
+  PCM at 44 744 Hz (`machine-attach-audio` / `machine-audio-drain`),
+  but nothing pushes it over AESP yet.  Not modelled inside the
+  synthesis: AUDCTL's two high-pass filters (bits 1-2), two-tone
+  serial mode, and real POKEY's non-linear volume/mixer curve.
 - **Rendering is scanline-granular, not cycle-exact.**  The pixel
   renderer paints each scanline once, from the chip state at the end
   of the line; GTIA register changes *within* a line (mid-scanline

@@ -37,6 +37,16 @@
 > plan states them, recorded in `src/pokey.lisp`'s header.
 > Phase 9 (POKEY audio synthesis) is next, and its frequencies now
 > come out right the first time.
+>
+> **Phase 9 done (2026-08-03)**: `src/audio.lisp` synthesises four
+> POKEY channels (poly4/5/9/17 distortion + volume-only mode) into
+> mono 8-bit PCM at 44,744 Hz, attached on demand through function
+> slots on the POKEY struct. Detached machines pay one slot read and
+> branch per POKEY advance — measured at ~4% on the `nop` workload
+> (the maximum possible advance density: one advance per 2-cycle
+> instruction) and within noise everywhere else, via an interleaved
+> A/B against the pre-phase commit; see `PERFORMANCE_LOG.md`.
+> Phase 10 (AESP audio streaming + WAV capture) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -101,7 +111,7 @@ and say so in the commit message.
 | 6     | P/M DMA, full priority, GTIA cleanups        | —          | yes      | done   |
 | 7     | GTIA modes 9/10/11                           | 6          | no       | done   |
 | 8     | POKEY timer fidelity                         | —          | no       | done   |
-| 9     | POKEY audio synthesis core                   | 8          | yes      |
+| 9     | POKEY audio synthesis core                   | 8          | yes      | done   |
 | 10    | AESP audio streaming + WAV capture           | 9          | no       |
 | 11    | A/V recording tooling (`record.sh` → mp4)    | 4, 10      | no       |
 | 12    | Tom Harte ProcessorTests harness             | —          | no       |

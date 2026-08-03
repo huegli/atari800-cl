@@ -11,11 +11,12 @@ The emulated machine is functionally complete at the chip-state level:
 - **6502 CPU** — all 256 opcodes (151 documented + 105 NMOS illegal/undocumented), with NMI/IRQ servicing.
 - **MMU** — PORTB-driven bank switching (OS ROM, BASIC ROM, self-test overlay).
 - **System bus** — full Atari 800 XL memory map with RAM/ROM banking and memory-mapped I/O dispatch to the four chips.
-- **PIA** (6520), **ANTIC** (NTSC scanline timing + display-list DMA), **GTIA** (player/missile state + collision latches), **POKEY** (timers, IRQ, RNG, audio register scaffolding).
+- **PIA** (6520), **ANTIC** (NTSC scanline timing + display-list DMA + P/M DMA), **GTIA** (player/missile state + collision latches + full PRIOR priority), **POKEY** (timers with hardware reload offsets and linked 16-bit channels, IRQ, RNG).
+- **POKEY audio synthesis** (`src/audio.lisp`) — four-channel polynomial distortion (poly4/5/9/17) + mixing into mono 8-bit PCM at ~44.7 kHz, attached on demand via `machine-attach-audio` so machines without audio pay only a NIL test per POKEY advance.
 - **Machine scheduler** — `MACHINE-RUN-FRAME` runs one NTSC frame (29,868 clocks = 262 scanlines × 114 CPU cycles) scanline-by-scanline: `ANTIC-BEGIN-SCANLINE` fires the line's events and reports stolen cycles, the CPU executes against the line's remaining budget with POKEY advanced instruction-by-instruction, and `ANTIC-END-SCANLINE` closes the line.
 - **Pixel renderer** — per-scanline 384×240 24-bit RGB framebuffer rendering (background + playfield modes 2-F + player/missile compositing with PRIOR arbitration), driven by the machine's per-scanline callback and pushed to clients over AESP video frames; `scripts/capture-screenshot.py` grabs PNG/PPM screenshots.
 
-What is *not* modelled: POKEY audio synthesis (register state only), serial/SIO bus, keyboard scanning, paddles/light-pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
+What is *not* modelled: POKEY's two high-pass filters (AUDCTL bits 1-2) and two-tone serial mode, the serial/SIO bus, keyboard scanning, paddles/light-pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
 
 ## Build & Test Commands
 
@@ -124,13 +125,16 @@ without real ROM images (synthetic NOP/IRQ workloads built inline).
 
 Each prints one machine-readable line per workload:
 `BENCH <workload> frames=600 seconds=<s> fps=<fps> realtime-x=<fps/59.92>`.
-Four workloads: `nop` (NOP-sled baseline), `irq` (busy loop + POKEY
+Five workloads: `nop` (NOP-sled baseline), `irq` (busy loop + POKEY
 timer 1 IRQs exercising the interrupt path), `display` (NOP sled with a
 24-line mode-2 display list fetched by ANTIC — DMA-active steal
 accounting — and the pixel renderer attached via the scanline callback),
-and `klaus` (the Klaus Dormann functional test as a CPU-heavy load;
-skips if the binary is absent). Tune via
-`atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
+`audio` (NOP sled with POKEY audio synthesis attached and all four
+channels voiced, draining per frame — every other workload runs with
+audio detached, so the pair of rows shows both that the no-audio path
+stays free and what synthesis costs), and `klaus` (the Klaus Dormann
+functional test as a CPU-heavy load; skips if the binary is absent).
+Tune via `atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
 
 **Rule: every optimization commit updates `PERFORMANCE_LOG.md` with
 before/after numbers from BOTH implementations.** Measure first, commit
@@ -152,7 +156,7 @@ Each chip lives in its own package; `:use` edges define the layering. The `.asd`
 
 5. **atari800-cl.cpu** (`src/cpu.lisp` + `src/cpu-opcodes.lisp` + `src/illegal.lisp`) — Bus-agnostic NMOS 6502 core. The CPU communicates via two function slots (`cpu-bus-read`, `cpu-bus-write`) rather than referencing memory directly, so anything (the bus, or a bare memory object via the legacy `attach-memory-bus`) can intercept reads/writes. The 256-entry dispatch table (`*opcode-table*`) is a simple-vector of `(lambda (cpu) -> cycles)` built by `DEFOPCODE`; `illegal.lisp` fills the remaining 105 undocumented slots.
 
-6. **Peripheral chips** — **atari800-cl.pia** (`src/pia.lisp`, 6520; PORTB writes route through `mmu`), **atari800-cl.antic** (`src/antic.lisp`), **atari800-cl.gtia** (`src/gtia.lisp`), **atari800-cl.pokey** (`src/pokey.lisp`), and **atari800-cl.irq** (`src/irq.lisp`, NMI/IRQ line routing into the CPU).
+6. **Peripheral chips** — **atari800-cl.pia** (`src/pia.lisp`, 6520; PORTB writes route through `mmu`), **atari800-cl.antic** (`src/antic.lisp`), **atari800-cl.gtia** (`src/gtia.lisp`), **atari800-cl.pokey** (`src/pokey.lisp`), **atari800-cl.audio** (`src/audio.lisp`, POKEY audio synthesis; loads after `pokey`, whose `step-lfsr` builds its poly tables and whose struct holds the attachment — POKEY calls it through function slots, never naming the package), and **atari800-cl.irq** (`src/irq.lisp`, NMI/IRQ line routing into the CPU).
 
 7. **atari800-cl.renderer** (`src/renderer.lisp`) — Per-scanline NTSC pixel renderer: converts ANTIC display-list state + GTIA registers into a 384×240 24-bit RGB framebuffer (background flood, 320-pixel playfield for modes 2-F, player/missile compositing via PRIOR). Sits between the chips and the machine in the `.asd` order; the machine invokes it through its `scanline-fn` / `post-frame-fn` callback slots, and the AESP server pushes completed frames to video subscribers.
 

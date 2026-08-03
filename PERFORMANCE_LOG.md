@@ -99,6 +99,55 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
 
+## ROADMAP Phase 9 — POKEY audio synthesis
+
+| date       | commit   | implementation | workload | fps     | realtime-x | notes                            |
+|------------|----------|----------------|----------|---------|------------|----------------------------------|
+| 2026-08-03 | (P9)     | sbcl           | nop      | 3112.11 | 51.938     | audio DETACHED (mean of 3)       |
+| 2026-08-03 | (P9)     | sbcl           | irq      | 3664.67 | 61.159     | audio DETACHED (mean of 3)       |
+| 2026-08-03 | (P9)     | sbcl           | display  | 1794.07 | 29.941     | audio DETACHED (mean of 3)       |
+| 2026-08-03 | (P9)     | sbcl           | audio    | 1627.98 | 27.169     | audio ATTACHED, 4 channels voiced (mean of 3) |
+| 2026-08-03 | (P9)     | sbcl           | klaus    | 2838.28 | 47.368     | audio DETACHED, klaus+PASS, 3500 frames (mean of 3) |
+| 2026-08-03 | (P9)     | lispworks      | nop      |  890.10 | 14.855     | audio DETACHED (mean of 3)       |
+| 2026-08-03 | (P9)     | lispworks      | irq      | 1374.62 | 22.941     | audio DETACHED (mean of 3)       |
+| 2026-08-03 | (P9)     | lispworks      | display  |  311.39 |  5.197     | audio DETACHED (mean of 3)       |
+| 2026-08-03 | (P9)     | lispworks      | audio    |  286.00 |  4.773     | audio ATTACHED, 4 channels voiced (mean of 3) |
+| 2026-08-03 | (P9)     | lispworks      | klaus    |  890.21 | 14.857     | audio DETACHED, klaus+PASS, 3500 frames (mean of 3) |
+
+**Detached cost (the number the phase had to prove).**  Session drift
+made the raw before/after comparison useless again, so the pre-phase
+commit (ee3c368) was benchmarked in a worktree and then A/B
+INTERLEAVED with the new build, alternating runs to cancel drift:
+
+| impl      | workload | pre-P9 (B) | post-P9 (A) | delta |
+|-----------|----------|------------|-------------|-------|
+| sbcl      | nop      | 3230.98    | 3096.49     | -4.2% |
+| sbcl      | irq      | 3611.73    | 3597.57     | -0.4% |
+| lispworks | nop      |  925.31    |  886.27     | -4.2% |
+| lispworks | irq      | 1426.97    | 1404.21     | -1.6% |
+
+Every A run fell below every B run on `nop` (both implementations),
+while `irq` alternated — so the `nop` delta is real and the `irq` one
+is noise.  That is the
+expected shape: the cost is one slot read plus branch per POKEY
+advance, and `nop` is the maximum possible advance density (a 2-cycle
+instruction means one advance per two emulated cycles), while every
+other workload runs longer instructions or spends its time elsewhere.
+
+The first implementation put that test INSIDE `pokey-advance`'s chunk
+loop and cost ~7% on `nop`; hoisting it to one test per call, with the
+two loop bodies generated from a shared MACROLET and a literal NIL
+passed to the inlined `%EXPIRE-CHANNEL` so its audio branch folds away,
+recovered roughly half of it.  What remains is the "exactly one NIL
+check per advance" the ROADMAP sanctioned.
+
+**Attached cost.**  The new `audio` workload voices all four channels
+(two on the 1.79 MHz clock, so flip-flops are clocked every few cycles)
+and drains once per frame: SBCL 1628 fps (52% of the detached NOP
+sled, 27x realtime), LispWorks 286 fps (32%, 4.8x realtime).  Both
+leave ample headroom over the 59.92 Hz target, so Phase 10 can stream
+audio without a real-time risk.
+
 ## ROADMAP Phase 6 — P/M DMA + full PRIOR priority
 
 Hot-path phases 6a (per-line P/M fetch) and 6b (source-tag recording +
