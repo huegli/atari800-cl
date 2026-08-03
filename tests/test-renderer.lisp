@@ -286,6 +286,78 @@ is active."
         "Expected COLPM0 at column 96, got ~D" (aref fb (* 96 3)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Span-based P/M compositing semantics
+;;;
+;;; %RENDER-PM-LAYER paints per-object spans lowest-priority-first
+;;; instead of scanning all 8 objects at every column; these pin the
+;;; arbitration, sizing, missile geometry, and clipping the old
+;;; per-pixel implementation defined.
+
+(test pm-player0-wins-overlap-with-player1
+  "P0 and P1 overlapping at the same HPOS: P0's color wins (lower index
+= higher priority), and P1 shows through where P0's bits are clear."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD000 80)    ; HPOSP0
+    (atari800-cl.gtia:gtia-write gtia #xD001 80)    ; HPOSP1
+    (atari800-cl.gtia:gtia-write gtia #xD00D #xF0)  ; GRAFP0: left half
+    (atari800-cl.gtia:gtia-write gtia #xD00E #xFF)  ; GRAFP1: all bits
+    (atari800-cl.gtia:gtia-write gtia #xD012 #x28)  ; COLPM0
+    (atari800-cl.gtia:gtia-write gtia #xD013 #x46)  ; COLPM1
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    ;; HPOS 80 -> column 96.  Columns 96-99: both cover, P0 bit set -> P0.
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 96))
+        "overlap with P0 bit set must show COLPM0")
+    ;; Columns 100-103: P0's bits clear, P1's set -> P1 shows through.
+    (is (= (atari800-cl.renderer:atari-color->r #x46) (%fb-r fb 100))
+        "P0's clear bits must let P1 show through")))
+
+(test pm-player-size-2-doubles-span
+  "SIZEP0 = 2 doubles the player to 16 columns (2 per GRAFP bit)."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD000 80)    ; HPOSP0 -> column 96
+    (atari800-cl.gtia:gtia-write gtia #xD008 2)     ; SIZEP0 = 2
+    (atari800-cl.gtia:gtia-write gtia #xD00D #xFF)  ; GRAFP0
+    (atari800-cl.gtia:gtia-write gtia #xD012 #x28)  ; COLPM0
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 96)))
+    (is (= (atari800-cl.renderer:atari-color->r #x28) (%fb-r fb 111))
+        "column 111 is the 16th and last column of the doubled player")
+    (is (= (atari800-cl.renderer:atari-color->r #x00) (%fb-r fb 112))
+        "column 112 is past the doubled player")))
+
+(test pm-missile-uses-own-color-and-2px-width
+  "Missile 1 (GRAFM bits 5-4) paints 2 columns at HPOSM1 in COLPM1 at
+default SIZEM."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD005 90)    ; HPOSM1 -> column 116
+    (atari800-cl.gtia:gtia-write gtia #xD011 #x30)  ; GRAFM: missile 1 bits 11
+    (atari800-cl.gtia:gtia-write gtia #xD013 #x46)  ; COLPM1
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x46) (%fb-r fb 116)))
+    (is (= (atari800-cl.renderer:atari-color->r #x46) (%fb-r fb 117))
+        "each GRAFM bit covers 1 column at SIZEM 0 (2 columns total)")
+    (is (= (atari800-cl.renderer:atari-color->r #x00) (%fb-r fb 118))
+        "column 118 is past the missile")))
+
+(test pm-offscreen-spans-clip
+  "Spans hanging off either framebuffer edge clip instead of erroring:
+HPOSP0 = 10 (fully off-screen left) paints nothing; HPOSP1 = 220 with a
+32-column quad player paints only up to column 383."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD000 10)    ; HPOSP0 -> column -44
+    (atari800-cl.gtia:gtia-write gtia #xD00D #xFF)  ; GRAFP0
+    (atari800-cl.gtia:gtia-write gtia #xD012 #x28)  ; COLPM0
+    (atari800-cl.gtia:gtia-write gtia #xD001 220)   ; HPOSP1 -> column 376
+    (atari800-cl.gtia:gtia-write gtia #xD009 4)     ; SIZEP1 = 4 (32 cols)
+    (atari800-cl.gtia:gtia-write gtia #xD00E #xFF)  ; GRAFP1
+    (atari800-cl.gtia:gtia-write gtia #xD013 #x46)  ; COLPM1
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (is (= (atari800-cl.renderer:atari-color->r #x00) (%fb-r fb 0))
+        "a fully off-screen-left player must paint nothing at column 0")
+    (is (= (atari800-cl.renderer:atari-color->r #x46) (%fb-r fb 383))
+        "the right-edge player paints through the last column")))
+
+;;; ---------------------------------------------------------------------------
 ;;; AESP frame-config bpp
 
 (test aesp-frame-config-is-24bpp

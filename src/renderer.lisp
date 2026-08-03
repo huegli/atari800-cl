@@ -16,6 +16,15 @@
 
 (in-package #:atari800-cl.renderer)
 
+;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
+;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
+;;; behaviour under :serial t; repeated here so this file's policy survives
+;;; interactive recompilation on its own.  (Until the Phases 1-5 review
+;;; this file had no declaim of its own and relied on the policy leaking
+;;; from earlier files during a serial build — measured worth ~8% on
+;;; LispWorks when recompiled standalone.)
+(declaim (optimize (speed 3) (safety 1) (debug 1)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Framebuffer geometry
 
@@ -104,7 +113,7 @@ Index with (* (ash color-register -1) 3)."))
 ;;; ---------------------------------------------------------------------------
 ;;; Framebuffer pixel helpers
 
-(declaim (inline %write-rgb %fill-row))
+(declaim (inline %write-rgb %fill-span %fill-row))
 
 (defun %write-rgb (fb base color)
   "Write Atari COLOR's RGB triple into FB at byte offset BASE."
@@ -114,18 +123,29 @@ Index with (* (ash color-register -1) 3)."))
         (aref fb (+ base 1)) (atari-color->g color)
         (aref fb (+ base 2)) (atari-color->b color)))
 
+(defun %fill-span (fb row-base start-x n color)
+  "Fill N consecutive pixels of the row at byte offset ROW-BASE with
+Atari COLOR, starting at output column START-X.  The palette lookup is
+hoisted out of the loop."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb)
+           (type fixnum row-base start-x n)
+           (type (unsigned-byte 8) color))
+  (let ((r (atari-color->r color))
+        (g (atari-color->g color))
+        (b (atari-color->b color))
+        (p (+ row-base (* start-x 3))))
+    (declare (type fixnum p))
+    (dotimes (i n)
+      (setf (aref fb p)       r
+            (aref fb (+ p 1)) g
+            (aref fb (+ p 2)) b)
+      (incf p 3))))
+
 (defun %fill-row (fb row-base color)
   "Fill all 384 pixels of the row at byte offset ROW-BASE with Atari COLOR."
   (declare (type (simple-array (unsigned-byte 8) (*)) fb)
            (type fixnum row-base) (type (unsigned-byte 8) color))
-  (let ((r (atari-color->r color))
-        (g (atari-color->g color))
-        (b (atari-color->b color)))
-    (dotimes (x +framebuffer-width+)
-      (let ((p (+ row-base (* x 3))))
-        (setf (aref fb p)       r
-              (aref fb (+ p 1)) g
-              (aref fb (+ p 2)) b)))))
+  (%fill-span fb row-base 0 +framebuffer-width+ color))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Character ROM lookup
@@ -273,68 +293,94 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
 ;;; ---------------------------------------------------------------------------
 ;;; Player/missile compositing
 
-(defun %pm-pixel-color (gtia-wr fb-x)
-  "Return the GTIA color for whichever P/M object covers framebuffer column
-FB-X, or NIL if no object covers it.  Players are checked before missiles;
-within each class the lower-numbered object wins on ties (P0 > P1 > P2 > P3).
-
-Horizontal position mapping: HPOS value H → framebuffer column H*2 - 64.
-This places HPOS=0 at column -64 (off-screen left), HPOS=128 at center.
-
-Player size: SIZE=1 → 8px, SIZE=2 → 16px, SIZE=4 → 32px.
-Missile size: SIZEM 2-bit field per missile: 0→2px, 1→4px, 2→8px, 3→16px."
-  (declare (type (simple-array (unsigned-byte 8) (*)) gtia-wr)
-           (type fixnum fb-x))
-  ;; Players 0-3
-  (dotimes (p 4)
-    (let* ((hpos  (aref gtia-wr (+ +w-hposp0+ p)))
-           (size  (aref gtia-wr (+ +w-sizep0+ p)))
-           (grafp (aref gtia-wr (+ +w-grafp0+ p)))
-           (px-w  (case size (2 16) (4 32) (t 8)))
-           (left  (- (* hpos 2) 64))
-           (right (+ left px-w)))
-      (declare (type fixnum left right px-w))
-      (when (and (>= fb-x left) (< fb-x right))
-        (let* ((bit-pos (truncate (* (- fb-x left) 8) px-w))
-               (bit-val (ldb (byte 1 (- 7 bit-pos)) grafp)))
-          (when (= bit-val 1)
-            (return-from %pm-pixel-color
-              (aref gtia-wr (+ +w-colpm0+ p))))))))
-  ;; Missiles 0-3
-  (let ((grafm (aref gtia-wr +w-grafm+))
-        (sizem (aref gtia-wr +w-sizem+)))
-    (dotimes (m 4)
-      (let* ((hpos  (aref gtia-wr (+ +w-hposm0+ m)))
-             (m-sz  (ldb (byte 2 (* m 2)) sizem))
-             (px-w  (case m-sz (0 2) (1 4) (2 8) (t 16)))
-             (left  (- (* hpos 2) 64))
-             (right (+ left px-w))
-             ;; Missile m uses 2 bits of GRAFM: bits (7-2m) and (6-2m).
-             (graf-bits (ldb (byte 2 (- 6 (* m 2))) grafm)))
-        (declare (type fixnum left right px-w))
-        (when (and (plusp graf-bits) (>= fb-x left) (< fb-x right))
-          (let* ((bit-pos (truncate (* (- fb-x left) 2) px-w))
-                 (bit-val (ldb (byte 1 (- 1 bit-pos)) graf-bits)))
-            (when (= bit-val 1)
-              (return-from %pm-pixel-color
-                (aref gtia-wr (+ +w-colpm0+ m)))))))))
-  nil)
+(defun %paint-pm-span (fb row-base hpos px-w graf nbits color)
+  "Paint one P/M object's graphics bits into the row at byte offset
+ROW-BASE.  GRAF's NBITS bits are read MSB-first; each SET bit paints
+PX-W/NBITS consecutive output columns in COLOR, starting at framebuffer
+column HPOS*2 - 64 (HPOS 0 is off-screen left, HPOS 128 is center —
+the same mapping the per-pixel arbitration used).  Columns outside
+0-383 are clipped.  Clear bits paint nothing, so lower-priority objects
+already painted underneath show through, exactly like hardware."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb)
+           (type fixnum row-base px-w nbits)
+           (type (unsigned-byte 8) hpos graf color))
+  (let ((left         (- (* hpos 2) 64))
+        (cols-per-bit (truncate px-w nbits)))
+    (declare (type fixnum left cols-per-bit))
+    (dotimes (bit nbits)
+      (when (logbitp (- nbits 1 bit) graf)
+        (let ((x0 (+ left (* bit cols-per-bit))))
+          (declare (type fixnum x0))
+          (dotimes (d cols-per-bit)
+            (let ((x (+ x0 d)))
+              (declare (type fixnum x))
+              (when (and (>= x 0) (< x +framebuffer-width+))
+                (%write-rgb fb (+ row-base (* x 3)) color)))))))))
 
 (defun %render-pm-layer (fb row-base prior gtia-wr)
   "Composite player/missile graphics over the already-rendered playfield row.
-When PRIOR bit 1 is clear (the common case), P/M objects draw on top of the
-playfield.  When bit 1 is set, playfield colors 0/1 take priority; we leave
-existing playfield pixels untouched (full multi-layer priority is not
-modelled in this initial implementation)."
+
+When PRIOR bit 1 is clear (the common case), P/M objects draw on top of
+the playfield.  When bit 1 is set, playfield colors take priority; we
+leave existing playfield pixels untouched (full multi-layer priority is
+ROADMAP.md Phase 6b).
+
+Span-based: each enabled object paints its own <= 32-column span
+directly, painted lowest-priority first (missiles M3 down to M0, then
+players P3 down to P0) so the highest-priority object's color lands on
+top — reproducing the old per-pixel arbitration exactly (players beat
+missiles, lower index beats higher; an object's CLEAR bits paint
+nothing, so whatever is underneath shows through).  The previous
+implementation instead asked, for every one of the 384 output columns,
+which of the 8 objects covers it: 92,160 non-inlined %PM-PIXEL-COLOR
+calls per frame that re-read every object's loop-invariant HPOS/SIZE/
+GRAF registers per pixel — measured at 52% (SBCL) to 67% (LispWorks)
+of a display frame's entire cost with no P/M objects enabled.  A row
+whose GRAFP0-3/GRAFM are all zero now exits after five register reads.
+
+Object geometry (unchanged): player = 8 GRAFPn bits over 8/16/32
+columns (SIZEPn 1/2/4); missile m = 2 GRAFM bits (bits 7-2m, 6-2m) over
+2/4/8/16 columns (its 2-bit field in SIZEM); missile m is colored
+COLPMm."
   (declare (type (simple-array (unsigned-byte 8) (*)) fb gtia-wr)
            (type (unsigned-byte 8) prior)
            (type fixnum row-base))
   (let ((pf-over-pm (logtest prior #x02)))
     (unless pf-over-pm
-      (dotimes (x +framebuffer-width+)
-        (let ((pm-color (%pm-pixel-color gtia-wr x)))
-          (when pm-color
-            (%write-rgb fb (+ row-base (* x 3)) pm-color)))))))
+      (let ((grafp0 (aref gtia-wr +w-grafp0+))
+            (grafp1 (aref gtia-wr (+ +w-grafp0+ 1)))
+            (grafp2 (aref gtia-wr (+ +w-grafp0+ 2)))
+            (grafp3 (aref gtia-wr (+ +w-grafp0+ 3)))
+            (grafm  (aref gtia-wr +w-grafm+)))
+        ;; Row-level early-out: nothing to composite (the overwhelmingly
+        ;; common case for software that never touches P/M graphics).
+        (when (plusp (logior grafp0 grafp1 grafp2 grafp3 grafm))
+          ;; Missiles first — lowest priority — M3 down to M0.
+          (when (plusp grafm)
+            (let ((sizem (aref gtia-wr +w-sizem+)))
+              (loop for m fixnum from 3 downto 0
+                    do (let ((bits (ldb (byte 2 (- 6 (* m 2))) grafm)))
+                         (when (plusp bits)
+                           (%paint-pm-span fb row-base
+                                           (aref gtia-wr (+ +w-hposm0+ m))
+                                           (case (ldb (byte 2 (* m 2)) sizem)
+                                             (0 2) (1 4) (2 8) (t 16))
+                                           bits 2
+                                           (aref gtia-wr (+ +w-colpm0+ m))))))))
+          ;; Players P3 down to P0 — P0 painted last, so it wins overlaps.
+          (flet ((paint-player (p grafp)
+                   (declare (type fixnum p) (type (unsigned-byte 8) grafp))
+                   (when (plusp grafp)
+                     (%paint-pm-span fb row-base
+                                     (aref gtia-wr (+ +w-hposp0+ p))
+                                     (case (aref gtia-wr (+ +w-sizep0+ p))
+                                       (2 16) (4 32) (t 8))
+                                     grafp 8
+                                     (aref gtia-wr (+ +w-colpm0+ p))))))
+            (paint-player 3 grafp3)
+            (paint-player 2 grafp2)
+            (paint-player 1 grafp1)
+            (paint-player 0 grafp0)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Top-level scanline renderer
@@ -344,11 +390,14 @@ modelled in this initial implementation)."
 where row 0 = NTSC scanline 8) into framebuffer FB.
 
 Steps:
-  1. Flood the 384-pixel row with COLBK (background color).
+  1. Background: flood the full 384-pixel row with COLBK when no
+     playfield will be drawn; otherwise flood only the two 32-column
+     borders (the playfield renderers cover all 320 active columns).
   2. If DMACTL != 0 and the current DL mode >= 2, render a 320-pixel active
      playfield at columns 32-351.  Character modes 2-7 look up glyphs in the
      character ROM at CHBASE; bitmap modes 8-F read pixels from screen RAM.
-  3. Composite player/missile graphics using PRIOR for priority.
+  3. Composite player/missile graphics using PRIOR for priority
+     (span-based; see %RENDER-PM-LAYER).
 
 The screen-data address is read from ANTIC-RENDER-SCREEN-DATA-PTR (a snapshot
 taken at the start of the scanline before any end-of-line advancement)."
@@ -366,12 +415,23 @@ taken at the start of the scanline before any end-of-line advancement)."
          (sptr    (antic-render-screen-data-ptr antic))
          (row-base (* row +framebuffer-width+ 3))
          (pf-base (+ row-base (* +playfield-left-border+ 3))))
-    ;; Step 1: background.
-    (%fill-row fb row-base colbk)
-    ;; Step 2: playfield (only when DMA is enabled and mode is non-blank).
-    (when (and (not (zerop dmactl)) (>= mode 2))
-      (if (<= mode 7)
-          (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase)
-          (%render-bitmap-mode fb pf-base sptr mode wr bus)))
+    ;; Steps 1+2: background + playfield.  The playfield renderers write
+    ;; ALL 320 active columns themselves, so when one will run, only the
+    ;; two 32-column borders need the background flood — flooding the
+    ;; full row first just to overwrite 320 of its 384 pixels was pure
+    ;; waste on every playfield line.
+    (cond
+      ((and (not (zerop dmactl)) (>= mode 2))
+       (%fill-span fb row-base 0 +playfield-left-border+ colbk)
+       (%fill-span fb row-base
+                   (+ +playfield-left-border+ +playfield-pixel-width+)
+                   (- +framebuffer-width+
+                      +playfield-left-border+ +playfield-pixel-width+)
+                   colbk)
+       (if (<= mode 7)
+           (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase)
+           (%render-bitmap-mode fb pf-base sptr mode wr bus)))
+      (t
+       (%fill-row fb row-base colbk)))
     ;; Step 3: player/missile compositing.
     (%render-pm-layer fb row-base prior wr)))
