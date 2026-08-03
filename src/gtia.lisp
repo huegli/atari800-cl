@@ -28,7 +28,8 @@
 ;;;;   8-11  M0P-M3P         missile-to-player collisions
 ;;;;   12-15 P0P-P3P         player-to-player collisions
 ;;;;   16-19 TRIG0-TRIG3     triggers (1 = released, 0 = pressed)
-;;;;   20    PAL             PAL/NTSC indicator (1 = NTSC on the 800XL we model)
+;;;;   20    PAL             PAL/NTSC indicator ($0F = NTSC on the 800XL we
+;;;;                         model; bits 1-3 all-ones = NTSC, all-zeros = PAL)
 ;;;;   31    CONSOL          read side = console-key state (low 3 bits)
 
 (in-package #:atari800-cl.gtia)
@@ -64,18 +65,34 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Defaults helper
 
+(defconstant +pal-register-ntsc+ #x0F
+  "Value of the PAL register ($D014) on an NTSC machine.  The register
+is a bit PATTERN, not a flag: bits 1-3 read all-ones on NTSC and
+all-zeros on PAL, so software tests it with AND #$0E.  Encoding matches
+atari800's gtia.c (0x0F for NTSC, 0x01 for PAL) and the Altirra
+Hardware Reference.  The previous value of 1 read as PAL to any
+software doing the documented AND #$0E test.")
+
+(defun %init-read-regs (r)
+  "Fill read-regs array R with the cold-reset defaults: collision
+latches clear, TRIG0..3 = 1 (not pressed), PAL = NTSC pattern,
+CONSOL = 7 (no keys).  Shared by %MAKE-GTIA-READ-REGS and RESET-GTIA so
+the defaults have exactly one home.  Returns R."
+  (declare (type (simple-array (unsigned-byte 8) (32)) r))
+  (fill r 0)
+  (setf (aref r +r-trig0+)       1
+        (aref r (+ +r-trig0+ 1)) 1
+        (aref r (+ +r-trig0+ 2)) 1
+        (aref r (+ +r-trig0+ 3)) 1
+        (aref r +r-pal+)         +pal-register-ntsc+
+        (aref r +r-consol+)      7)
+  r)
+
 (defun %make-gtia-read-regs ()
-  "Build the read-side register array with cold-reset defaults:
-TRIG0..3 = 1 (not pressed), PAL = 1 (NTSC), CONSOL = 7 (no keys)."
-  (let ((r (make-array 32 :element-type '(unsigned-byte 8)
-                          :initial-element 0)))
-    (setf (aref r +r-trig0+)       1
-          (aref r (+ +r-trig0+ 1)) 1
-          (aref r (+ +r-trig0+ 2)) 1
-          (aref r (+ +r-trig0+ 3)) 1
-          (aref r +r-pal+)         1
-          (aref r +r-consol+)      7)
-    r))
+  "Build the read-side register array with cold-reset defaults
+(see %INIT-READ-REGS)."
+  (%init-read-regs (make-array 32 :element-type '(unsigned-byte 8)
+                                  :initial-element 0)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; GTIA struct
@@ -157,17 +174,11 @@ PAL, and CONSOL are NOT touched."
       (gtia-clear-collisions gtia))))
 
 (defun reset-gtia (gtia)
-  "Reset the write window to zero and restore the read-side defaults."
+  "Reset the write window to zero and restore the read-side defaults
+(via %INIT-READ-REGS, the single home of those defaults)."
   (declare (type gtia gtia))
   (fill (gtia-write-regs gtia) 0)
-  (fill (gtia-read-regs  gtia) 0)
-  (let ((r (gtia-read-regs gtia)))
-    (setf (aref r +r-trig0+)       1
-          (aref r (+ +r-trig0+ 1)) 1
-          (aref r (+ +r-trig0+ 2)) 1
-          (aref r (+ +r-trig0+ 3)) 1
-          (aref r +r-pal+)         1
-          (aref r +r-consol+)      7))
+  (%init-read-regs (gtia-read-regs gtia))
   gtia)
 
 ;;; ---------------------------------------------------------------------------

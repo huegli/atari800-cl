@@ -357,7 +357,8 @@
            #:+w-hitclr+ #:+w-consol+
            ;; Register offsets (read side)
            #:+r-m0pf+ #:+r-p0pf+ #:+r-m0p+ #:+r-p0p+
-           #:+r-trig0+ #:+r-pal+ #:+r-consol+))
+           #:+r-trig0+ #:+r-pal+ #:+r-consol+
+           #:+pal-register-ntsc+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.pokey — POKEY (timers + IRQ + audio + serial + keyboard)

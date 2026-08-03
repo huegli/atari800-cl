@@ -12,14 +12,14 @@
 ;;; Defaults
 
 (test gtia-cold-reset-defaults
-  "After construction, TRIG0..3 = 1, PAL = 1 (NTSC), CONSOL = 7 (no keys)."
+  "After construction, TRIG0..3 = 1, PAL = $0F (NTSC), CONSOL = 7 (no keys)."
   (let ((g (atari800-cl.gtia:make-gtia)))
     (dotimes (i 4)
       (is (= 1 (atari800-cl.gtia:gtia-read g
                                           (+ #xD010 i)))
           "TRIG~D must default to 1 (released)" i))
-    (is (= 1 (atari800-cl.gtia:gtia-read g #xD014))
-        "PAL register must default to 1 (NTSC for this 800XL)")
+    (is (= #x0F (atari800-cl.gtia:gtia-read g #xD014))
+        "PAL register must default to $0F (NTSC for this 800XL)")
     (is (= 7 (atari800-cl.gtia:gtia-read g #xD01F))
         "CONSOL must default to 7 (no console keys pressed)")
     ;; Collision latches start clear.
@@ -122,7 +122,7 @@
           "Collision register at offset ~D must be cleared by HITCLR" i))
     ;; Triggers / PAL / CONSOL must be UNTOUCHED.
     (is (= 1 (atari800-cl.gtia:gtia-read g #xD010)))
-    (is (= 1 (atari800-cl.gtia:gtia-read g #xD014)))
+    (is (= #x0F (atari800-cl.gtia:gtia-read g #xD014)))
     (is (= 7 (atari800-cl.gtia:gtia-read g #xD01F)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -134,8 +134,8 @@
         (g   (atari800-cl.gtia:make-gtia)))
     (atari800-cl.gtia:attach-gtia bus g)
     (is (eq g (atari800-cl.bus:bus-gtia bus)))
-    ;; Bus read $D014 (PAL) → 1
-    (is (= 1 (atari800-cl.bus:bus-read bus #xD014)))
+    ;; Bus read $D014 (PAL) → $0F (NTSC pattern)
+    (is (= #x0F (atari800-cl.bus:bus-read bus #xD014)))
     ;; Bus write $D000 lands in the GTIA write window, not RAM.
     (atari800-cl.bus:bus-write bus #xD000 #xCE)
     (is (= #xCE (aref (atari800-cl.gtia:gtia-write-regs g)
@@ -238,3 +238,22 @@ counter)."
               (atari800-cl.machine:atari-machine-gtia m))))
     (is (= #xA5 (aref wr atari800-cl.gtia:+w-grafm+)))
     (is (zerop (aref wr atari800-cl.gtia:+w-grafp0+)))))
+
+;;; ---------------------------------------------------------------------------
+;;; PAL register encoding (MISC_IMPROVEMENTS_PLAN.md item 6)
+
+(test pal-register-reads-documented-ntsc-pattern
+  "The PAL register ($D014) is a bit pattern, not a flag: bits 1-3 read
+all-ones on NTSC (atari800 gtia.c returns $0F; PAL machines return
+$01-style all-zeros in bits 1-3).  Software does AND #$0E and branches
+on zero for PAL -- the old value of 1 failed that test.  Also covers
+the RESET-GTIA path (defaults deduped into %INIT-READ-REGS)."
+  (let ((g (atari800-cl.gtia:make-gtia)))
+    (is (= atari800-cl.gtia:+pal-register-ntsc+
+           (atari800-cl.gtia:gtia-read g #xD014)))
+    (is (plusp (logand (atari800-cl.gtia:gtia-read g #xD014) #x0E))
+        "AND #$0E must be non-zero on NTSC")
+    (atari800-cl.gtia:reset-gtia g)
+    (is (= atari800-cl.gtia:+pal-register-ntsc+
+           (atari800-cl.gtia:gtia-read g #xD014))
+        "reset must restore the same NTSC pattern")))
