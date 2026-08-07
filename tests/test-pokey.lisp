@@ -221,15 +221,15 @@ for 1+2), not the low channel's."
   (multiple-value-bind (pok cpu bus) (%make-pokey-fixture :audctl #x28)
     (atari800-cl.bus:bus-write bus #xD204 10)              ; AUDF3 = low byte
     (atari800-cl.bus:bus-write bus #xD206 2)               ; AUDF4 = high byte
-    (atari800-cl.bus:bus-write bus #xD20E #x08)            ; IRQEN: timer 4
+    (atari800-cl.bus:bus-write bus #xD20E #x04)            ; IRQEN: timer 4
     (atari800-cl.bus:bus-write bus #xD209 0)               ; STIMER
     (let ((period (+ (* 256 2) 10 7)))                     ; = 529
       (%tick-n-pokey pok cpu (1- period))
       (is-false (cpu-pending-irq cpu)
                 "pair 3+4 must not fire before ~D cycles" period)
       (is-true (atari800-cl.pokey:pokey-tick pok cpu))
-      (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok) #x08))
-          "IRQST bit 3 (timer 4) must be cleared by the pair's underflow"))))
+      (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok) #x04))
+          "IRQST bit 2 (timer 4) must be cleared by the pair's underflow"))))
 
 (test pokey-linked-pair-at-64khz-has-no-fast-offset
   "A pair linked on the 64 kHz clock keeps the divided-clock period
@@ -457,6 +457,122 @@ the test that licenses the event-skipping implementation."
     (declare (ignore cpu))
     (setf (atari800-cl.pokey:pokey-irqst pok) #xAB)
     (is (= #xAB (atari800-cl.bus:bus-read bus #xD20E)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Serial output transmitter (SEROUT + SEROR/SEROC)
+;;;
+;;; The fixture runs channels 3+4 linked on the 1.79 MHz clock, the
+;;; configuration SIO uses: AUDCTL $28, AUDF3/AUDF4 giving a channel-4
+;;; underflow every (256*AUDF4 + AUDF3 + 7) cycles, two underflows per
+;;; transmitted bit.
+
+(defun %make-serial-fixture (&key (audf3 3) (audf4 0) (irqen #x18))
+  "POKEY wired for serial output: channels 3+4 linked at 1.79 MHz, SKCTL
+in send mode, IRQEN enabling both serial-output interrupts by default.
+Returns (values pokey cpu bus underflow-period)."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture :audctl #x28)
+    (atari800-cl.bus:bus-write bus #xD204 audf3)            ; AUDF3 (low)
+    (atari800-cl.bus:bus-write bus #xD206 audf4)            ; AUDF4 (high)
+    (atari800-cl.bus:bus-write bus #xD20F #x23)             ; SKCTL: send mode
+    (atari800-cl.bus:bus-write bus #xD20E irqen)            ; IRQEN
+    (atari800-cl.bus:bus-write bus #xD209 0)                ; STIMER
+    (values pok cpu bus (+ (* 256 audf4) audf3 7))))
+
+(test pokey-serout-write-raises-seror
+  "Writing SEROUT while the shift register is idle starts the byte and
+immediately raises SEROR: the holding register is free again, which is
+how the OS's handler gets to queue the next byte a transfer ahead."
+  (multiple-value-bind (pok cpu bus) (%make-serial-fixture)
+    (atari800-cl.bus:bus-write bus #xD20D #x41)             ; SEROUT
+    (is-true (cpu-pending-irq cpu) "SEROUT must assert the IRQ line")
+    (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok)
+                       atari800-cl.pokey:+irq-serial-out-needed+))
+        "IRQST bit 4 (SEROR) must read as pending")
+    (is (= #x41 (atari800-cl.pokey:pokey-serial-out-shift pok))
+        "the byte must be in the shift register")
+    (is-false (atari800-cl.pokey:pokey-serial-out-holding pok)
+              "the holding register must be free")))
+
+(test pokey-serout-without-send-mode-is-inert
+  "With SKCTL in a non-transmit mode a SEROUT write only latches: no
+shifting, no interrupt."
+  (multiple-value-bind (pok cpu bus) (%make-serial-fixture)
+    (atari800-cl.bus:bus-write bus #xD20F #x03)             ; SKCTL: no send
+    (atari800-cl.bus:bus-write bus #xD20D #x41)
+    (is-false (cpu-pending-irq cpu))
+    (is (zerop (atari800-cl.pokey:pokey-serial-out-cycles pok))
+        "transmitter must stay idle")))
+
+(test pokey-serial-byte-takes-twenty-channel4-underflows
+  "One byte occupies 10 bit times, and the transmit clock is channel 4's
+output — two underflows per bit.  With only SEROC enabled, nothing fires
+until the byte has fully shifted out."
+  (multiple-value-bind (pok cpu bus period)
+      (%make-serial-fixture :irqen atari800-cl.pokey:+irq-serial-out-done+)
+    (atari800-cl.bus:bus-write bus #xD20D #x41)
+    (is-false (cpu-pending-irq cpu) "SEROR is disabled: no IRQ on the write")
+    ;; One underflow short of the full frame.
+    (%tick-n-pokey pok cpu (1- (* period
+                                  atari800-cl.pokey:+serial-half-bits-per-byte+)))
+    (is-false (cpu-pending-irq cpu) "SEROC must not fire early")
+    (is-true (%tick-n-pokey pok cpu 1) "the 20th underflow completes the byte")
+    (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok)
+                       atari800-cl.pokey:+irq-serial-out-done+))
+        "IRQST bit 3 (SEROC) must read as pending")
+    (is-false (atari800-cl.pokey:pokey-serial-out-shift pok)
+              "transmitter must be idle once the frame is complete")))
+
+(test pokey-serial-second-byte-waits-in-holding
+  "A SEROUT write while a byte is shifting queues in the holding
+register; it moves into the shift register — and SEROR fires again — only
+when the byte in flight completes."
+  (multiple-value-bind (pok cpu bus period) (%make-serial-fixture)
+    (atari800-cl.bus:bus-write bus #xD20D #x41)             ; first byte
+    (atari800-cl.bus:bus-write bus #xD20D #x42)             ; queued
+    (is (= #x42 (atari800-cl.pokey:pokey-serial-out-holding pok)))
+    (is (= #x41 (atari800-cl.pokey:pokey-serial-out-shift pok)))
+    ;; Acknowledge the first SEROR so the next one is observable.
+    (atari800-cl.bus:bus-write bus #xD20E #x00)
+    (atari800-cl.bus:bus-write bus #xD20E #x18)
+    (is-false (cpu-pending-irq cpu))
+    (%tick-n-pokey pok cpu (* period
+                             atari800-cl.pokey:+serial-half-bits-per-byte+))
+    (is-true (cpu-pending-irq cpu) "byte boundary must raise SEROR again")
+    (is (= #x42 (atari800-cl.pokey:pokey-serial-out-shift pok))
+        "the queued byte must now be shifting")
+    (is-false (atari800-cl.pokey:pokey-serial-out-holding pok)
+              "the holding register must be free again")))
+
+(test pokey-serial-frame-ends-with-seroc-after-last-byte
+  "The SIO pattern end to end: bytes fed on each SEROR, then SEROR
+swapped for SEROC, which fires when the final byte drains."
+  (multiple-value-bind (pok cpu bus period) (%make-serial-fixture)
+    (let ((byte-cycles (* period
+                          atari800-cl.pokey:+serial-half-bits-per-byte+)))
+      (atari800-cl.bus:bus-write bus #xD20D #x01)           ; byte 1 → shifting
+      (atari800-cl.bus:bus-write bus #xD20D #x02)           ; byte 2 → holding
+      (%tick-n-pokey pok cpu byte-cycles)                   ; byte 2 starts
+      ;; Last byte queued; now enable only SEROC, as the OS's handler does.
+      (atari800-cl.bus:bus-write bus #xD20E
+                                 atari800-cl.pokey:+irq-serial-out-done+)
+      (setf (cpu-pending-irq cpu) nil)
+      (%tick-n-pokey pok cpu (1- byte-cycles))
+      (is-false (cpu-pending-irq cpu) "still shifting the last byte")
+      (%tick-n-pokey pok cpu 1)
+      (is-true (cpu-pending-irq cpu) "SEROC fires when the frame completes")
+      (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok)
+                         atari800-cl.pokey:+irq-serial-out-done+))))))
+
+(test pokey-reset-clears-serial-transmitter
+  "RESET-POKEY empties both serial registers and stops the shift clock."
+  (multiple-value-bind (pok cpu bus) (%make-serial-fixture)
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD20D #x41)
+    (atari800-cl.bus:bus-write bus #xD20D #x42)
+    (atari800-cl.pokey:reset-pokey pok)
+    (is-false (atari800-cl.pokey:pokey-serial-out-shift pok))
+    (is-false (atari800-cl.pokey:pokey-serial-out-holding pok))
+    (is (zerop (atari800-cl.pokey:pokey-serial-out-cycles pok)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Host input delegation (Stage 2)

@@ -412,3 +412,121 @@ detaching with NIL clears them."
     (atari800-cl.machine:attach-input m nil)
     (is (null (atari800-cl.machine:atari-machine-input m)))
     (is (null (atari800-cl.pia:pia-input (atari800-cl.machine:atari-machine-pia m))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Real-ROM boot acceptance
+;;;
+;;; Everything above runs on synthetic ROMs, which is why a wrong PIA
+;;; register map (PACTL decoded as PORTB, unmapping the OS ROM during the
+;;; OS's own init) once passed the whole suite while making the emulator
+;;; unable to boot at all.  These two tests close that hole end to end:
+;;; the first asserts the OS gets far enough to program ANTIC, the second
+;;; that it reaches BASIC's prompt — which additionally requires the
+;;; POKEY serial-output interrupts SIO's command frame depends on.
+;;;
+;;; Both skip when ROM images are absent (as the Klaus test does), so a
+;;; checkout without dumps still runs green.
+
+(defparameter *os-rom-candidates* '("atariosxl.rom" "ATARIXL.ROM" "atarixl.rom")
+  "Filenames to try for the 16 KiB 800 XL OS ROM, in preference order.")
+
+(defparameter *basic-rom-candidates* '("ataribas.rom" "ATARIBAS.ROM")
+  "Filenames to try for the 8 KiB BASIC ROM, in preference order.")
+
+(defun %rom-search-directories ()
+  "Directories to look in for ROM images: roms/ under the ASDF system
+source directory, then roms/ under the current working directory."
+  (remove nil
+          (list (ignore-errors
+                 (merge-pathnames (make-pathname :directory '(:relative "roms"))
+                                  (asdf:system-source-directory "atari800-cl")))
+                (merge-pathnames (make-pathname :directory '(:relative "roms"))
+                                 (uiop:getcwd)))))
+
+(defun %find-rom (env-var filenames)
+  "Locate a ROM image: $ENV-VAR if set, else the first FILENAMES entry
+that exists in a %ROM-SEARCH-DIRECTORIES directory.  Returns NIL if none."
+  (let ((env (uiop:getenv env-var)))
+    (if (and env (plusp (length env)) (probe-file env))
+        (pathname env)
+        (loop for dir in (%rom-search-directories)
+              thereis (loop for name in filenames
+                            thereis (probe-file (merge-pathnames name dir)))))))
+
+(defun %boot-machine-with-real-roms ()
+  "Cold-reset a machine on real ROM images, or NIL when they are absent."
+  (let ((os    (%find-rom "ATARI800_CL_OS_ROM"    *os-rom-candidates*))
+        (basic (%find-rom "ATARI800_CL_BASIC_ROM" *basic-rom-candidates*)))
+    (when (and os basic)
+      (let ((m (atari800-cl.machine:make-atari-machine)))
+        (atari800-cl.machine:machine-cold-reset m :os-path os :basic-path basic)
+        m))))
+
+(defun %screen-row-text (machine row)
+  "Decode ROW of the OS text screen (40 columns at SAVMSC) to a string.
+Screen codes are not ATASCII: the four 32-code groups map to $20.., $40..,
+$00.. and $60.. respectively."
+  (let* ((bus (atari800-cl.machine:atari-machine-bus machine))
+         (savmsc (logior (atari800-cl.bus:bus-read bus #x58)
+                         (ash (atari800-cl.bus:bus-read bus #x59) 8))))
+    (with-output-to-string (s)
+      (loop for col below 40
+            for code = (logand (atari800-cl.bus:bus-read
+                                bus (logand #xFFFF (+ savmsc (* row 40) col)))
+                               #x7F)
+            for ascii = (+ (case (ash code -5) (0 #x20) (1 #x40) (2 #x00) (3 #x60))
+                           (logand code #x1F))
+            do (write-char (if (<= #x20 ascii #x7E) (code-char ascii) #\Space) s)))))
+
+(test real-os-rom-boots-and-programs-antic
+  "Booting the real OS ROM must reach the point where it programs ANTIC:
+DMA enabled and a display list installed, with the CPU still executing in
+ROM.  A machine that has fallen into a BRK loop at $0000 — what a broken
+PIA/MMU mapping produces — fails every one of these."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (skip "OS/BASIC ROM images not found in roms/ (or via ~
+               $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM); ~
+               skipping the real-ROM boot test.")
+        (let ((cpu   (atari800-cl.machine:atari-machine-cpu m))
+              (antic (atari800-cl.machine:atari-machine-antic m)))
+          (dotimes (i 120) (atari800-cl.machine:machine-run-frame m))
+          (is-false (atari800-cl.cpu:cpu-halted cpu)
+                    "CPU must not have halted during boot")
+          (is (>= (atari800-cl.cpu:cpu-pc cpu) #xC000)
+              "PC must be executing in OS ROM, not RAM (got $~4,'0X)"
+              (atari800-cl.cpu:cpu-pc cpu))
+          (is (plusp (atari800-cl.antic:antic-dmactl antic))
+              "the OS must have enabled ANTIC DMA (DMACTL = $~2,'0X)"
+              (atari800-cl.antic:antic-dmactl antic))
+          (is (plusp (atari800-cl.antic:antic-dlist-pointer antic))
+              "the OS must have installed a display list (DLIST = $~4,'0X)"
+              (atari800-cl.antic:antic-dlist-pointer antic))))))
+
+(test real-os-rom-boots-through-to-basic-prompt
+  "With no disk attached the OS sends its SIO command frame, times out,
+and falls through to BASIC — whose prompt then appears in screen memory.
+Reaching this depends on POKEY's serial-output interrupts (SEROR/SEROC):
+without them the OS spins forever waiting for XMTDON."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (skip "OS/BASIC ROM images not found; skipping the boot-to-BASIC test.")
+        (let ((found nil))
+          ;; ~25 s of emulated time is ample; stop as soon as the prompt shows.
+          (loop repeat 1500
+                until found
+                do (atari800-cl.machine:machine-run-frame m)
+                   (when (zerop (mod (atari800-cl.machine:atari-machine-frame-count m)
+                                     50))
+                     (setf found
+                           (loop for row below 24
+                                   thereis (search "READY"
+                                                   (string-upcase
+                                                    (%screen-row-text m row)))))))
+          (is-true found
+                   "BASIC's prompt must appear in screen memory within 1500 ~
+                    frames (row 0: ~S)"
+                   (%screen-row-text m 0))
+          (is-true (getf (atari800-cl.machine:machine-portb-state m)
+                         :basic-rom-mapped)
+                   "BASIC ROM must be mapped once the prompt is up")))))

@@ -389,6 +389,12 @@
            #:attach-pokey
            #:attach-pokey-input
            #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+
+           ;; Serial output transmitter (SEROUT + SEROR/SEROC interrupts)
+           #:pokey-serial-out-shift #:pokey-serial-out-holding
+           #:pokey-serial-out-cycles
+           #:+irq-serial-out-done+ #:+irq-serial-out-needed+
+           #:+skctl-transmit-mode+
+           #:+serial-frame-bits+ #:+serial-half-bits-per-byte+
            ;; Audio hooks (installed by src/audio.lisp's ATTACH-AUDIO)
            #:pokey-audio
            #:pokey-audio-advance-fn #:pokey-audio-underflow-fn

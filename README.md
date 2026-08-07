@@ -35,7 +35,9 @@ What's implemented:
 - **POKEY** — four-channel timers with per-channel clock divider,
   hardware reload offsets (AUDF+4 at 1.79 MHz) and linked 16-bit
   channel pairs, IRQEN/IRQST latches (active-low) and timer-1/2/4
-  IRQs, 17- and 9-bit polynomial RNG behind RANDOM.
+  IRQs, 17- and 9-bit polynomial RNG behind RANDOM, and the
+  double-buffered serial transmitter's SEROR/SEROC interrupts (enough
+  for SIO to send a command frame and time out).
 - **POKEY audio** — four-channel synthesis into mono 8-bit PCM at
   44 744 Hz: poly4/5/9/17 distortions, volume-only mode, and mixing,
   attached on demand with `machine-attach-audio` and collected with
@@ -66,7 +68,10 @@ What's implemented:
 
 What's *not* yet implemented:
 
-- Serial I/O and SIO bus (cassette, disk, printer).
+- The serial line itself and the SIO bus (cassette, disk, printer).
+  POKEY raises the serial-output interrupts a transfer needs, but no
+  bits leave the chip and nothing is received, so every device times
+  out — which is what lets a cold boot fall through to BASIC.
 - Light pen, cartridge mapper, and the right-cartridge slot.
 
 See `CHANGES.md` for a phase-by-phase summary of what each commit
@@ -604,9 +609,12 @@ atari800-cl/
   most-consistent canonical implementation — real hardware results
   vary chip-to-chip and the emulator does not try to reproduce the
   fault-injection that happens on indexed page crosses.
-- **No real keyboard, joystick, light pen, paddles, or SIO bus.**
-  PORTA reads return $FF (no buttons pressed), POT0-7 return $FF,
-  KBCODE stays 0.  TRIG0-3 default to 1 (released).
+- **No light pen and no SIO bus.**  Joystick, console keys, paddles and
+  key codes come from an attached host input state (`attach-input`); with
+  none attached the registers read their idle stubs — PORTA $FF (no
+  buttons), POT0-7 $FF, KBCODE 0, TRIG0-3 released.  POKEY's serial
+  transmitter raises SEROR/SEROC but drives no line, so SIO transfers
+  always end in a device timeout.
 - **No cartridge or right-cartridge support.**  $8000-$9FFF behaves
   as plain RAM with no mapper.
 

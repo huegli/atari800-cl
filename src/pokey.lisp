@@ -10,7 +10,7 @@
 ;;;;   8         AUDCTL        global audio control (clock sel, links)
 ;;;;   9         STIMER        write-only: reload all timer counters
 ;;;;   10        SKREST        write-only: reset SKSTAT (no-op for us)
-;;;;   13        SEROUT        serial output (stub)
+;;;;   13        SEROUT        serial output data (drives the transmitter)
 ;;;;   14        IRQEN         IRQ enable mask
 ;;;;   15        SKCTL         serial/keyboard control
 ;;;;
@@ -28,11 +28,19 @@
 ;;;;   directly (AUDCTL bit 6 / bit 5); all other channels run at
 ;;;;   either 64 kHz (CPU/28) or 15 kHz (CPU/114, AUDCTL bit 0 = 1).
 ;;;;   On underflow the counter reloads and, for channels 1, 2, and 4
-;;;;   with the matching IRQEN bit (0, 1, or 3) set, the chip raises a
+;;;;   with the matching IRQEN bit (0, 1, or 2) set, the chip raises a
 ;;;;   CPU IRQ and clears that bit in IRQST.
 ;;;;
 ;;;;   Writing IRQEN restores any IRQST latch bits cleared by past
 ;;;;   underflows ("acknowledge" semantics).
+;;;;
+;;;; Serial output (IRQEN bits 3-4):
+;;;;   SEROUT feeds a double-buffered transmitter clocked by channel 4.
+;;;;   SEROR (bit 4) fires when the holding register empties and the next
+;;;;   byte is wanted; SEROC (bit 3) fires when the last byte has shifted
+;;;;   out.  No bits actually leave the chip and nothing is received —
+;;;;   see the transmitter section below for what that does and does not
+;;;;   buy.
 ;;;;
 ;;;; Reload offsets (ROADMAP.md Phase 8 / MISC_IMPROVEMENTS_PLAN.md item 5):
 ;;;;   The period is NOT simply AUDF+1 in every configuration — POKEY's
@@ -58,7 +66,7 @@
 ;;;;   TIMER-COUNTS slot, and the high channel's own divided clock
 ;;;;   drives nothing (its TIMER-COUNTS entry is inert while linked).
 ;;;;   The IRQ for a linked pair comes from the HIGH channel's IRQEN
-;;;;   bit: timer 2 ($02) for channels 1+2, timer 4 ($08) for 3+4.
+;;;;   bit: timer 2 ($02) for channels 1+2, timer 4 ($04) for 3+4.
 ;;;;
 ;;;; RNG model:
 ;;;;   Two LFSRs are conceptually clocked once per CPU cycle.  AUDCTL
@@ -98,10 +106,29 @@
 (defconstant +audctl-ch1-fast+     #x40)   ; channel 1 at 1.79 MHz
 (defconstant +audctl-poly9+        #x80)   ; RANDOM uses the 9-bit poly
 
-;;; IRQEN / IRQST bit masks
+;;; IRQEN / IRQST bit masks.  Bit assignment per the XL OS's own interrupt
+;;; dispatch table (TIRQ in Atari_XL_OS_Rev.2.asm): timer 4 is bit 2, and
+;;; bits 3-4 are the two serial-output interrupts.
 (defconstant +irq-timer1+ #x01)
 (defconstant +irq-timer2+ #x02)
-(defconstant +irq-timer4+ #x08)
+(defconstant +irq-timer4+ #x04)
+(defconstant +irq-serial-out-done+   #x08)  ; SEROC — transmission complete
+(defconstant +irq-serial-out-needed+ #x10)  ; SEROR — output data needed
+
+;;; SKCTL serial mode.  Bits 4-6 select the serial mode; every transmit
+;;; mode has bit 5 set (the OS's ESS does ORA #$20 for SIO SEND, plus #$08
+;;; for the cassette's FSK output).  We only distinguish "transmitting or
+;;; not", so bit 5 alone gates the shift register.
+(defconstant +skctl-transmit-mode+ #x20)
+
+;;; Serial output frame: one start bit, eight data bits, one stop bit.
+;;; The transmit clock is channel 4's OUTPUT, i.e. one bit per TWO channel-4
+;;; underflows (its output flip-flop toggles on each underflow).  Check:
+;;; the OS programs AUDCTL $28 (channel 3 at 1.79 MHz, 3+4 linked) and
+;;; AUDF3/4 = $0028 for 19200 baud; our linked reload is 40 + 7 = 47 cycles,
+;;; and 1.79 MHz / (47 * 2 * 1) = 19,047 bit/s — 19200 baud to 0.8%.
+(defconstant +serial-frame-bits+ 10)
+(defconstant +serial-half-bits-per-byte+ (* 2 +serial-frame-bits+))
 
 ;;; Register offsets (within the 16-byte mirroring window)
 (defconstant +reg-audf1+  0)
@@ -162,6 +189,17 @@ Slots:
                                 CH's counter underflows, CH being the
                                 channel that OWNS the underflow (the high
                                 channel of a linked pair).
+  SERIAL-OUT-SHIFT            — byte currently shifting out of the serial
+                                transmitter, or NIL when it is idle.
+  SERIAL-OUT-HOLDING          — byte written to SEROUT while the shift
+                                register was busy (POKEY is double
+                                buffered), or NIL when the holding
+                                register is empty.
+  SERIAL-OUT-CYCLES           — CPU cycles left in the byte being shifted;
+                                0 means the transmitter is idle.  Counted
+                                down by POKEY-TICK / POKEY-ADVANCE; the
+                                per-byte duration comes from the channel-4
+                                timer (see %SERIAL-BYTE-CYCLES).
   CPU                         — CPU back-pointer for IRQ routing."
   (audf  (make-array 4 :element-type '(unsigned-byte 8) :initial-element 0)
          :type (simple-array (unsigned-byte 8) (4)))
@@ -183,6 +221,9 @@ Slots:
   (audio nil)
   (audio-advance-fn   nil :type (or null function))
   (audio-underflow-fn nil :type (or null function))
+  (serial-out-shift   nil :type (or null (unsigned-byte 8)))
+  (serial-out-holding nil :type (or null (unsigned-byte 8)))
+  (serial-out-cycles  0   :type fixnum)
   (cpu nil)
   ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, POT0..3,
   ;; KBCODE, and SKSTAT reads reflect live input instead of the stubs.
@@ -355,19 +396,135 @@ Syncs the lazily-stepped LFSRs before reading (see %SYNC-RNG)."
 ;;; ---------------------------------------------------------------------------
 ;;; Tick
 
+;;; Inline: this sits on the underflow path, which runs constantly even
+;;; when nothing is enabled in IRQEN.  Left out of line it cost 4-9% of
+;;; frame rate on the nop/klaus workloads.
+(declaim (inline %raise-irq))
+
+(defun %raise-irq (pokey cpu bit)
+  "Raise the IRQ source BIT if it is enabled in IRQEN.  Returns T if the
+CPU's pending-IRQ line was actually asserted.  Disabled sources latch
+nothing: IRQST only ever shows an ENABLED source as pending, matching
+the acknowledge semantics of the IRQEN write path."
+  (declare (type pokey pokey) (type fixnum bit))
+  (when (and (plusp bit)
+             (logtest (pokey-irqen pokey) bit))
+    ;; IRQST is active-low: clear the bit to indicate "pending".
+    (setf (pokey-irqst pokey)
+          (logandc2 (pokey-irqst pokey) bit))
+    (when cpu
+      (setf (cpu-pending-irq cpu) t))
+    t))
+
 (defun %fire-timer-irq (pokey cpu ch)
   "Raise the IRQ for channel CH if its IRQEN bit is set.  Returns T if
 the CPU's pending-IRQ line was actually asserted."
   (declare (type pokey pokey) (type fixnum ch))
-  (let ((bit (%irq-bit-for-channel ch)))
-    (when (and (plusp bit)
-               (logtest (pokey-irqen pokey) bit))
-      ;; IRQST is active-low: clear the bit to indicate "pending".
-      (setf (pokey-irqst pokey)
-            (logandc2 (pokey-irqst pokey) bit))
-      (when cpu
-        (setf (cpu-pending-irq cpu) t))
-      t)))
+  (%raise-irq pokey cpu (%irq-bit-for-channel ch)))
+
+;;; ---------------------------------------------------------------------------
+;;; Serial output transmitter
+;;;
+;;; POKEY's transmitter is double buffered: SEROUT feeds a holding
+;;; register, and the byte moves into the shift register as soon as that
+;;; is free.  Two interrupts report its progress, and SIO is built on
+;;; them: SEROR ("output data needed", bit 4) says the holding register
+;;; has emptied and the next byte is wanted, SEROC ("transmission
+;;; complete", bit 3) says the shift register finished with nothing
+;;; queued behind it.  The XL OS sends a command frame by enabling SEROR,
+;;; writing the first byte, and letting its ORIR handler feed the rest;
+;;; after the last byte it swaps SEROR for SEROC and waits for XMTDON.
+;;;
+;;; What is modelled: the two interrupts and their timing, clocked by
+;;; channel 4 at two underflows per bit.  What is NOT: the actual serial
+;;; line — no bits leave the chip, nothing is received, and SKSTAT's
+;;; framing/overrun bits are still the $FF stub.  That is enough for the
+;;; OS to complete a transfer and then time out waiting for a device
+;;; that is not there, which is exactly what a real 800 XL with no disk
+;;; drive does before it falls through to BASIC.
+
+(defun %serial-transmitting-p (pokey)
+  "True while SKCTL selects a transmit mode."
+  (declare (type pokey pokey))
+  (logtest (pokey-skctl pokey) +skctl-transmit-mode+))
+
+(defun %serial-byte-cycles (pokey)
+  "CPU cycles one transmitted byte occupies, from the channel-4 timer as
+it is programmed right now.
+
+The transmit clock is channel 4's output, so a half-bit is one channel-4
+underflow: (reload + 1) * divisor cycles, taken from the LOW channel of
+a linked 3+4 pair (whose clock select drives the pair) or from channel 4
+itself when unlinked.  A byte is +SERIAL-HALF-BITS-PER-BYTE+ of those.
+
+The figure is snapshotted when the byte starts shifting rather than
+tracked live: software sets its baud rate before a transfer, not during
+one.  Guarded to at least one cycle so a degenerate AUDF/divisor cannot
+stall the transmitter forever."
+  (declare (type pokey pokey))
+  (let* ((clock-ch (if (%linked-high-p pokey 3) 2 3))
+         (period (* (1+ (%timer-reload-value pokey clock-ch))
+                    (%channel-divisor pokey clock-ch))))
+    (declare (type fixnum period))
+    (max 1 (* +serial-half-bits-per-byte+ period))))
+
+(defun %serial-out-write (pokey cpu value)
+  "SEROUT write: hand VALUE to the transmitter.
+
+If the shift register is idle the byte starts shifting immediately and
+SEROR fires, because the holding register is free again the instant the
+byte moves on — that is what lets the OS's handler queue the next byte
+one transfer ahead.  If a byte is already shifting, VALUE waits in the
+holding register and the interrupt comes when that byte completes.
+
+With SKCTL in a non-transmit mode the write only latches: no shifting,
+no interrupts."
+  (declare (type pokey pokey) (type (unsigned-byte 8) value))
+  (cond
+    ((or (not (%serial-transmitting-p pokey))
+         (plusp (pokey-serial-out-cycles pokey)))
+     (setf (pokey-serial-out-holding pokey) value)
+     nil)
+    (t
+     (setf (pokey-serial-out-shift pokey)   value
+           (pokey-serial-out-holding pokey) nil
+           (pokey-serial-out-cycles pokey)  (%serial-byte-cycles pokey))
+     (%raise-irq pokey cpu +irq-serial-out-needed+))))
+
+(defun %serial-out-advance (pokey cpu n)
+  "Advance the transmitter by N CPU cycles.  Returns T if an IRQ was raised.
+
+Called only when the transmitter is busy — POKEY-TICK / POKEY-ADVANCE
+test SERIAL-OUT-CYCLES first — so an idle chip pays a single slot read
+per advance and the whole transmitter stays out of the timer loop.
+
+When the byte in the shift register finishes, either the queued byte
+takes its place (and SEROR asks for the next one) or the transmitter
+goes idle and SEROC reports the frame complete.  The countdown carries
+its remainder into the following byte, so a long advance cannot drift
+the bit clock, and the loop handles the (unreachable in practice, since
+a byte is ~940 cycles) case of several bytes completing in one call."
+  (declare (type pokey pokey) (type fixnum n))
+  (let ((irq nil))
+    (decf (pokey-serial-out-cycles pokey) n)
+    (loop
+      (when (plusp (pokey-serial-out-cycles pokey))
+        (return))
+      (let ((next (pokey-serial-out-holding pokey)))
+        (cond
+          (next
+           (setf (pokey-serial-out-shift pokey)   next
+                 (pokey-serial-out-holding pokey) nil)
+           (incf (pokey-serial-out-cycles pokey) (%serial-byte-cycles pokey))
+           (when (%raise-irq pokey cpu +irq-serial-out-needed+)
+             (setf irq t)))
+          (t
+           (setf (pokey-serial-out-shift pokey)  nil
+                 (pokey-serial-out-cycles pokey) 0)
+           (when (%raise-irq pokey cpu +irq-serial-out-done+)
+             (setf irq t))
+           (return)))))
+    irq))
 
 (defun %sync-irq-line (pokey)
   "Recompute the CPU's level-sensitive IRQ line from the IRQEN/IRQST pair.
@@ -450,6 +607,9 @@ tests/test-pokey.lisp."
   (incf (pokey-rng-lag pokey))
   (let ((irq-raised nil)
         (audio (pokey-audio pokey)))
+    (when (plusp (pokey-serial-out-cycles pokey))
+      (when (%serial-out-advance pokey cpu 1)
+        (setf irq-raised t)))
     ;; The audio test happens ONCE, here, and each branch then runs a
     ;; loop with no audio bookkeeping in it: passing a literal NIL to the
     ;; inlined %EXPIRE-CHANNEL folds its audio branch away entirely, so
@@ -500,6 +660,14 @@ cheaper than this function's chunk bookkeeping."
   (let ((subs (pokey-sub-counters pokey))
         (audio (pokey-audio pokey))
         (irq-raised nil))
+    ;; The serial transmitter is a plain cycle countdown, so the whole
+    ;; chunk can be charged against it in one step.  Nothing observes the
+    ;; ordering against this call's timer expiries — no CPU runs
+    ;; mid-advance to change a register between them — so this stays
+    ;; equivalent to N successive POKEY-TICKs.
+    (when (plusp (pokey-serial-out-cycles pokey))
+      (when (%serial-out-advance pokey cpu n)
+        (setf irq-raised t)))
     ;; As in POKEY-TICK: test for audio ONCE and run a loop with no audio
     ;; bookkeeping inside it, so a detached machine executes the same
     ;; per-chunk code it did before synthesis existed.  This is the
@@ -601,7 +769,7 @@ Side effects:
       (8 (setf (pokey-audctl pokey) v))
       (9 (%reload-all-timers pokey))                 ; STIMER
       (10 nil)                                       ; SKREST stub
-      (13 nil)                                       ; SEROUT stub
+      (13 (%serial-out-write pokey (pokey-cpu pokey) v))   ; SEROUT
       (14
        ;; IRQEN write — set the mask AND restore IRQST bits for any bit
        ;; turning off (acknowledge), per the prompt's semantics.  Then
@@ -628,6 +796,9 @@ Side effects:
         (pokey-irqst  pokey) #xFF
         (pokey-skstat pokey) #xFF
         (pokey-kbcode pokey) 0
+        (pokey-serial-out-shift   pokey) nil
+        (pokey-serial-out-holding pokey) nil
+        (pokey-serial-out-cycles  pokey) 0
         (pokey-poly17-state pokey) #x1FFFF
         (pokey-poly9-state  pokey) #x01FF
         (pokey-rng-lag      pokey) 0)

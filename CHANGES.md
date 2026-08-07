@@ -3,6 +3,49 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## POKEY serial output interrupts — the XL OS now boots through to BASIC
+
+With the PIA fixed the OS booted but then parked forever at `$E9E4`, the
+SIO send loop: `LDA BRKKEY / BEQ exit / LDA XMTDON / BEQ loop`.  It had
+written the first byte of its command frame to `SEROUT` and was waiting
+for its own serial-output IRQ handler to set `XMTDON` ($3A) — an
+interrupt POKEY never raised, because the serial side was a stub.
+
+Two things were wrong.  **The IRQEN bit map**: timer 4 was `$08`, but the
+XL OS's own interrupt dispatch table (`TIRQ` in
+`minimal-xl/Atari_XL_OS_Rev.2.asm`) assigns `$04` to timer 4 and `$08` /
+`$10` to the two serial-output interrupts — which is exactly the pair the
+OS clears with `AND #$E7` after a transfer.  `+IRQ-TIMER4+` is now `$04`.
+**And the transmitter did not exist**: SEROUT was a no-op.
+
+POKEY now models the double-buffered transmitter: a `SEROUT` write starts
+the byte (or queues it behind one already shifting), SEROR (`$10`) fires
+when the holding register empties and the next byte is wanted, SEROC
+(`$08`) when the last byte has shifted out.  Byte duration comes from the
+channel-4 timer — 20 half-bits of (reload+1)*divisor cycles, which at the
+OS's SIO setup (AUDCTL `$28`, AUDF3/4 = `$0028`) works out to 19,047 baud
+against a nominal 19200.  SKCTL bit 5 gates it: writes in a non-transmit
+mode only latch.
+
+Not modelled: the serial line itself.  No bits leave the chip, nothing is
+received, SKSTAT stays the `$FF` stub.  That is enough for the OS to
+finish sending its command frame, get no answer, time out through its VBI
+countdown timers, and fall through to BASIC — which is what a real 800 XL
+with no drive attached does.  Booting `ATARIXL.ROM` + `ATARIBAS.ROM` now
+reaches the BASIC prompt (`Altirra 8K BASIC 1.59 / Ready` on the dumps
+used here) in about 1,100 frames.
+
+Hot-path cost measured and logged in `PERFORMANCE_LOG.md`: -1.2% (SBCL
+`nop`) to -4.8% (LispWorks `irq`), and within noise on the mixed
+workloads.  A first implementation that clocked the transmitter from
+inside `%EXPIRE-CHANNEL` cost 4-9% and was rejected; the log records why.
+
+New tests: five POKEY serial tests, plus two real-ROM boot tests in
+`tests/test-machine.lisp` — one asserting the OS gets far enough to
+program ANTIC, one asserting BASIC's prompt reaches screen memory.  Both
+skip when no ROM images are present, like the Klaus test, so a checkout
+without dumps still runs green.  2047 checks on SBCL and LispWorks.
+
 ## PIA register map fix — the XL OS now boots
 
 The PIA decoded `addr & 3` as PORTA / DDRA / **PORTB** / DDRB.  On a real

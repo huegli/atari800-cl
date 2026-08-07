@@ -99,6 +99,48 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
 
+## POKEY serial output (SEROR/SEROC) — implementation cost
+
+Adding the serial transmitter puts one new test on POKEY's hottest
+paths, so it is measured here even though it is a feature, not an
+optimization.  Interleaved runs against the immediately preceding commit
+(e699be2), means of 3 (SBCL) / 4 (LispWorks, discarding one contaminated
+first run):
+
+| implementation | workload | e699be2 fps | with serial | delta |
+|----------------|----------|-------------|-------------|-------|
+| sbcl           | nop      | 3354.8      | 3313.0      | -1.2% |
+| sbcl           | irq      | 3864.8      | 3854.8      | -0.3% |
+| sbcl           | display  | 1896.1      | 1899.6      | +0.2% |
+| sbcl           | klaus    | 3035.4      | 2957.7      | -2.6% |
+| lispworks      | nop      |  995.9      |  954.3      | -4.2% |
+| lispworks      | irq      | 1572.8      | 1497.6      | -4.8% |
+| lispworks      | display  |  346.0      |  343.5      | -0.7% |
+| lispworks      | klaus    |  962.4      |  959.5      | -0.3% |
+
+The remaining cost is one fixnum slot read plus a branch per POKEY-TICK /
+POKEY-ADVANCE call — the "is the transmitter busy" test.  It lands
+hardest on `nop`/`irq`, which are POKEY-dominated microbenchmarks; the
+mixed workloads (`display`, `klaus`) are within noise.
+
+**Rejected first shape: clocking the transmitter from channel 4's
+underflows inside %EXPIRE-CHANNEL.**  That is the more literal model of
+the hardware (the transmit clock really is channel 4's output), but
+%EXPIRE-CHANNEL is inlined into both POKEY-TICK and POKEY-ADVANCE, so a
+test there is paid on every underflow of every channel and bloats eight
+inlined copies: SBCL lost 8.7% on `nop` and 3.7% on `klaus`.  Removing
+just that hook restored baseline exactly (3350 vs 3362 nop), pinning the
+cost on the hook rather than on the new struct slots.  A separate 4-9%
+was traced to %RAISE-IRQ being called out of line from the underflow
+path; that one is now `(declaim (inline %raise-irq))`.
+
+The shipped shape keeps %EXPIRE-CHANNEL byte-identical to before and
+runs the transmitter as a plain CPU-cycle countdown, charged once per
+advance.  Timing is equivalent: the byte duration is computed from the
+same channel-4 period (20 half-bits x (reload+1) x divisor), just
+snapshotted when the byte starts shifting instead of tracked underflow
+by underflow.
+
 ## ROADMAP Phase 9 — POKEY audio synthesis
 
 | date       | commit   | implementation | workload | fps     | realtime-x | notes                            |
