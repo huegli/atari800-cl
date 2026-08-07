@@ -21,6 +21,19 @@
 > hardware geometry, and made map modes fetch on the first scanline
 > of a mode line only, exactly as step 1 below specified. The
 > stretch Phases 4-5 remain open.
+>
+> **Update (2026-08-07):** the Tom Harte harness (ROADMAP.md Phase 12)
+> now pins every opcode's CYCLE COUNT -- 2,560,000 cases, zero
+> failures -- which is a useful floor under Phase 5 but not a check of
+> it: the harness compares only the LENGTH of each case's bus trace,
+> not the accesses themselves, so Phase 5's RMW double-write (item 1)
+> and indexed dummy reads (item 2) are still entirely unverified and
+> almost certainly unmodelled. ROADMAP.md Phase 17 extends the harness
+> to compare the trace itself and is the recommended prerequisite for
+> attempting items 1-2 -- it converts them from a guess into a failing
+> assertion at a known cycle index. One Phase 5-adjacent bug was fixed
+> in passing: JSR read its high operand byte before pushing rather
+> than after (regression test in `tests/test-regressions.lisp`).
 
 Goal: move the emulator from frame-level timing to scanline-level timing
 accuracy, in dependency order. Each phase is independently committable and

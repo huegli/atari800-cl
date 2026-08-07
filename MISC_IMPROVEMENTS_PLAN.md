@@ -8,7 +8,11 @@
 > figures implemented as stated and the flag carried into
 > src/pokey.lisp's header). Item 4 landed on 2026-08-07 as ROADMAP.md
 > Phase 12 (`tests/test-harte.lisp`; three CPU bugs found and fixed,
-> skip list empty). Items 9-11 remain open.
+> skip list empty). That makes item 11 OBSOLETE by its own terms -- the
+> Harte vectors check every opcode's cycle count, so the hand-written
+> table it proposed would only duplicate them. Items 9 and 10 remain
+> open, and both are scheduled: ROADMAP.md Phase 15 (item 9) and
+> Phase 20 (item 10).
 
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent
@@ -201,7 +205,12 @@ and the DLISTL/H write cases describing the divergence. Actually changing
 the behaviour belongs with SCANLINE_ACCURACY_PLAN Phase 4+ -- note the
 cross-reference in the comment.
 
-## 11. Per-opcode cycle-count baseline test (skip if item 4 lands)
+## 11. Per-opcode cycle-count baseline test -- OBSOLETE (item 4 landed)
+
+Item 4 landed on 2026-08-07, so this item is closed without work: the
+Harte vectors check the cycle count of every case, at 500 or 10,000
+cases per opcode, which strictly covers the table proposed below.
+Retained for the record. The original text:
 
 If the Harte harness (item 4) is adopted, cycle counts are covered there --
 skip this. Otherwise: add `tests/test-cycle-counts.lisp` with a table of

@@ -75,7 +75,16 @@
 > than after (one case in 2.56M). XAA / LAX #imm now use the `$EE` magic
 > constant the vectors encode, so the skip list stays EMPTY: all 256
 > opcodes pass at full depth -- 2,560,000 cases, zero failures, on both
-> implementations. Every phase in this roadmap is now done.
+> implementations. That closes the original twelve-phase plan.
+>
+> **Next tranche added (2026-08-07): Phases 13-20.** With the EdVenture
+> workflow shipped end to end (assemble -> boot -> capture -> mp4) and
+> the CPU pinned by the Harte vectors, the emulator's remaining gaps are
+> no longer about video content: the machine boots to BASIC but cannot
+> be typed at, has no disk, and its bus-level timing is unverified.
+> Phases 13-20 are ordered payoff-for-effort, not by theme; 13 is the
+> recommended start (small, and it makes the machine interactive), 14
+> and 15 are cheap hygiene, 16 is the next substantial feature.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -102,7 +111,8 @@ and say so in the commit message.
    order matters.
 2. After every phase run BOTH `./scripts/test-sbcl.sh` and
    `./scripts/test-lispworks.sh`. Both must exit 0 before committing.
-   The suite currently passes 1450/1450 checks on both.
+   The suite currently passes 2058 checks plus 1 skip on both (the skip
+   is the Harte test with no vector data present; 2315 checks with it).
 3. **Benchmark rule**: any phase touching the hot path
    (`src/machine.lisp` `%run-clocks`, `src/antic.lisp` scanline events,
    `src/pokey.lisp` tick/advance, `src/renderer.lisp` per-line work)
@@ -144,10 +154,24 @@ and say so in the commit message.
 | 10    | AESP audio streaming + WAV capture           | 9          | no       | done   |
 | 11    | A/V recording tooling (`record.sh` -> mp4)    | 4, 10      | no       | done   |
 | 12    | Tom Harte ProcessorTests harness             | --          | no       | done   |
+| 13    | POKEY keyboard IRQ (typing into BASIC)       | --          | no       | open   |
+| 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | open   |
+| 15    | Documentation drift sweep (misc item 9)      | --          | no       | open   |
+| 16    | SIO receive path + virtual disk (ATR)        | 13         | no       | open   |
+| 17    | Harte bus-trace comparison                   | 12         | no       | open   |
+| 18    | LispWorks profiling pass                     | --          | yes      | open   |
+| 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
+| 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
-only because it produces no video-visible payoff.
+of the original tranche only because it produces no video-visible
+payoff.
+
+Of the new tranche, only 16 depends on another new phase (13 gives it
+the interrupt plumbing and a way to drive DOS once it boots). 17 is
+what turns SCANLINE_ACCURACY_PLAN.md's stretch Phase 5 from guesswork
+into a checkable target, so run it before attempting those quirks.
 
 ---
 
@@ -626,6 +650,207 @@ marked obsolete).
 
 ---
 
+## Phase 13 -- POKEY keyboard IRQ (typing into BASIC)
+
+The machine boots to BASIC's `Ready` but cannot be typed at. AESP
+`KEY_DOWN` already reaches `input-set-key`, which only makes `KBCODE`
+readable -- and the XL OS reads `KBCODE` from an interrupt handler,
+dispatched off IRQEN bit 6. POKEY has no such source: `+irq-timer1/2/4+`
+and the two serial-output bits are the whole set. Same shape as the
+SEROR/SEROC work, and it turns "boots to BASIC" into "type a program
+and RUN it".
+
+1. `src/pokey.lisp`: add `+irq-other-key+` (`#x40`) and
+   `+irq-break-key+` (`#x80`), per the XL OS's own `TIRQ` dispatch table
+   (`minimal-xl/Atari_XL_OS_Rev.2.asm`) -- the same source that settled
+   the timer-4 and serial bits in the POKEY serial commit.
+2. Raise the key IRQ when a key is latched, not on a timer: the input
+   state is written from socket reader threads, so POKEY cannot poll it
+   safely. Give `pokey` a "key pending" flag set through the existing
+   input plumbing (`attach-pokey-input` path) and consumed on the next
+   `pokey-advance` from the emulator thread, which then calls
+   `%raise-irq` with `+irq-other-key+`. Keep the idle cost to the same
+   one-slot-read test the serial transmitter pays -- benchmark it
+   (rule 3).
+3. SKSTAT: bit 2 (shift held) and bit 3 (a key is down) are what the OS
+   debounce path reads; `input-pokey-skstat` already composes a value,
+   so extend it rather than adding a second source of truth.
+4. BREAK: bit 7 is a separate IRQ and sets `BRKKEY` ($11) via the OS
+   handler. Wire it the same way; it is what lets a test stop a runaway
+   BASIC program.
+
+Tests: unit (`tests/test-pokey.lisp`) that a latched key with IRQEN bit
+6 set clears the IRQST bit and asserts the CPU line, and does neither
+when the bit is clear. End-to-end (`tests/test-machine.lisp`, alongside
+the real-ROM boot tests, skipping without ROMs): boot to `Ready`, drive
+the key codes for `PRINT 2+2` and RETURN through the input state, run
+frames, then assert `4` appears in screen memory. That last test is the
+real acceptance criterion -- it exercises keyboard IRQ, the OS editor,
+and BASIC in one shot.
+
+Commit: "POKEY keyboard IRQ: the OS editor now sees keystrokes".
+
+---
+
+## Phase 14 -- `scripts/fetch-harte.sh` + fast subset gate
+
+The Harte harness is only as useful as its data is easy to get; right
+now that is a README paragraph rather than a command.
+
+1. `scripts/fetch-harte.sh`, modelled on `scripts/fetch-test-roms.sh`:
+   fetch `SingleStepTests/65x02` `6502/v1` into a gitignored directory
+   (default `.cache/harte/`), no-op when already present, print the
+   `export ATARI800_CL_HARTE_TESTS=...` line to eval. Prefer a sparse or
+   per-file fetch over cloning the whole ~1 GB repository.
+2. `--subset N` (default for the pre-commit case): fetch only N opcode
+   files chosen to cover the addressing modes and the illegal families,
+   so a fast gate is ~30 MB instead of a gigabyte. The harness already
+   tests whichever files exist, so nothing in `tests/` changes.
+3. Document both modes in `CLAUDE.md`'s test section next to the
+   existing Harte paragraph.
+
+Commit: "Add fetch-harte.sh for the SingleStepTests vectors".
+
+---
+
+## Phase 15 -- Documentation drift sweep
+
+`MISC_IMPROVEMENTS_PLAN.md` item 9, which has drifted further since it
+was written -- partly because of the phases above:
+
+- `CLAUDE.md`'s Project Overview still lists "the serial/SIO bus,
+  keyboard scanning" as unmodelled; the serial-output half now is, and
+  Phase 13 changes the keyboard half.
+- `CLAUDE.md`'s Development Plan paragraph still says Prompt 12's
+  Unix-socket layer "was later removed" while `src/cli-socket.lisp`,
+  `src/transport.lisp` and `src/aesp.lisp` are all present.
+- The rest of misc item 9's list (README limitation bullets, renamed
+  symbols in examples).
+
+Cheap, and it keeps the file that steers every future session honest.
+Do it as one commit, after Phase 13 so the keyboard wording lands once.
+
+Commit: "Documentation drift sweep".
+
+---
+
+## Phase 16 -- SIO receive path + virtual disk (ATR)
+
+The next substantial feature, and the one that changes what the
+emulator is for: with a device that answers, the machine boots DOS and
+runs real software instead of hand-assembled demos. The OS already
+sends a complete command frame and times out waiting for a reply -- the
+missing half is everything after that.
+
+Stage it; do not attempt one commit.
+
+**16a -- serial receive.** POKEY's input side: SERIN, the
+serial-input-ready IRQ (IRQEN bit 5), and the SKSTAT framing/overrun
+bits. Mirror the transmitter's structure in `src/pokey.lisp` (a
+cycle countdown clocked from the same channel-4 period) so the two
+halves stay symmetrical.
+
+**16b -- device dispatch.** A `src/sio.lisp` device layer that watches
+the transmitted command frame (device id, command, aux1/2, checksum),
+and replies with ACK / COMPLETE / data frames on the receive side, with
+the inter-frame delays the OS expects. Devices register by id, so the
+disk is one implementation rather than the only one.
+
+**16c -- ATR disk images.** Parse the 16-byte ATR header (magic
+`$0296`, sector size, image size), map sector numbers to file offsets
+(remembering the first three sectors are 128 bytes even on
+double-density images), and serve READ (`$52`) and STATUS (`$53`)
+first; WRITE (`$50`/`$57`) after, behind an explicit read-only default.
+
+**16d -- API + protocol.** `a800:mount-disk` / `unmount-disk` on the
+facade, an AESP control message to mount from a client, and a `mount`
+verb on the CLI socket.
+
+Acceptance: with a DOS 2.5 ATR mounted, a cold boot reaches the DOS
+menu, and `scripts/record.sh` can film it. Add a boot test in the
+`tests/test-machine.lisp` real-ROM group, skipping when no ATR is
+present.
+
+Commits: one per stage, message "SIO: <stage>".
+
+---
+
+## Phase 17 -- Harte bus-trace comparison
+
+The vectors carry a full cycle-by-cycle bus trace -- `[address, value,
+"read"|"write"]` per cycle -- and `tests/test-harte.lisp` currently uses
+only its LENGTH, as the cycle count. Comparing the trace itself turns
+the harness from "right answer in the right number of cycles" into
+"right accesses in the right order", which is exactly the evidence
+SCANLINE_ACCURACY_PLAN.md's stretch Phase 5 needs.
+
+1. Give the harness an optional recording bus: wrap the CPU's
+   `cpu-bus-read` / `cpu-bus-write` closures to log `(addr value kind)`
+   per access (the scanline plan's Phase 5 already calls for such a stub
+   -- write it once, in `tests/test-helpers.lisp`, and share it).
+2. Compare against the vector's `cycles` array. Expect immediate,
+   informative failures: the RMW double-write (write unmodified, then
+   modified) and the indexed dummy reads are both unmodelled today, and
+   both show up as a wrong access at a known index rather than as a
+   wrong result.
+3. Gate it behind its own env var (`ATARI800_CL_HARTE_TRACE=1`) until
+   the quirks are implemented, so the default run stays green while the
+   work proceeds.
+4. Then implement SCANLINE_ACCURACY_PLAN.md Phase 5 items 1 and 2
+   against it, one commit each, and drop the gate.
+
+Commit: "Harte harness: compare the cycle-by-cycle bus trace".
+
+---
+
+## Phase 18 -- LispWorks profiling pass  [hot path -> benchmark]
+
+`PERFORMANCE_PLAN.md` Phase 4, which remains open, aimed at the
+implementation this project calls primary. LispWorks runs at roughly a
+quarter of SBCL's speed (`nop` ~950 vs ~3550 fps), and every
+optimization so far was measured on both but DESIGNED against SBCL's
+behaviour -- the bus dispatch and `%expire-channel` in particular may
+land very differently there.
+
+Follow that plan's four steps (compat-wrapped profiling helpers,
+profile the workloads, act only on what the profile names, record the
+findings). The one addition: profile LispWorks FIRST, and treat the
+SBCL/LispWorks gap as the thing being investigated rather than an
+accepted constant.
+
+Commit: per follow-up the profile justifies, each with
+`PERFORMANCE_LOG.md` rows.
+
+---
+
+## Phase 19 -- 256-entry palette
+
+Phase 7 pinned a limitation by test: the 128-entry palette collapses
+GTIA mode 9's 16 luminances into 8 pairs. The color bytes the renderer
+computes are already hardware-correct, so this is a palette-table
+change plus the tests that currently assert the collapsed values.
+
+Widen the table to 256 entries (hue 4 bits x luminance 4 bits), update
+`atari-color->r/g/b` and their callers, and update the mode-9 renderer
+test to assert 16 distinct luminances.
+
+Commit: "Renderer: 256-entry palette recovers mode 9's 16 luminances".
+
+---
+
+## Phase 20 -- ANTIC display-list latch note
+
+`MISC_IMPROVEMENTS_PLAN.md` item 10, unchanged: an honest comment block
+in `src/antic.lisp` at the VBI re-latch and the DLISTL/H write cases,
+describing how this emulator's re-latch-every-VBI model diverges from
+hardware (which reloads only at JVB), and cross-referencing
+SCANLINE_ACCURACY_PLAN.md Phase 4+ where changing the behaviour
+belongs. Documentation only.
+
+Commit: "Document the ANTIC display-list latch simplification".
+
+---
+
 ## Roadmap definition of done
 
 - Suite green on SBCL and LispWorks after every phase (rule 2).
@@ -633,8 +858,16 @@ marked obsolete).
   an mp4 with visible animated raster bars and (once a demo uses
   POKEY) audible tone.
 - `PERFORMANCE_LOG.md` has rows for phases 3, 5, 6, 9.
-- The plan status headers (`SCANLINE_ACCURACY_PLAN.md`: Phases 0-3
-  done, 4-5 open; `MISC_IMPROVEMENTS_PLAN.md`: 1-8 done, 10 open;
-  this file) reflect reality.
+- The plan status headers reflect reality. As of 2026-08-07:
+  `SCANLINE_ACCURACY_PLAN.md` Phases 0-3 done, stretch 4-5 open (Phase
+  17 below is their prerequisite); `MISC_IMPROVEMENTS_PLAN.md` items
+  1-8 done, 9 and 10 open, 11 obsolete (superseded by item 4);
+  `PERFORMANCE_PLAN.md` Phases 0-3 done (2 rejected on measurement),
+  Phase 4 open as Phase 18 below.
 - Aspirational, not gating: Acid800's CPU + ANTIC subsets under the
   real OS ROM -- track once Phases 3-6 land.
+
+For the 13-20 tranche, done means: the machine can be typed at (13) and
+booted from a disk image (16), the Harte data is one command away (14)
+and checks bus traces rather than cycle counts alone (17), and the
+docs match the code (15, 20).

@@ -4,8 +4,14 @@
 > Phase 0 (harness), Phase 1 (declarations), and Phase 3 (POKEY
 > batching) shipped; Phase 2 (page-dispatch table) was implemented,
 > measured, and rejected per its own <5% bar (LispWorks regressed).
-> Phase 4 (profiling pass) remains open as optional follow-up.
-> Measured results live in `PERFORMANCE_LOG.md`.
+> Phase 4 (profiling pass) remains open, and is now scheduled as
+> ROADMAP.md Phase 18 with one added instruction: profile LispWorks
+> FIRST. It is the project's primary implementation and runs at roughly
+> a quarter of SBCL's speed (`nop` ~950 vs ~3550 fps), yet every
+> optimization so far was measured on both but designed against SBCL's
+> behaviour. Measured results live in `PERFORMANCE_LOG.md`, which also
+> now carries non-optimization entries where a feature touched the hot
+> path (POKEY serial output, the Phase 12 CPU fixes).
 
 Goal: make the emulator measurably faster without sacrificing the project's
 first two priorities (idiomatic portable CL; emulation accuracy). Every
