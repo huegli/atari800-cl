@@ -1,9 +1,9 @@
 # Miscellaneous Improvements Plan
 
 > **Status (2026-08-03): items 1, 2, 3, 5, 6, 7, 8 done** (items 1-3, 8
-> via ROADMAP.md Phase 1; items 6-7 via ROADMAP.md Phase 6c — PAL
+> via ROADMAP.md Phase 1; items 6-7 via ROADMAP.md Phase 6c -- PAL
 > register now reads the $0F NTSC pattern, read-side defaults deduped
-> into %INIT-READ-REGS; item 5 via ROADMAP.md Phase 8 — reload offsets
+> into %INIT-READ-REGS; item 5 via ROADMAP.md Phase 8 -- reload offsets
 > and linked 16-bit channels, with the plan's CONFIRM-flagged period
 > figures implemented as stated and the flag carried into
 > src/pokey.lisp's header). Item 4 landed on 2026-08-07 as ROADMAP.md
@@ -34,7 +34,7 @@ the 105 illegal opcodes until `illegal.lisp` is also reloaded.
 
 Fix: eliminate the builder indirection.
 1. In `src/cpu.lisp`, change `*opcode-table*` to
-   `(defvar *opcode-table* (make-array 256 :initial-element nil) ...)` —
+   `(defvar *opcode-table* (make-array 256 :initial-element nil) ...)` --
    a `simple-vector` that exists from load time; same for
    `*opcode-mnemonic-table*` (move it to cpu.lisp as a `defvar`, since
    `machine.lisp` reads it and it must survive partial reloads too).
@@ -45,7 +45,7 @@ Fix: eliminate the builder indirection.
    beginner-note in `cpu.lisp` that explains why DEFVAR matters here.
 4. `step-cpu`'s `(and *opcode-table* (svref ...))` guard can simplify to a
    plain `svref` since the table now always exists.
-5. Tests: add to `tests/test-cpu-opcodes.lisp` — all 256 slots of
+5. Tests: add to `tests/test-cpu-opcodes.lisp` -- all 256 slots of
    `*opcode-table*` are non-NIL after load, and
    `(length (documented-opcodes))` = 151, `(length (illegal-opcodes))`
    = 105 (the introspection functions already exist).
@@ -54,7 +54,7 @@ Fix: eliminate the builder indirection.
 
 `reset-cpu` (`src/cpu.lisp`) sets P to `#x24` (U+I) while
 `machine-cold-reset` (`src/machine.lisp`) sets `#x34` (U+I+B). B is not a
-real register bit — `status-byte-from-pull` forces it off — so the two
+real register bit -- `status-byte-from-pull` forces it off -- so the two
 paths disagree about a phantom bit.
 
 1. Change `machine-cold-reset` to `#x24` and align its docstring/comment.
@@ -63,7 +63,7 @@ paths disagree about a phantom bit.
 3. Add one test: after `machine-cold-reset`, `(cpu-flags cpu)` = `#x24`
    and equals the flags after bare `reset-cpu` on a synthetic vector.
 
-## 3. Klaus Dormann functional test — stop skipping it
+## 3. Klaus Dormann functional test -- stop skipping it
 
 The suite's strongest CPU check currently skips (no binary in `roms/`).
 1. Add `scripts/fetch-test-roms.sh`: download the prebuilt
@@ -73,7 +73,7 @@ The suite's strongest CPU check currently skips (no binary in `roms/`).
    load_data_direct=1, 64 KiB image) into `roms/`, with checksum echo and
    a note about the project's license. `roms/` is gitignored, so this is
    per-machine setup, not a commit of the binary.
-2. Verify the test passes on both implementations (it is slow —
+2. Verify the test passes on both implementations (it is slow --
    `max-instructions` is 200M; note expected runtime in the script).
 3. Document the script in `CLAUDE.md`'s test section.
 
@@ -84,7 +84,7 @@ test vectors (~10k cases/opcode) with full before/after CPU+memory state.
 
 1. Data acquisition: the `SingleStepTests/65x02` repository, `6502/v1/`
    directory (one JSON file per opcode, NMOS 6502 WITH decimal mode and
-   illegal opcodes — exactly this project's target). The repo is large;
+   illegal opcodes -- exactly this project's target). The repo is large;
    do NOT vendor it. Convention: env var `ATARI800_CL_HARTE_TESTS` pointing
    at a local checkout's `6502/v1/` directory; tests skip gracefully when
    unset (mirror the Klaus skip pattern in `tests/test-cpu.lisp`).
@@ -94,7 +94,7 @@ test vectors (~10k cases/opcode) with full before/after CPU+memory state.
    maintained); `com.inuoe.jzon` is an acceptable alternative.
 3. New file `tests/test-harte.lisp` (insert into the .asd after
    `test-cpu.lisp`), suite `harte-suite :in atari800-cl-suite`:
-   - Harness: for each case — build `make-cpu` + `make-memory`,
+   - Harness: for each case -- build `make-cpu` + `make-memory`,
      `attach-memory-bus`, load `initial` state (pc/s/a/x/y/p + ram pairs),
      `step-cpu` once, compare against `final` (registers + every ram pair)
      and compare the consumed cycle count against `(length cycles)`.
@@ -130,7 +130,7 @@ Steps:
 1. Confirm the offset/link rules; record them in the `pokey.lisp` header.
 2. Implement in `%channel-divisor` / underflow-reload path; linked mode
    makes channel 2's (resp. 4's) tick source "channel 1 (3) underflow"
-   instead of a divisor — restructure `pokey-tick`'s per-channel loop
+   instead of a divisor -- restructure `pokey-tick`'s per-channel loop
    accordingly.
 3. EXISTING TESTS WILL CHANGE MEANING: `pokey-timer1-fires-irq-after-
    audf1+1-ticks` asserts N+1 at 1.79 MHz; with the confirmed rule it
@@ -142,7 +142,7 @@ Steps:
 5. If PERFORMANCE_PLAN Phase 3 (batched advance) already landed, update
    its equivalence test script to cover linked mode.
 
-## 6. GTIA PAL register encoding — verify and fix
+## 6. GTIA PAL register encoding -- verify and fix
 
 `gtia.lisp` returns 1 from the PAL register (offset 20) for "NTSC". Verify
 against atari800's `gtia.c` / Altirra docs: the convention is a bit
@@ -155,8 +155,8 @@ asserting the documented NTSC value with a comment citing the source.
 
 The read-side defaults (TRIG=1 x4, PAL, CONSOL=7) are spelled twice:
 `%make-gtia-read-regs` and `reset-gtia` (`src/gtia.lisp`). Make
-`reset-gtia` fill from one shared helper — e.g. `%init-read-regs (array)`
-called by both — so item 6's value change has exactly one home. Tests:
+`reset-gtia` fill from one shared helper -- e.g. `%init-read-regs (array)`
+called by both -- so item 6's value change has exactly one home. Tests:
 existing `test-gtia.lisp` covers both paths; suite green is sufficient.
 
 ## 8. LispWorks `chmod-file` via FLI
@@ -167,8 +167,8 @@ while `%getpid` two screens up already demonstrates the FLI pattern.
    pass :ef-mb-string)) (mode :int)) :result-type :int)` (consult the
    existing `%c-socket` definitions for house style), call it from the
    `#+lispworks` branch, signal an error on non-zero return.
-2. Test: `tests/test-compat.lisp` — create a temp file, chmod #o600,
-   verify via `(logand (sb-posix:stat-mode ...))` on SBCL… SBCL already
+2. Test: `tests/test-compat.lisp` -- create a temp file, chmod #o600,
+   verify via `(logand (sb-posix:stat-mode ...))` on SBCL... SBCL already
    works; the LispWorks assertion can simply round-trip: chmod then check
    the file is still readable/writable by owner and the function returned
    the namestring. Keep it simple; the real check is "no shell-out".
@@ -176,7 +176,7 @@ while `%getpid` two screens up already demonstrates the FLI pattern.
 ## 9. Documentation drift sweep
 
 1. `CLAUDE.md` "Development Plan" section still says "Prompt 12's optional
-   Unix-socket IPC layer was later removed" — but `transport.lisp`,
+   Unix-socket IPC layer was later removed" -- but `transport.lisp`,
    `aesp.lisp`, `cli-socket.lisp` are present (Stages 4c-6 re-added them).
    Rewrite the sentence to describe the current server stack and point at
    `CHANGES.md` for the history.
@@ -190,7 +190,7 @@ while `%getpid` two screens up already demonstrates the FLI pattern.
    arg, `+color-clocks-per-scanline+` once the scanline plan renames it)
    and update examples.
 
-## 10. ANTIC display-list latch semantics — document the simplification
+## 10. ANTIC display-list latch semantics -- document the simplification
 
 Real ANTIC reloads its DL program counter from DLISTL/H only at JVB (the
 shadow registers are just a latch); this emulator re-latches every VBI and
@@ -198,12 +198,12 @@ resets the DL offset on any DLISTL/H write mid-frame. Behaviourally close
 for OS-standard lists (which always end in JVB) but not hardware-exact.
 Near-term: add an honest comment block in `antic.lisp` at the VBI re-latch
 and the DLISTL/H write cases describing the divergence. Actually changing
-the behaviour belongs with SCANLINE_ACCURACY_PLAN Phase 4+ — note the
+the behaviour belongs with SCANLINE_ACCURACY_PLAN Phase 4+ -- note the
 cross-reference in the comment.
 
 ## 11. Per-opcode cycle-count baseline test (skip if item 4 lands)
 
-If the Harte harness (item 4) is adopted, cycle counts are covered there —
+If the Harte harness (item 4) is adopted, cycle counts are covered there --
 skip this. Otherwise: add `tests/test-cycle-counts.lisp` with a table of
 (opcode, addressing-mode-setup, expected-base-cycles, page-cross-extra)
 derived from the masswerk 6502 reference, executed via `make-cpu` +
@@ -213,7 +213,7 @@ taken+cross), RMW on abs,X, and JSR/RTS/BRK/RTI.
 
 ## Suggested order
 
-1 → 2 → 9 (cheap, immediate) → 3 → 4 (the big ratchet) → 5 → 6+7 → 8 →
-10 → 11(only if 4 skipped). Items 5 and 4 interact: land 4 first so POKEY
+1 -> 2 -> 9 (cheap, immediate) -> 3 -> 4 (the big ratchet) -> 5 -> 6+7 -> 8 ->
+10 -> 11(only if 4 skipped). Items 5 and 4 interact: land 4 first so POKEY
 changes are made under a stronger CPU-correctness net (not that Harte
 covers POKEY, but it pins the CPU while you touch IRQ delivery).

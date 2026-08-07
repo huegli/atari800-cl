@@ -20,11 +20,11 @@ suite green on BOTH implementations.
   optimization commit. Every optimization commit's message records the
   before/after numbers from both implementations.
 - Safety floor: compiled code keeps `(safety 1)` minimum. Do not use
-  `(safety 0)` anywhere — this is a learning codebase and bounds checks
+  `(safety 0)` anywhere -- this is a learning codebase and bounds checks
   stay on.
 - Do not change modelled behaviour. If an optimization needs a semantic
   change, it belongs in SCANLINE_ACCURACY_PLAN.md instead.
-- Ordering note: the single biggest win — the scanline-granular scheduler —
+- Ordering note: the single biggest win -- the scanline-granular scheduler --
   lives in SCANLINE_ACCURACY_PLAN.md Phase 1 (it is an accuracy enabler
   first). Run this plan's Phase 0 BEFORE that work so its speedup gets
   measured, then return here.
@@ -44,15 +44,15 @@ suite green on BOTH implementations.
 
 ---
 
-## Phase 0 — Benchmark harness (do this first)
+## Phase 0 -- Benchmark harness (do this first)
 
 1. Create `scripts/bench.lisp`: portable CL, loaded by both runner scripts.
    It must work WITHOUT real ROM images (roms/ is gitignored): build the
    machine via the same synthetic-ROM approach as
-   `tests/test-helpers.lisp::%make-synthetic-os-rom` — but note the test
+   `tests/test-helpers.lisp::%make-synthetic-os-rom` -- but note the test
    helpers live in the test system; either load `:atari800-cl/tests` and
    reuse them, or inline a minimal synthetic-ROM builder in the script
-   (reset vector → $C000, body all $EA NOPs). A NOP-sled is a reasonable
+   (reset vector -> $C000, body all $EA NOPs). A NOP-sled is a reasonable
    baseline workload; optionally add a second workload with a busy loop +
    POKEY timer IRQs to exercise the interrupt path
    (`CLI` + IRQEN/STIMER setup, handler = `RTI`).
@@ -63,7 +63,7 @@ suite green on BOTH implementations.
 2. Create `scripts/bench-sbcl.sh` and `scripts/bench-lispworks.sh` by
    copying the structure of `scripts/test-sbcl.sh` / `test-lispworks.sh`
    (they already solve the sandbox/ASDF/source-registry/mp:initialize
-   problems — reuse, don't reinvent). Exit 0 on completion.
+   problems -- reuse, don't reinvent). Exit 0 on completion.
 3. Create `PERFORMANCE_LOG.md` with a table: date, commit, implementation,
    workload, fps, realtime-x, notes. Record the current baseline as the
    first rows.
@@ -76,12 +76,12 @@ Commit: "Add frame-rate benchmark harness and performance log".
 
 ---
 
-## Phase 1 — Optimization declarations + cheap slot/type fixes
+## Phase 1 -- Optimization declarations + cheap slot/type fixes
 
 1. Add `(declaim (optimize (speed 3) (safety 1) (debug 1)))` at the top of
    the hot files: `src/cpu.lisp`, `src/cpu-opcodes.lisp`, `src/illegal.lisp`,
    `src/bus.lisp`, `src/antic.lisp`, `src/pokey.lisp`, `src/machine.lisp`.
-   Caveat to handle explicitly: `declaim` PROCLAIMS — with `:serial t` it
+   Caveat to handle explicitly: `declaim` PROCLAIMS -- with `:serial t` it
    also affects every file compiled after it in the same session. That is
    acceptable here (the whole core wants this policy), but add a comment at
    the first declaim noting it, and put the same declaim in each hot file
@@ -90,13 +90,13 @@ Commit: "Add frame-rate benchmark harness and performance log".
    surfaces them during the build). Fix the cheap ones: missing `fixnum`
    declarations on loop counters, `(or null function)` funcall sites that
    benefit from a local `(the function ...)` binding AFTER an explicit null
-   check. Do NOT chase every note — stop where a fix would obscure the code.
+   check. Do NOT chase every note -- stop where a fix would obscure the code.
 3. Change the `cpu` struct slot `cycles` type from `(unsigned-byte 64)` to
    `fixnum` (`src/cpu.lisp`). Rationale: `(unsigned-byte 64)` raw slots are
    SBCL-specific goodness but may box on LispWorks; `fixnum` is fast on
    both and 62 bits of cycles is millennia of emulated time. Grep for
    declarations referencing the old type. Also audit `antic` slot
-   `dl-offset (unsigned-byte 16)` arithmetic — `(incf ... 2)` can
+   `dl-offset (unsigned-byte 16)` arithmetic -- `(incf ... 2)` can
    transiently exceed the declared type at `(safety 1)`+`(speed 3)` on
    SBCL if it ever hits 65535; either widen to `fixnum` or mask after
    increment (check what values are actually reachable first).
@@ -110,21 +110,21 @@ Commit: "Add optimize/ftype declarations to the hot path".
 
 ---
 
-## Phase 2 — Page-dispatch table for BUS-READ/BUS-WRITE
+## Phase 2 -- Page-dispatch table for BUS-READ/BUS-WRITE
 
 Replace the per-access cond chain + MMU predicate calls with a 256-entry
 per-page tag table rebuilt only when banking changes.
 
 1. Design (in `src/bus.lisp`):
-   - Add bus slots: `page-tags` — `(simple-array (unsigned-byte 4) (256))`
-     mapping page (high byte of address) → small-integer tag; and
-     `map-generation` — fixnum of the last MMU generation the table was
+   - Add bus slots: `page-tags` -- `(simple-array (unsigned-byte 4) (256))`
+     mapping page (high byte of address) -> small-integer tag; and
+     `map-generation` -- fixnum of the last MMU generation the table was
      built for.
    - Tags (defconstants): `+pg-ram+ +pg-os-rom+ +pg-basic-rom+
      +pg-selftest+ +pg-gtia+ +pg-pokey+ +pg-pia+ +pg-antic+ +pg-open-bus+`.
      All current map regions are page-aligned (self-test $50-$57, BASIC
      $A0-$BF, OS low $C0-$CF, I/O $D0-$D7 one chip or open-bus page each,
-     OS high $D8-$FF), so page granularity is exact — assert this in a test.
+     OS high $D8-$FF), so page granularity is exact -- assert this in a test.
    - `%REBUILD-PAGE-TABLE (bus)`: fills tags from the MMU predicates
      (`os-rom-mapped-p` etc.) and ROM-installed-ness, mirroring the
      current `bus-read` priority order exactly. A region whose ROM is not
@@ -133,15 +133,15 @@ per-page tag table rebuilt only when banking changes.
 2. Invalidation: add a `generation` fixnum slot to the `mmu` struct
    (`src/mmu.lisp`), incremented by `mmu-write-portb` and `reset-mmu`.
    `bus-read`/`bus-write` compare `(mmu-generation mmu)` against
-   `bus-map-generation` and lazily rebuild on mismatch — one fixnum
+   `bus-map-generation` and lazily rebuild on mismatch -- one fixnum
    compare on the fast path, no new coupling (bus already owns the mmu
    reference; mmu stays bus-agnostic). ROM installs
    (`install-os-rom`/`install-basic-rom`) bump the bus's own generation
    stamp to force a rebuild too (or simply call `%rebuild-page-table`).
-3. Rewrite `bus-read` as: check generation → `(ecase (aref tags (ldb (byte
+3. Rewrite `bus-read` as: check generation -> `(ecase (aref tags (ldb (byte
    8 8) address)) ...)` with one branch per tag, each branch the same code
    the current cond arm runs. Same for `bus-write` (RAM vs I/O vs
-   ROM-shadow-writes-land-in-RAM is already the rule — only the I/O pages
+   ROM-shadow-writes-land-in-RAM is already the rule -- only the I/O pages
    differ). Keep `bus-read16`, peek/poke unchanged.
 4. Correctness tests (in `tests/test-mmu.lisp` or a new
    `tests/test-bus-map.lisp` wired into the .asd):
@@ -153,18 +153,18 @@ per-page tag table rebuilt only when banking changes.
      oracle that re-implements the old cond chain (copy the old code into
      the test as `%bus-read-reference`).
    - Banking flips take effect on the very next access (regression #5
-     `portb-write-changes-rom-mapping-immediately` already covers this —
+     `portb-write-changes-rom-mapping-immediately` already covers this --
      it must pass unmodified).
 5. Benchmark both implementations; record. Expected: measurable gain on
    memory-heavy workloads; if the gain is < ~5% on both, consider keeping
    the simpler cond chain and closing this phase as "measured, not worth
-   it" — that is a valid outcome and should be logged.
+   it" -- that is a valid outcome and should be logged.
 
 Commit: "Dispatch bus reads through a per-page tag table".
 
 ---
 
-## Phase 3 — POKEY batched advance (event skipping)
+## Phase 3 -- POKEY batched advance (event skipping)
 
 Prerequisite: `POKEY-ADVANCE (pokey cpu n)` exists (SCANLINE_ACCURACY_PLAN
 Phase 1). This phase optimizes its internals from a per-cycle loop to
@@ -183,17 +183,17 @@ event skipping. Behaviour must be bit-identical.
 2. RNG: the LFSRs currently step once per cycle. Stepping them inside the
    batched loop defeats the optimization, so make them LAZY: store
    `rng-cycle` (cycles the RNG is behind) and advance the LFSRs only when
-   `pokey-random` is actually read — step `(mod delta 131071)` /
+   `pokey-random` is actually read -- step `(mod delta 131071)` /
    `(mod delta 511)` times for the 17/9-bit polys (period of an n-bit
    maximal LFSR is 2^n - 1; bounded work per read, and RANDOM reads are
    rare). Audit: nothing else in the codebase observes LFSR state except
-   `pokey-random` and the reset function — grep `poly17-state` /
+   `pokey-random` and the reset function -- grep `poly17-state` /
    `poly9-state` (tests touch them; keep slot semantics "state as of the
    last sync" and add a `%sync-rng` helper tests can call).
 3. Equivalence test (the important one), in `tests/test-pokey.lisp`:
-   drive two POKEYs side by side — one via N x `pokey-tick`, one via
+   drive two POKEYs side by side -- one via N x `pokey-tick`, one via
    `pokey-advance` in random-sized chunks (use a fixed seed list, not
-   `random`, for determinism) — through a scripted sequence of register
+   `random`, for determinism) -- through a scripted sequence of register
    writes (AUDF/AUDCTL/IRQEN/STIMER changes at fixed cycle offsets) over
    ~50,000 cycles. After every chunk, assert IRQST, timer-counts,
    sub-counters, and `pokey-random` agree.
@@ -204,10 +204,10 @@ Commit: "Batch POKEY advancement with event skipping and lazy RNG".
 
 ---
 
-## Phase 4 — Profiling pass + follow-ups
+## Phase 4 -- Profiling pass + follow-ups
 
 1. Add compat-wrapped profiling helpers in `src/compat.lisp`:
-   `WITH-PROFILING ((&key mode) &body body)` — SBCL: `sb-sprof` statistical
+   `WITH-PROFILING ((&key mode) &body body)` -- SBCL: `sb-sprof` statistical
    profile printed flat; LispWorks: `hcl:profile` or the `mp`-safe
    equivalent (consult LispWorks docs; if unavailable in the console image,
    make it a no-op with a warning). Export it. This is the ONE place
@@ -234,8 +234,8 @@ Commit: "Add profiling helpers; record post-optimization profile".
 
 ## Anti-goals
 
-- No `(safety 0)`, no struct→vector rewrites, no macro-generated
+- No `(safety 0)`, no struct->vector rewrites, no macro-generated
   monolithic interpreter loop, no implementation-specific intrinsics
   outside compat. If a proposed change makes the code harder to read for
   a CL learner, the performance win has to be an order of magnitude, not
-  percent — otherwise reject it.
+  percent -- otherwise reject it.

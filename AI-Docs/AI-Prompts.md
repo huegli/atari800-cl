@@ -1,4 +1,4 @@
-# AI-Prompts.md — Atari 800 XL Emulator in Common Lisp
+# AI-Prompts.md -- Atari 800 XL Emulator in Common Lisp
 ## Perplexity Personal Computer Execution Sequence
 
 These prompts build a headless Atari 800 XL emulator in Common Lisp step by step.
@@ -7,7 +7,7 @@ Target platform: **LispWorks** (primary), portable to **SBCL**.
 
 ---
 
-## Prompt 1 — Repository Scaffold
+## Prompt 1 -- Repository Scaffold
 
 ```
 Create a new Common Lisp repository named atari800-cl for a headless Atari 800 XL emulator.
@@ -21,37 +21,37 @@ Use ASDF and Quicklisp. Add these dependencies (all supported on both LispWorks 
 
 Create the following directory structure:
   atari800-cl/
-  ├── atari800-cl.asd
-  ├── atari800-cl-tests.asd
-  ├── README.md
-  ├── roms/
-  │   └── .gitkeep
-  ├── src/
-  │   ├── packages.lisp
-  │   ├── compat.lisp
-  │   ├── cpu.lisp
-  │   ├── opcodes.lisp
-  │   ├── illegal.lisp
-  │   ├── addressing.lisp
-  │   ├── bus.lisp
-  │   ├── mmu.lisp
-  │   ├── pia.lisp
-  │   ├── antic.lisp
-  │   ├── gtia.lisp
-  │   ├── pokey.lisp
-  │   ├── irq.lisp
-  │   ├── machine.lisp
-  │   └── ipc.lisp
-  └── tests/
-      ├── test-helpers.lisp
-      ├── test-cpu.lisp
-      ├── test-illegal.lisp
-      ├── test-addressing.lisp
-      ├── test-mmu.lisp
-      ├── test-antic.lisp
-      ├── test-gtia.lisp
-      ├── test-pokey.lisp
-      └── test-machine.lisp
+  |-- atari800-cl.asd
+  |-- atari800-cl-tests.asd
+  |-- README.md
+  |-- roms/
+  |   `-- .gitkeep
+  |-- src/
+  |   |-- packages.lisp
+  |   |-- compat.lisp
+  |   |-- cpu.lisp
+  |   |-- opcodes.lisp
+  |   |-- illegal.lisp
+  |   |-- addressing.lisp
+  |   |-- bus.lisp
+  |   |-- mmu.lisp
+  |   |-- pia.lisp
+  |   |-- antic.lisp
+  |   |-- gtia.lisp
+  |   |-- pokey.lisp
+  |   |-- irq.lisp
+  |   |-- machine.lisp
+  |   `-- ipc.lisp
+  `-- tests/
+      |-- test-helpers.lisp
+      |-- test-cpu.lisp
+      |-- test-illegal.lisp
+      |-- test-addressing.lisp
+      |-- test-mmu.lisp
+      |-- test-antic.lisp
+      |-- test-gtia.lisp
+      |-- test-pokey.lisp
+      `-- test-machine.lisp
 
 Include:
 - Package definitions in packages.lisp covering all source and test packages
@@ -70,7 +70,7 @@ as a downloadable archive.
 
 ---
 
-## Prompt 2 — 6502 CPU Core
+## Prompt 2 -- 6502 CPU Core
 
 ```
 In the atari800-cl repository, implement the NMOS 6502 CPU core in src/cpu.lisp.
@@ -105,7 +105,7 @@ Run the tests under SBCL and fix all failures before delivering the updated repo
 
 ---
 
-## Prompt 3 — All Documented Opcodes
+## Prompt 3 -- All Documented Opcodes
 
 ```
 In the atari800-cl repository, implement all 151 documented NMOS 6502 opcodes
@@ -135,7 +135,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 4 — Illegal Opcodes
+## Prompt 4 -- Illegal Opcodes
 
 ```
 In the atari800-cl repository, implement all NMOS 6502 illegal opcodes in src/illegal.lisp
@@ -144,7 +144,7 @@ that are relevant to the Atari 800 XL CPU (original NMOS 6502, not 65C02).
 Include the following groups:
 - Compound RMW instructions: SLO, RLA, SRE, RRA, DCP, ISC
   (each performs two official operations merged into one: e.g. SLO = ASL then ORA)
-- Combined load/store: LAX (LDA+LDX), SAX (A AND X → memory)
+- Combined load/store: LAX (LDA+LDX), SAX (A AND X -> memory)
 - Bitwise-accumulator: ANC, ALR, ARR, AXS, LAS, TAS
 - Unstable high-byte store variants: AHX, SHX, SHY, TAS
   (document that these behave as AND with addr_high+1 and may vary on real hardware)
@@ -167,7 +167,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 5 — Bus, MMU, and Memory Map
+## Prompt 5 -- Bus, MMU, and Memory Map
 
 ```
 In the atari800-cl repository, implement the Atari 800 XL memory map and bus layer
@@ -211,7 +211,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 6 — PIA
+## Prompt 6 -- PIA
 
 ```
 In the atari800-cl repository, implement the Atari 800 XL PIA (6520-compatible)
@@ -220,10 +220,10 @@ in src/pia.lisp.
 Requirements:
 - Represent PIA with a typed defstruct containing: ddra, porta, ddrb, portb (all u8)
 - Register map at $D300-$D303:
-    $D300 / offset 0: PORTA — joystick/input lines (stubbed as all-inputs for now)
-    $D301 / offset 1: DDRA  — data direction register for port A
-    $D302 / offset 2: PORTB — MMU control output
-    $D303 / offset 3: DDRB  — data direction register for port B
+    $D300 / offset 0: PORTA -- joystick/input lines (stubbed as all-inputs for now)
+    $D301 / offset 1: DDRA  -- data direction register for port A
+    $D302 / offset 2: PORTB -- MMU control output
+    $D303 / offset 3: DDRB  -- data direction register for port B
 - pia-read dispatches by (logand addr #x03)
 - pia-write dispatches by (logand addr #x03); writes to PORTB (offset 2) must call
   mmu-write-portb to update the MMU model immediately
@@ -243,7 +243,7 @@ Run all tests and fix every failure before delivering the updated repository.
 
 ---
 
-## Prompt 7 — ANTIC Scanline and DMA Engine
+## Prompt 7 -- ANTIC Scanline and DMA Engine
 
 ```
 In the atari800-cl repository, implement the ANTIC chip for the Atari 800 XL
@@ -264,7 +264,7 @@ Requirements:
   stolen-cycles accumulator (fixnum)
 - Implement register reads/writes at $D400-$D41F; shadow DMACTL and DLISTL/DLISTH
   into struct fields on write
-- Implement antic-tick (cpu bus) → integer:
+- Implement antic-tick (cpu bus) -> integer:
     advances one color clock
     performs display-list fetch on the correct clock within the line
     accounts for DRAM refresh steals
@@ -290,7 +290,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 8 — GTIA
+## Prompt 8 -- GTIA
 
 ```
 In the atari800-cl repository, implement the GTIA chip for the Atari 800 XL
@@ -348,7 +348,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 9 — POKEY Timers, IRQs, and Audio Scaffolding
+## Prompt 9 -- POKEY Timers, IRQs, and Audio Scaffolding
 
 ```
 In the atari800-cl repository, implement the POKEY chip for the Atari 800 XL
@@ -384,7 +384,7 @@ Timer behavior:
   and 3+4
 - STIMER write reloads all counters from current AUDF values
 
-Implement pokey-tick (pokey cpu) → boolean:
+Implement pokey-tick (pokey cpu) -> boolean:
 - Decrements active timer counters by one CPU-clock unit (accounting for clock
   divider ratio)
 - Fires IRQ and updates IRQST when a timer underflows with IRQ enabled
@@ -409,7 +409,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 10 — Interrupt Routing and Machine Scheduler
+## Prompt 10 -- Interrupt Routing and Machine Scheduler
 
 ```
 In the atari800-cl repository, implement the interrupt-routing layer in src/irq.lisp
@@ -441,7 +441,7 @@ Machine scheduler:
   Increment frame-count after each frame
 
 ROM loading helpers:
-- load-rom-file (path) → (simple-array (unsigned-byte 8) (*))
+- load-rom-file (path) -> (simple-array (unsigned-byte 8) (*))
 - machine-cold-reset (machine os-path basic-path):
     Load OS ROM into bus os-rom slot
     Load BASIC ROM into bus basic-rom slot
@@ -461,7 +461,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 11 — ROM Loading and Boot-Toward-BASIC Milestone
+## Prompt 11 -- ROM Loading and Boot-Toward-BASIC Milestone
 
 ```
 In the atari800-cl repository, add ROM support and bring the machine to a state
@@ -501,7 +501,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 12 — IPC Layer for Headless Architecture
+## Prompt 12 -- IPC Layer for Headless Architecture
 
 ```
 In the atari800-cl repository, implement the optional headless IPC layer in src/ipc.lisp.
@@ -536,7 +536,7 @@ Run all tests under SBCL and fix every failure before delivering the updated rep
 
 ---
 
-## Prompt 13 — Test Harness Audit and CI Commands
+## Prompt 13 -- Test Harness Audit and CI Commands
 
 ```
 In the atari800-cl repository, audit and strengthen the entire test harness.
@@ -550,12 +550,12 @@ Requirements:
 - Add a helper macro: with-cpu-state ((cpu &key pc sp a x y p) &body body) that
   sets up a CPU for a targeted test and restores state after
 
-SBCL batch command — add to README.md:
+SBCL batch command -- add to README.md:
   sbcl --eval "(ql:quickload :atari800-cl/tests)" \
        --eval "(let ((result (asdf:test-system :atari800-cl/tests))) \
                  (uiop:quit (if result 0 1)))"
 
-LispWorks command — document in README.md:
+LispWorks command -- document in README.md:
   lispworks -eval "(ql:quickload :atari800-cl/tests)" \
             -eval "(let ((result (asdf:test-system :atari800-cl/tests))) \
                     (lispworks:quit :status (if result 0 1)))"
@@ -572,7 +572,7 @@ the updated repository.
 
 ---
 
-## Prompt 14 — Final Polish and Repository Handoff
+## Prompt 14 -- Final Polish and Repository Handoff
 
 ```
 Review the complete atari800-cl repository and prepare it for handoff.
@@ -617,7 +617,7 @@ Use these checks after each prompt before continuing to the next phase.
 | No ROMs committed | `roms/` contains only `.gitkeep` |
 | CPU isolated | CPU unit tests pass without any Atari chip code |
 | Timing accounts | Stolen cycles from ANTIC are subtracted from CPU budget |
-| IRQs routed | POKEY timer fires → cpu-irq-pending; ANTIC VBI fires → cpu-nmi-pending |
+| IRQs routed | POKEY timer fires -> cpu-irq-pending; ANTIC VBI fires -> cpu-nmi-pending |
 | ROM-free boot | Synthetic ROM fixtures in tests; real ROM loading documented only |
 | IPC optional | All tests pass without the IPC server running |
 
@@ -630,7 +630,7 @@ Use these checks after each prompt before continuing to the next phase.
 | 3 | All 151 documented NMOS 6502 opcodes, Klaus Dormann fixture |
 | 4 | All NMOS illegal opcodes (SLO, LAX, KIL, etc.) |
 | 5 | Atari 800 XL bus, memory map, MMU, PORTB bank switching |
-| 6 | PIA (PORTA joystick, PORTB → MMU routing) |
+| 6 | PIA (PORTA joystick, PORTB -> MMU routing) |
 | 7 | ANTIC scanline engine, DMA cycle stealing, DLI/VBI |
 | 8 | GTIA registers, player/missile, collision latches |
 | 9 | POKEY timers, IRQ generation, IRQEN/IRQST, audio scaffolding |

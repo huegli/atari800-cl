@@ -7,7 +7,7 @@ within the Attic repo.
 
 The harness sits **above** both projects: it speaks AESP and the CLI
 text protocol directly, treating each emulator as a black box behind
-its protocol sockets. It does not link to either codebase — comparison
+its protocol sockets. It does not link to either codebase -- comparison
 runs the real servers on a temporary port triple and Unix socket, fires
 requests, and classifies the responses.
 
@@ -18,7 +18,7 @@ through `scripts/compare-attic-protocols.sh`.
 ## Quick start
 
 ```sh
-# Capability probes — does this environment allow live socket tests?
+# Capability probes -- does this environment allow live socket tests?
 scripts/compare-attic-protocols.sh --probe
 
 # Pure codec/spec self-tests (no servers).
@@ -43,16 +43,16 @@ Reports land in `tools/protocol-comparison/reports/<timestamp>/`
 
 ```
 compare-protocols.py
-  ├── probes.py        environment capability probes
-  ├── adapters.py      Attic / atari800-cl process adapters
-  │     └── start-atari800-cl-server.lisp  (SBCL/LispWorks launcher)
-  ├── aesp_codec.py    AESP wire format
-  ├── cli_codec.py     CLI text protocol
-  ├── protocol_spec.py message/command inventories
-  ├── normalizers.py   raw bytes/lines → semantic records
-  ├── expectations.py  case-level matching + cross-impl classification
-  ├── runner.py        per-case execution
-  └── reporters.py     summary/feature-matrix/failures output
+  |-- probes.py        environment capability probes
+  |-- adapters.py      Attic / atari800-cl process adapters
+  |     `-- start-atari800-cl-server.lisp  (SBCL/LispWorks launcher)
+  |-- aesp_codec.py    AESP wire format
+  |-- cli_codec.py     CLI text protocol
+  |-- protocol_spec.py message/command inventories
+  |-- normalizers.py   raw bytes/lines -> semantic records
+  |-- expectations.py  case-level matching + cross-impl classification
+  |-- runner.py        per-case execution
+  `-- reporters.py     summary/feature-matrix/failures output
 ```
 
 ### Implementation conformance

@@ -76,19 +76,19 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | f7ca0d6  | lispworks      | klaus    |  924.15 | 15.424     | Phases 1-5 review fixes, klaus+PASS, 3500 frames (mean of 3) |
 | 2026-08-02 | e4cce02   | sbcl          | nop      | 3500.02 | 58.412     | Renderer: span P/M + border fill (mean of 3) |
 | 2026-08-02 | e4cce02   | sbcl          | irq      | 3688.69 | 61.560     | Renderer: span P/M + border fill (mean of 3) |
-| 2026-08-02 | e4cce02   | sbcl          | display  | 1124.78 | 18.772     | Renderer: span P/M + border fill — 2.14x (mean of 3) |
+| 2026-08-02 | e4cce02   | sbcl          | display  | 1124.78 | 18.772     | Renderer: span P/M + border fill -- 2.14x (mean of 3) |
 | 2026-08-02 | e4cce02   | sbcl          | klaus    | 3048.00 | 50.868     | Renderer opt, klaus+PASS, 3500 frames (mean of 3) |
 | 2026-08-02 | e4cce02   | lispworks     | nop      |  895.83 | 14.950     | Renderer: span P/M + border fill (mean of 3) |
 | 2026-08-02 | e4cce02   | lispworks     | irq      | 1411.38 | 23.555     | Renderer: span P/M + border fill (mean of 3) |
-| 2026-08-02 | e4cce02   | lispworks     | display  |  255.15 |  4.258     | Renderer: span P/M + border fill — 3.82x (mean of 3) |
+| 2026-08-02 | e4cce02   | lispworks     | display  |  255.15 |  4.258     | Renderer: span P/M + border fill -- 3.82x (mean of 3) |
 | 2026-08-02 | e4cce02   | lispworks     | klaus    |  905.07 | 15.105     | Renderer opt, klaus+PASS, 3500 frames (mean of 3) |
 | 2026-08-02 | 01cc84b   | sbcl          | nop      | 3501.11 | 58.430     | Renderer: char color-pair hoist (mean of 3) |
 | 2026-08-02 | 01cc84b   | sbcl          | irq      | 3716.16 | 62.019     | Renderer: char color-pair hoist (mean of 3) |
-| 2026-08-02 | 01cc84b   | sbcl          | display  | 1931.61 | 32.236     | Renderer: char color-pair hoist — +72% (mean of 3) |
+| 2026-08-02 | 01cc84b   | sbcl          | display  | 1931.61 | 32.236     | Renderer: char color-pair hoist -- +72% (mean of 3) |
 | 2026-08-02 | 01cc84b   | sbcl          | klaus    | 3111.00 | 51.919     | Renderer char hoist, klaus+PASS, 3500 frames (mean of 3) |
 | 2026-08-02 | 01cc84b   | lispworks     | nop      |  912.57 | 15.230     | Renderer: char color-pair hoist (mean of 3) |
 | 2026-08-02 | 01cc84b   | lispworks     | irq      | 1442.17 | 24.069     | Renderer: char color-pair hoist (mean of 3) |
-| 2026-08-02 | 01cc84b   | lispworks     | display  |  332.01 |  5.541     | Renderer: char color-pair hoist — +30% (mean of 3) |
+| 2026-08-02 | 01cc84b   | lispworks     | display  |  332.01 |  5.541     | Renderer: char color-pair hoist -- +30% (mean of 3) |
 | 2026-08-02 | 01cc84b   | lispworks     | klaus    |  938.18 | 15.657     | Renderer char hoist, klaus+PASS, 3500 frames (mean of 3) |
 | 2026-08-02 | 8255be7   | sbcl          | nop      | 3476.34 | 58.018     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | sbcl          | irq      | 3706.60 | 61.859     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
@@ -99,7 +99,7 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
 
-## ROADMAP Phase 12 — CPU fixes are performance-neutral
+## ROADMAP Phase 12 -- CPU fixes are performance-neutral
 
 The Tom Harte harness turned up three CPU bugs (unstable-store page-cross
 address corruption, ARR decimal mode, JSR operand read order).  All three
@@ -119,11 +119,11 @@ there is no measurable cost.  Expected: the JSR change swaps one
 other two fixes only add work on code paths that were already wrong.
 
 Absolute numbers here are higher than the rows above them for the same
-workloads — those were taken while the machine was busy downloading and
+workloads -- those were taken while the machine was busy downloading and
 parsing a gigabyte of test vectors.  Only the interleaved A/B pairs
 within a section are comparable.
 
-## POKEY serial output (SEROR/SEROC) — implementation cost
+## POKEY serial output (SEROR/SEROC) -- implementation cost
 
 Adding the serial transmitter puts one new test on POKEY's hottest
 paths, so it is measured here even though it is a feature, not an
@@ -143,7 +143,7 @@ first run):
 | lispworks      | klaus    |  962.4      |  959.5      | -0.3% |
 
 The remaining cost is one fixnum slot read plus a branch per POKEY-TICK /
-POKEY-ADVANCE call — the "is the transmitter busy" test.  It lands
+POKEY-ADVANCE call -- the "is the transmitter busy" test.  It lands
 hardest on `nop`/`irq`, which are POKEY-dominated microbenchmarks; the
 mixed workloads (`display`, `klaus`) are within noise.
 
@@ -165,7 +165,7 @@ same channel-4 period (20 half-bits x (reload+1) x divisor), just
 snapshotted when the byte starts shifting instead of tracked underflow
 by underflow.
 
-## ROADMAP Phase 9 — POKEY audio synthesis
+## ROADMAP Phase 9 -- POKEY audio synthesis
 
 | date       | commit   | implementation | workload | fps     | realtime-x | notes                            |
 |------------|----------|----------------|----------|---------|------------|----------------------------------|
@@ -193,7 +193,7 @@ INTERLEAVED with the new build, alternating runs to cancel drift:
 | lispworks | irq      | 1426.97    | 1404.21     | -1.6% |
 
 Every A run fell below every B run on `nop` (both implementations),
-while `irq` alternated — so the `nop` delta is real and the `irq` one
+while `irq` alternated -- so the `nop` delta is real and the `irq` one
 is noise.  That is the
 expected shape: the cost is one slot read plus branch per POKEY
 advance, and `nop` is the maximum possible advance density (a 2-cycle
@@ -214,7 +214,7 @@ sled, 27x realtime), LispWorks 286 fps (32%, 4.8x realtime).  Both
 leave ample headroom over the 59.92 Hz target, so Phase 10 can stream
 audio without a real-time risk.
 
-## ROADMAP Phase 6 — P/M DMA + full PRIOR priority
+## ROADMAP Phase 6 -- P/M DMA + full PRIOR priority
 
 Hot-path phases 6a (per-line P/M fetch) and 6b (source-tag recording +
 priority arbitration) benched together at the 6c commit.  All
@@ -228,7 +228,7 @@ sprites; the P/M-on decomposition variant from the renderer-
 optimization session measured active-sprite compositing at ~9% of the
 optimized frame.
 
-## Renderer optimization — per-character color-pair hoisting
+## Renderer optimization -- per-character color-pair hoisting
 
 With P/M compositing fixed, decomposition showed glyph rendering as
 the display frame's dominant term (71% SBCL / 60% LispWorks): a mode
@@ -242,19 +242,19 @@ realtime -> ~5.5x).  nop/irq/klaus unchanged within session noise.
 
 Prototype-methodology note for future sessions: measuring a renderer
 variant by LOADing a redefinition source file works on SBCL (LOAD
-compiles) but silently runs INTERPRETED on LispWorks — the LW
+compiles) but silently runs INTERPRETED on LispWorks -- the LW
 prototype of this change benched at 2.5 fps until recompiled.  Use
 COMPILE-FILE + LOAD (or bench the committed code) on LispWorks.
 
 Remaining display-frame profile after both renderer commits (SBCL /
 LispWorks, from the same-image decomposition): CPU+chips emulation
-~0.20 / ~0.81 ms, playfield render now the remainder — further
+~0.20 / ~0.81 ms, playfield render now the remainder -- further
 candidates are per-row glyph batching and cheaper border fills, but
 Phase 6b's PRIOR rewrite will restructure these loops anyway (it must
 emit per-pixel source tags), so fold further playfield tuning into
 that phase rather than optimizing twice.
 
-## Renderer optimization — span-based P/M compositing + border-only fill
+## Renderer optimization -- span-based P/M compositing + border-only fill
 
 Decomposing the display workload (scanline callback stubbed vs. P/M
 layer stubbed) showed P/M compositing at 52% (SBCL) / 67% (LispWorks)
@@ -272,22 +272,22 @@ display workload, mean of 3, vs. the f7ca0d6 rows: SBCL 525.5 ->
 1124.8 fps (2.14x, projection was ~2x), LispWorks 66.7 -> 255.2 fps
 (3.82x, projection was ~3x; ~1.1x realtime -> ~4.3x realtime, restoring
 headroom for Phase 6 priority work and Phase 9 audio).  nop/irq/klaus
-moved -3..-5% — consistent with this session's steady downward drift
+moved -3..-5% -- consistent with this session's steady downward drift
 (see the b4e8d51 re-baseline note above), and those workloads never
 enter the changed code (render path only).  P/M semantics are pinned
 by four new renderer tests (overlap priority, sizing, missile
 geometry, edge clipping); suite 1842/1842 on both implementations.
 
-## Phases 1-5 review fixes — map-mode/WSYNC corrections + display workload
+## Phases 1-5 review fixes -- map-mode/WSYNC corrections + display workload
 
 The review-fix commits (map-mode hardware geometry/steal tables, WSYNC
 deficit clamp + stale-flag consume) touch the hot path, so both rules-3
-runs were done — with one methodology note: measured fps this session
+runs were done -- with one methodology note: measured fps this session
 is 5-10% below the e3c23bc rows across ALL workloads on BOTH
 implementations, including code paths the fixes never touch.  To
 separate machine drift from real cost, b4e8d51 (the pre-fix tree) was
 re-benchmarked in a worktree in the SAME session (rows above): against
-that baseline the fixes are neutral — SBCL nop -1.7% / irq -2.0%
+that baseline the fixes are neutral -- SBCL nop -1.7% / irq -2.0%
 (inside the run-to-run spread of the three samples), LispWorks nop and
 irq +0.2%.  The nop/irq/klaus workloads never enable DMACTL, so the
 map-mode table changes never execute there; the only new always-on work
@@ -295,15 +295,15 @@ is one ANTIC-CONSUME-WSYNC call per %RUN-CLOCKS invocation (once per
 frame) and the MIN in the (rare) stall clamp.
 
 The NEW `display` workload (24-line mode-2 DL, DMACTL $22, renderer
-attached via the scanline callback — the first bench to exercise the
+attached via the scanline callback -- the first bench to exercise the
 DMA-active steal accounting and per-line rendering) has no "before"
 row; its f7ca0d6 rows are the baseline for future renderer/DMA work.
 Note the cost of rendering: ~6.6x slower than nop on SBCL (525 fps) and
-~14x on LispWorks (67 fps ≈ 1.11x realtime — close to the realtime
+~14x on LispWorks (67 fps ~ 1.11x realtime -- close to the realtime
 floor; renderer optimization is a candidate before Phase 6's per-pixel
 priority work lands on top of it).
 
-## ROADMAP Phase 5 — playfield DMA steal implementation cost
+## ROADMAP Phase 5 -- playfield DMA steal implementation cost
 
 None of the bench workloads (nop/irq/klaus) ever write DMACTL, so
 %DISPLAY-ACTIVE-P stays false throughout and PLAYFIELD-DMA-CYCLES /
@@ -323,7 +323,7 @@ baseline (mean of 3, same machine):
 
 All within run-to-run noise, as expected.
 
-## ROADMAP Phase 3 — WSYNC implementation cost
+## ROADMAP Phase 3 -- WSYNC implementation cost
 
 WSYNC adds one `ANTIC-CONSUME-WSYNC` call (an inline read-and-clear of
 a boolean slot) per instruction inside `%RUN-CLOCKS`'s inner loop, plus
@@ -341,8 +341,8 @@ of 3, same machine, immediately before this change):
 | lispworks       | irq      | 1577.58    | 1583.20   | +0.4%  |
 | lispworks       | klaus    |  983.34    |  993.48   | +1.0%  |
 
-All deltas are within run-to-run noise (compare to the ±1-3% spread
-across repeated runs of the same commit elsewhere in this log) — the
+All deltas are within run-to-run noise (compare to the +/-1-3% spread
+across repeated runs of the same commit elsewhere in this log) -- the
 per-instruction WSYNC check is effectively free, as expected.
 
 ## Merge atari800-cl-perf-plan into pixel-renderer (3e9601d)
@@ -401,12 +401,12 @@ bookkeeping (screen-pointer snapshot, display-active check + mode decode
 for the pointer/scan-y advancement, and the per-line SCANLINE-FN NIL
 check) now executes once per scanline inside the shared line events even
 when no renderer is attached. Bench machines install no AESP server, so
-the callback itself never runs. Acceptable — the scheduler's headline
+the callback itself never runs. Acceptable -- the scheduler's headline
 gains (e.g. LispWorks irq 626 -> 1543 fps vs. the pre-scheduler renderer
 branch) dwarf it; revisit only if a profile ever shows the line events
 hot.
 
-## Scanline scheduler note — fps gain includes an accuracy correction
+## Scanline scheduler note -- fps gain includes an accuracy correction
 
 c69772d (SCANLINE_ACCURACY_PLAN.md Phase 1) restructures the frame loop
 from per-clock to per-scanline: ~260 antic/pokey calls per frame instead
@@ -428,7 +428,7 @@ caveats when comparing these rows against earlier ones:
   long-running test loop's period, producing a false FAIL at a PC that
   is not a trap.
 
-## Phase 3 note — POKEY-TICK does not delegate to POKEY-ADVANCE
+## Phase 3 note -- POKEY-TICK does not delegate to POKEY-ADVANCE
 
 Phase 3's first cut made `pokey-tick` a thin `(pokey-advance pokey cpu 1)`
 wrapper.  Measured through that path, LispWorks lost 18-26% frame rate
@@ -441,14 +441,14 @@ add, and both share `%expire-channel` with a 50,000-cycle equivalence
 test pinning them together.  That version is what df7875d ships (SBCL
 +12%, LispWorks +0.3-1.9%).
 
-## Phase 2 — page-dispatch table (rejected, not committed)
+## Phase 2 -- page-dispatch table (rejected, not committed)
 
 PERFORMANCE_PLAN.md Phase 2 proposed replacing BUS-READ/BUS-WRITE's
 priority-COND chain with a per-page tag table (256-entry array, one tag
 per address high byte), rebuilt lazily off an MMU generation counter.
 Implemented in full (page tags, MMU generation, eager rebuild on ROM
 install/MMU attach, a dedicated equivalence-vs-oracle test suite), 1596/1596
-checks passed on both implementations — but the benchmark delta didn't
+checks passed on both implementations -- but the benchmark delta didn't
 clear the plan's own bar ("if the gain is < ~5% on both ... keep the
 simpler cond chain"), so the change was reverted and never committed;
 `src/bus.lisp`/`src/mmu.lisp` are back to the Phase 1 (ff34cc4) cond chain.
@@ -466,8 +466,8 @@ Mean of 4 runs each, vs. the ff34cc4 Phase 1 baseline above:
 
 SBCL's gain was marginal/noise-level (nop's +3.3% was the only value that
 stayed consistently positive across repeats; irq and klaus are within
-run-to-run variance). LispWorks — the project's primary target per
-CLAUDE.md — regressed consistently across all three workloads. Likely
+run-to-run variance). LispWorks -- the project's primary target per
+CLAUDE.md -- regressed consistently across all three workloads. Likely
 cause: the original COND chain already short-circuits cheaply in these
 workloads (`bus-os-rom`/`bus-basic-rom` being NIL, or address ranges
 failing the first `AND` term immediately), so it wasn't as expensive as

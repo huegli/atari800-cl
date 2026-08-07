@@ -5,15 +5,15 @@
 > steal charged to the CPU budget) and the pixel renderer now rides on
 > it. The "Current state" section below describes the pre-Phase-1
 > per-clock loop and is retained for historical context. Phase 0 (the
-> color-clock → CPU-cycle rename) landed via ROADMAP.md Phase 2. Phase
+> color-clock -> CPU-cycle rename) landed via ROADMAP.md Phase 2. Phase
 > 2 (WSYNC) landed via ROADMAP.md Phase 3 as a first cut that stalls
 > to end-of-line, not the hardware-accurate cycle 105 (that refinement
 > is still this plan's stretch Phase 4). Phase 3 (playfield DMA steal
 > tables + DL fetch accounting) landed via ROADMAP.md Phase 5. It
 > initially shipped with map-mode (8-14) byte counts taken from the
-> renderer instead of this plan's table — a correction that ran the
-> wrong way: THIS PLAN'S TABLE WAS RIGHT (each mode's pixel width ×
-> bits per pixel ÷ 8, per the Altirra Hardware Reference), and the
+> renderer instead of this plan's table -- a correction that ran the
+> wrong way: THIS PLAN'S TABLE WAS RIGHT (each mode's pixel width x
+> bits per pixel / 8, per the Altirra Hardware Reference), and the
 > renderer's map-mode geometry was the divergent part. A follow-up
 > commit restored the hardware table (BYTES-PER-SCREEN-ROW in
 > `src/antic.lisp`, now shared by the renderer, the steal accounting,
@@ -40,7 +40,7 @@ leaves the suite green.
   the phase fixes a concrete discrepancy.
 - Hardware references: Altirra Hardware Reference Manual (authoritative for
   ANTIC/GTIA/POKEY cycle behaviour) and the atari800 emulator source. When
-  this plan says "confirm against the reference", do that before coding —
+  this plan says "confirm against the reference", do that before coding --
   some numbers below are stated from memory and flagged as such.
 
 ## Current state (for orientation)
@@ -52,25 +52,25 @@ leaves the suite green.
 - `src/antic.lisp` `ANTIC-TICK` does all work at color-clock 0 of each line:
   VBI on line 248, DL instruction fetch, DLI on last line of a mode line,
   and a lumped per-line steal of DRAM refresh (9) + P/M DMA (0-5).
-- NOT modelled: WSYNC ($D40A — constant `+reg-wsync+` exists, write is
+- NOT modelled: WSYNC ($D40A -- constant `+reg-wsync+` exists, write is
   ignored), playfield/display-list DMA stealing, intra-line event positions,
   NMOS bus quirks (dummy reads, RMW double-write, interrupt-poll timing).
 
 ---
 
-## Phase 0 — Terminology: the line unit is CPU cycles, not color clocks
+## Phase 0 -- Terminology: the line unit is CPU cycles, not color clocks
 
 A real NTSC line is 228 color clocks = 114 CPU cycles (color clock runs at
 2x CPU clock). The code calls its 114-per-line unit "color clocks", which
 will cause real confusion once cycle numbers from hardware docs (which are
 in CPU cycles, 0-113) start appearing in this codebase.
 
-1. Rename `+color-clocks-per-scanline+` → `+cpu-cycles-per-scanline+`
+1. Rename `+color-clocks-per-scanline+` -> `+cpu-cycles-per-scanline+`
    (exported from `atari800-cl.antic`; update `src/package.lisp`, all uses
-   in `src/antic.lisp`, `src/machine.lisp`, and tests — grep, there are uses
+   in `src/antic.lisp`, `src/machine.lisp`, and tests -- grep, there are uses
    in `tests/test-antic.lisp` and `tests/test-regressions.lisp`).
-2. Rename the `antic` struct slot `color-clock` → `line-cycle` (exported
-   accessor `antic-color-clock` → `antic-line-cycle`; update package.lisp
+2. Rename the `antic` struct slot `color-clock` -> `line-cycle` (exported
+   accessor `antic-color-clock` -> `antic-line-cycle`; update package.lisp
    and all callers/tests).
 3. Sweep comments/docstrings in `antic.lisp`, `machine.lisp`, `main.lisp`
    that say "color clock" for the 114-unit; reword as "CPU cycles (114 per
@@ -83,7 +83,7 @@ Commit: "Rename ANTIC's line unit from color clocks to CPU cycles".
 
 ---
 
-## Phase 1 — Scanline-granular scheduler
+## Phase 1 -- Scanline-granular scheduler
 
 Restructure the frame loop from per-clock to per-scanline. This is the
 structural home for WSYNC (Phase 2) and DMA tables (Phase 3), and removes
@@ -92,20 +92,20 @@ structural home for WSYNC (Phase 2) and DMA tables (Phase 3), and removes
 Design:
 
 1. In `src/antic.lisp` add two scanline-level entry points (keep
-   `antic-tick` working — it is exported and heavily tested — by
+   `antic-tick` working -- it is exported and heavily tested -- by
    reimplementing it later or leaving it as the 1-cycle reference path):
-   - `ANTIC-BEGIN-SCANLINE (antic cpu bus)` — everything `antic-tick`
+   - `ANTIC-BEGIN-SCANLINE (antic cpu bus)` -- everything `antic-tick`
      currently does at clock 0: VBI check/raise (line 248 + DL pointer
      re-latch), DL instruction fetch when a new mode line is due, DLI
      check/raise, and return the cycles stolen this line (for now the
      existing `%scanline-steal`).
-   - `ANTIC-END-SCANLINE (antic)` — the end-of-line bookkeeping currently
-     at the 113→0 wrap: decrement `mode-scanlines-remaining`, increment
+   - `ANTIC-END-SCANLINE (antic)` -- the end-of-line bookkeeping currently
+     at the 113->0 wrap: decrement `mode-scanlines-remaining`, increment
      `scanline`, wrap at `+scanlines-per-frame+` and bump `frame-count`.
    - Factor the shared logic so `antic-tick` and the new functions cannot
      drift apart (extract `%begin-scanline-events` / `%end-scanline-events`
      helpers both paths call).
-2. In `src/pokey.lisp` add `POKEY-ADVANCE (pokey cpu n)` — advance POKEY by
+2. In `src/pokey.lisp` add `POKEY-ADVANCE (pokey cpu n)` -- advance POKEY by
    N CPU cycles. Initial implementation: `(dotimes (i n) (pokey-tick pokey
    cpu))`. (PERFORMANCE_PLAN.md Phase 3 optimizes its internals later; this
    plan only needs the API.) Export it.
@@ -123,10 +123,10 @@ Design:
    ```
    Critical interleaving requirement: POKEY must advance instruction-by-
    instruction alongside the CPU (as shown), NOT in one 114-cycle batch per
-   line — otherwise POKEY timer IRQ delivery shifts by up to a line and the
+   line -- otherwise POKEY timer IRQ delivery shifts by up to a line and the
    POKEY/machine tests change meaning. The total POKEY cycles per line must
    equal exactly 114 (track consumed vs. remaining; mind that `budget` can
-   carry across lines — only top up POKEY for THIS line's 114).
+   carry across lines -- only top up POKEY for THIS line's 114).
    Keep the KIL/`illegal-opcode` handler-case behaviour as-is.
 4. `%RUN-CLOCKS` contract: N that is not a multiple of 114 runs
    floor(N/114) full lines then one partial line (budget `min(remainder,
@@ -149,7 +149,7 @@ Commit: "Restructure the frame scheduler to scanline granularity".
 
 ---
 
-## Phase 2 — WSYNC ($D40A)
+## Phase 2 -- WSYNC ($D40A)
 
 The single most important register for scanline-accurate software; every
 DLI handler starts with `STA WSYNC`. Semantics: a write halts the CPU until
@@ -159,7 +159,7 @@ lands with Phase 4's intra-line positions.
 
 1. `src/antic.lisp`: add struct slot `wsync-pending` (boolean). In
    `ANTIC-WRITE`, add a `+reg-wsync+` case that sets it. Add
-   `ANTIC-CONSUME-WSYNC (antic)` — read-and-clear, returns the old value.
+   `ANTIC-CONSUME-WSYNC (antic)` -- read-and-clear, returns the old value.
    Export both. Document the offset ($0A, mirrored across $D4xx).
 2. `src/machine.lisp` inner loop: after each `step-cpu`, check
    `antic-consume-wsync`; if true, zero the remaining line budget (the CPU
@@ -168,7 +168,7 @@ lands with Phase 4's intra-line positions.
    lines: real WSYNC freezes the CPU regardless, so clamp `budget` to 0,
    don't let a pre-existing surplus leak past the stall.
 3. Edge cases to handle and test: two WSYNC writes in a row (second stalls
-   to the NEXT line end — on real hardware back-to-back STA WSYNC skips a
+   to the NEXT line end -- on real hardware back-to-back STA WSYNC skips a
    full line); WSYNC written by the last instruction that fits in a line
    (no-op stall); WSYNC via a read-modify-write instruction is out of scope
    until Phase 5 (note it in a comment).
@@ -187,10 +187,10 @@ Commit: "Implement WSYNC: CPU stalls to end of scanline".
 
 ---
 
-## Phase 3 — Playfield DMA steal tables + DL fetch accounting
+## Phase 3 -- Playfield DMA steal tables + DL fetch accounting
 
 > **Done** (ROADMAP.md Phase 5). The bytes-per-line table below for
-> modes 8-14 is superseded — it was stated from memory and turned out
+> modes 8-14 is superseded -- it was stated from memory and turned out
 > to disagree with the already-tested renderer; see
 > `PLAYFIELD-DMA-CYCLES`'s docstring in `src/antic.lisp` for the
 > corrected table actually shipped. Modes 2-7's counts (40/20) and the
@@ -208,7 +208,7 @@ of real hardware for standard display lists.
    DMACTL bits 0-1 (00 off, 01 narrow, 10 normal, 11 wide), and whether
    this is the first scanline of the mode line.
    Bytes-per-line table (CONFIRM against the Altirra Hardware Reference
-   before encoding — stated from memory):
+   before encoding -- stated from memory):
    | modes      | narrow | normal | wide |
    |------------|--------|--------|------|
    | 2,3,4,5    | 32     | 40     | 48   |
@@ -223,14 +223,14 @@ of real hardware for standard display lists.
    steal no playfield cycles.
 2. Account DL instruction fetch: 1 cycle per mode-line fetch, +2 for the
    LMS address bytes, +2 for JMP/JVB operands. `process-dl-instruction`
-   knows exactly how many bytes it consumed — return that count and charge
+   knows exactly how many bytes it consumed -- return that count and charge
    it into the line's steal.
 3. Wire into `ANTIC-BEGIN-SCANLINE`: steal = 9 (refresh) + P/M DMA +
    DL fetch (on mode-line boundaries) + playfield DMA for the current
    mode/width/first-line-p. ANTIC already tracks `current-mode` and
-   `mode-scanlines-remaining` — derive `first-line-p` from the fetch path.
+   `mode-scanlines-remaining` -- derive `first-line-p` from the fetch path.
 4. Guard rails: steal must never exceed 114; `(- 114 stolen)` is the line
-   budget. With wide playfield + P/M + refresh this gets close — assert
+   budget. With wide playfield + P/M + refresh this gets close -- assert
    (in a test, not production code) the worst case stays under 114, or
    clamp with a documented comment if the confirmed numbers exceed it
    (real ANTIC + wide + HSCROL can exhaust nearly the whole line).
@@ -244,7 +244,7 @@ Tests:
 - Frame-level: build a display list of 24 mode-2 lines + JVB in RAM,
   DMACTL = $22; run one frame; assert total CPU cycles consumed falls in
   the expected band (compute expected granted budget from the tables; use
-  a +/- one-instruction tolerance). Add as a regression test — this pins
+  a +/- one-instruction tolerance). Add as a regression test -- this pins
   the whole steal model.
 - Existing `test-antic.lisp` DLI/VBI tests must still pass (they use
   `antic-tick`; keep that path consistent with the new accounting or
@@ -254,14 +254,14 @@ Commit: "Model ANTIC playfield and display-list DMA cycle stealing".
 
 ---
 
-## Phase 4 — Intra-line event positions (stretch)
+## Phase 4 -- Intra-line event positions (stretch)
 
 Converts "everything happens at line start" into positioned events. Needed
 for software that races the beam or chains WSYNC+DLI precisely.
 
 1. Research first (Altirra Hardware Reference): NMI assertion cycle for DLI
-   and VBI (around cycle 8 — confirm), WSYNC release at cycle 105, VCOUNT
-   increment position (around cycle 111 — confirm), and where refresh and
+   and VBI (around cycle 8 -- confirm), WSYNC release at cycle 105, VCOUNT
+   increment position (around cycle 111 -- confirm), and where refresh and
    playfield fetches actually occur within the line.
 2. Design: split each scanline into segments bounded by event cycles. The
    machine inner loop runs the CPU segment-by-segment (budget per segment),
@@ -278,7 +278,7 @@ accuracy win.
 
 ---
 
-## Phase 5 — NMOS 6502 bus quirks (stretch, after Phase 4)
+## Phase 5 -- NMOS 6502 bus quirks (stretch, after Phase 4)
 
 Only meaningful once I/O timing within the line is positioned. Each item is
 its own commit with tests in `tests/test-cpu-opcodes.lisp` /
@@ -296,12 +296,12 @@ its own commit with tests in `tests/test-cpu-opcodes.lisp` /
 3. Interrupt poll timing: interrupts are recognized on the second-to-last
    cycle of an instruction; a taken branch without page cross delays
    recognition by one instruction. Requires modelling "poll point" per
-   instruction — significant design work; write a short design doc comment
+   instruction -- significant design work; write a short design doc comment
    in `cpu.lisp` before implementing.
 4. SEI/CLI/PLP one-instruction delay on the I-flag's effect on IRQ
    recognition.
 5. BRK/NMI hijack (NMI arriving during BRK's vector fetch turns it into an
-   NMI with B-flag quirks) — lowest priority.
+   NMI with B-flag quirks) -- lowest priority.
 
 ## Acceptance target for the whole plan
 
