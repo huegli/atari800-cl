@@ -205,3 +205,15 @@ file header spells out the triage workflow.
 - Prefer `defstruct` over `defclass`. Write verbose docstrings on exported functions and structs.
 - Correctness (especially 6502 behavioral accuracy) is the priority over performance.
 - ROM images (`roms/*.rom`, `roms/*.bin`) are gitignored and never committed.
+- **Markdown is ASCII-only.** Every `*.md` file in this repository must
+  contain nothing above U+007F: no em/en dashes, arrows, box-drawing
+  characters, curly quotes, check marks, or math symbols. Write `--` and
+  `-` for dashes, `->` / `<->` for arrows, `|--` and `` `-- `` for
+  directory trees, `"` and `'` for quotes, `[x]` for check marks, and
+  `x  /  ~  >=  <=  ==  +/-  ...` for the math symbols. This applies to
+  new files and to any line you touch in an existing one. The
+  `minimal-xl/` submodule is a separate repository and is out of scope.
+  Verify with:
+  ```sh
+  git ls-files '*.md' | xargs perl -ne 'print "$ARGV:$.: $_" if /[^\x00-\x7F]/'
+  ```
