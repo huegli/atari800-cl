@@ -3,6 +3,36 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 11 — A/V recording tooling (`.asm` → `.mp4`)
+
+`scripts/record.sh <file.asm|file.xex> [-frames N] [-o out.mp4]`
+assembles (when handed a source), starts the emulator and its AESP
+servers the way `atari-run.sh` does, captures video and audio
+concurrently, and muxes them with ffmpeg at 59.92 fps.  `--keep` leaves
+the intermediates, `--selftest` runs the 10-frame smoke case and asserts
+on it, and without ffmpeg the frame sequence and WAV are left in place
+with the assemble command printed.
+
+`scripts/capture-video.py` is new: N frames into `frame00001.png`, … —
+the numbering ffmpeg's `-i frame%05d.png` wants — falling back to PPM
+without Pillow.  The protocol codec, the two subscribe exchanges and the
+image writers moved into `scripts/aesp_client.py`, which all three
+capture scripts now import instead of carrying their own copies;
+`capture-screenshot.py` and `capture-audio.py` shrank accordingly and
+their CLIs are unchanged.
+
+One emulator-side change: `scripts/runner.lisp` prints `AESP_AUDIO`
+alongside `AESP_CONTROL` / `AESP_VIDEO`.  The three ports are bound from
+ephemeral ports and are not necessarily adjacent, so a recorder cannot
+infer the audio port from the video one.
+
+Acceptance (ROADMAP.md Phase 11 item 3): 300 frames of
+`asm/edvent02_rasterbars.asm` produce a 5.006 s, 384x240, 300-frame
+h264 + AAC mp4 with the raster bars visible.  Sync caveat, documented in
+the script header and the README: video and audio pair 1:1 on the wire,
+but the two capture processes connect a moment apart, so the streams can
+sit a frame or two (~30 ms) apart.
+
 ## POKEY serial output interrupts — the XL OS now boots through to BASIC
 
 With the PIA fixed the OS booted but then parked forever at `$E9E4`, the

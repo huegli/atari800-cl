@@ -434,8 +434,10 @@ pushes, and POKEY synthesises mono 8-bit PCM which audio subscribers
 receive as `AUDIO_PCM` pushes.  In-process, attach synthesis with
 `a800:machine-attach-audio` and collect samples with
 `a800:machine-audio-drain` after each frame; to capture from outside,
-use `scripts/capture-audio.py` (WAV) and `scripts/capture-screenshot.py`
-(PNG/PPM).
+use `scripts/capture-screenshot.py` (one PNG/PPM),
+`scripts/capture-video.py` (a numbered frame sequence),
+`scripts/capture-audio.py` (WAV), or `scripts/record.sh` for all of it
+at once — see [Recording](#recording-asm--mp4).
 
 ## Raster effects (WSYNC)
 
@@ -451,6 +453,38 @@ horizontal color bands. Build and capture a screenshot with:
 ./scripts/mads-build.sh asm/edvent02_rasterbars.asm
 ./scripts/atari-run.sh asm/build/edvent02_rasterbars.xex -frame 30 -o rasterbars.png
 ```
+
+## Recording: `.asm` → `.mp4`
+
+`scripts/record.sh` does the whole pipeline in one command — assemble,
+boot, capture video and audio over AESP, mux with ffmpeg:
+
+```sh
+./scripts/record.sh asm/edvent02_rasterbars.asm -frames 300 -o rasterbars.mp4
+# => 300 frames at 59.92 fps: a 5-second h264 + AAC video, 384x240
+```
+
+It takes a `.xex` just as happily, `--keep` leaves the intermediate frame
+sequence and WAV behind, and `--selftest` runs a 10-frame capture and
+asserts it produced the images and samples it should.  Without ffmpeg
+installed the PNG sequence and WAV are left in place with the assemble
+command printed, so a capture is never lost.
+
+The pieces are usable on their own against any running AESP server:
+
+| script                         | captures                                  |
+| ------------------------------ | ----------------------------------------- |
+| `scripts/capture-screenshot.py` | one frame → PNG (Pillow) or PPM           |
+| `scripts/capture-video.py`      | N frames → `frame00001.png`, … in a dir   |
+| `scripts/capture-audio.py`      | N frames of `AUDIO_PCM` → WAV             |
+
+All three share `scripts/aesp_client.py` — the protocol codec, the
+subscribe exchanges, and the image writers.
+
+Sync caveat: video and audio pair 1:1 (both are pushed from the same
+post-frame hook), but the two capture processes connect a moment apart
+and synthesis attaches at the end of the frame during which the audio
+client connects, so the streams can sit a frame or two apart (~30 ms).
 
 ## Protocol servers (AESP + CLI)
 
@@ -532,7 +566,10 @@ atari800-cl/
 │   ├── bench-lispworks.sh
 │   ├── mads-build.sh        # assemble MADS sources to XEX
 │   ├── atari-run.sh         # run a XEX and capture a screenshot
+│   ├── record.sh            # asm/xex → mp4 (video + audio, via ffmpeg)
+│   ├── aesp_client.py       # shared AESP codec for the capture scripts
 │   ├── capture-screenshot.py # AESP video-frame → PNG/PPM
+│   ├── capture-video.py     # AESP video-frames → numbered PNG sequence
 │   └── capture-audio.py     # AESP AUDIO_PCM → WAV
 ├── src/
 │   ├── package.lisp         # all package definitions

@@ -27,81 +27,20 @@ OUT=audio.wav, frames=60 (one second of NTSC video), TIMEOUT=10.
 Like capture-screenshot.py, this optionally sends AUDIO_SUBSCRIBE on the
 control port first to fetch AUDIO_CONFIG and use the server's declared
 rate/format, which is what a real Attic client would do.
+
+The protocol codec lives in scripts/aesp_client.py, shared with
+capture-screenshot.py and capture-video.py.
 """
 
 from __future__ import annotations
 
 import argparse
 import socket
-import struct
 import sys
 import wave
 from pathlib import Path
 
-AESP_MAGIC = 0xAE50
-AESP_VERSION = 1
-AESP_HEADER_SIZE = 8
-
-MSG_AUDIO_PCM = 0x80
-MSG_AUDIO_CONFIG = 0x81
-MSG_AUDIO_SUBSCRIBE = 0x83
-
-# Fallbacks matching src/aesp.lisp %AUDIO-CONFIG-PAYLOAD, used when the
-# control-port exchange is skipped or fails.
-DEFAULT_SAMPLE_RATE = 44744
-DEFAULT_BITS = 8
-DEFAULT_CHANNELS = 1
-
-
-class AESPError(Exception):
-    """Malformed AESP frame or unexpected server reply."""
-
-
-def encode_message(msg_type: int, payload: bytes = b"") -> bytes:
-    return struct.pack(">HBBI", AESP_MAGIC, AESP_VERSION, msg_type & 0xFF,
-                       len(payload)) + payload
-
-
-def recv_exactly(sock: socket.socket, n: int) -> bytes:
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError(f"EOF after {len(buf)} of {n} bytes")
-        buf.extend(chunk)
-    return bytes(buf)
-
-
-def read_message(sock: socket.socket) -> tuple[int, bytes]:
-    header = recv_exactly(sock, AESP_HEADER_SIZE)
-    magic, version, msg_type, length = struct.unpack(">HBBI", header)
-    if magic != AESP_MAGIC:
-        raise AESPError(f"bad magic 0x{magic:04X}")
-    if version != AESP_VERSION:
-        raise AESPError(f"bad version 0x{version:02X}")
-    payload = recv_exactly(sock, length) if length else b""
-    return msg_type, payload
-
-
-def fetch_audio_config(host: str, control_port: int,
-                       timeout: float) -> tuple[int, int, int]:
-    """Send AUDIO_SUBSCRIBE on the control port; return (rate, bits, channels).
-
-    The server replies with AUDIO_CONFIG: sample-rate(u32) bits(u8)
-    channels(u8).  Raises AESPError on an unexpected reply.
-    """
-    with socket.create_connection((host, control_port), timeout=timeout) as s:
-        s.settimeout(timeout)
-        s.sendall(encode_message(MSG_AUDIO_SUBSCRIBE))
-        msg_type, payload = read_message(s)
-        if msg_type != MSG_AUDIO_CONFIG:
-            raise AESPError(
-                f"expected AUDIO_CONFIG (0x{MSG_AUDIO_CONFIG:02X}), "
-                f"got 0x{msg_type:02X}")
-        if len(payload) < 6:
-            raise AESPError(f"AUDIO_CONFIG payload too short: {len(payload)}")
-        rate = struct.unpack(">I", payload[:4])[0]
-        return rate, payload[4], payload[5]
+import aesp_client as aesp
 
 
 def capture_audio(host: str, audio_port: int, timeout: float,
@@ -111,12 +50,7 @@ def capture_audio(host: str, audio_port: int, timeout: float,
     with socket.create_connection((host, audio_port), timeout=timeout) as s:
         s.settimeout(timeout)
         while len(chunks) < frames:
-            msg_type, payload = read_message(s)
-            if msg_type != MSG_AUDIO_PCM:
-                print(f"  (ignoring non-PCM message 0x{msg_type:02X})",
-                      file=sys.stderr)
-                continue
-            chunks.append(payload)
+            chunks.append(aesp.read_audio_pcm(s))
             if len(chunks) % 60 == 0 or len(chunks) == frames:
                 total = sum(len(c) for c in chunks)
                 print(f"  {len(chunks)}/{frames} frames, {total} samples",
@@ -141,11 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-o", "--out", default="audio.wav",
                    help="output WAV file (default: audio.wav)")
-    p.add_argument("-H", "--host", default="127.0.0.1",
+    p.add_argument("-H", "--host", default=aesp.DEFAULT_HOST,
                    help="AESP server host (default: 127.0.0.1)")
-    p.add_argument("-p", "--audio-port", type=int, default=47802,
+    p.add_argument("-p", "--audio-port", type=int, default=aesp.DEFAULT_AUDIO_PORT,
                    help="AESP audio port (default: 47802)")
-    p.add_argument("--control-port", type=int, default=47800,
+    p.add_argument("--control-port", type=int, default=aesp.DEFAULT_CONTROL_PORT,
                    help="AESP control port (default: 47800)")
     p.add_argument("--no-control", action="store_true",
                    help="skip AUDIO_SUBSCRIBE; assume 44744 Hz mono u8")
@@ -159,21 +93,21 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --frames must be positive", file=sys.stderr)
         return 2
 
-    rate, bits, channels = DEFAULT_SAMPLE_RATE, DEFAULT_BITS, DEFAULT_CHANNELS
+    rate, bits, channels = aesp.DEFAULT_SAMPLE_RATE, aesp.DEFAULT_BITS, aesp.DEFAULT_CHANNELS
     if not args.no_control:
         try:
-            rate, bits, channels = fetch_audio_config(
+            rate, bits, channels = aesp.fetch_audio_config(
                 args.host, args.control_port, args.timeout)
             print(f"AUDIO_CONFIG: {rate} Hz, {bits}-bit, {channels}ch",
                   file=sys.stderr)
-        except (OSError, AESPError) as e:
+        except (OSError, aesp.AESPError) as e:
             print(f"warning: AUDIO_CONFIG exchange failed ({e}); "
                   f"assuming {rate} Hz {bits}-bit {channels}ch", file=sys.stderr)
 
     try:
         pcm = capture_audio(args.host, args.audio_port, args.timeout,
                             args.frames)
-    except (OSError, AESPError, ConnectionError) as e:
+    except (OSError, aesp.AESPError, ConnectionError) as e:
         print(f"error: audio capture failed: {e}", file=sys.stderr)
         return 1
 

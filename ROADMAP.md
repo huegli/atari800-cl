@@ -55,6 +55,16 @@
 > post-frame hook on the emulator thread rather than in the
 > subscribe path under the server lock, because acceptor threads must
 > not touch the machine. Phase 11 (A/V recording tooling) is next.
+>
+> **Phase 11 done (2026-08-07)**: `scripts/record.sh` takes a `.asm` or
+> `.xex` to an mp4 in one command; `scripts/capture-video.py` writes the
+> numbered frame sequence and `scripts/aesp_client.py` now holds the
+> protocol codec all three capture scripts share. `scripts/runner.lisp`
+> also prints `AESP_AUDIO` — the three ports are ephemeral and not
+> adjacent, so recording needs it stated. Acceptance met: 300 frames of
+> `asm/edvent02_rasterbars.asm` → a 5.0 s 384x240 h264+AAC file;
+> `--selftest` covers the 10-frame smoke case. Phase 12 (Tom Harte
+> ProcessorTests harness) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,

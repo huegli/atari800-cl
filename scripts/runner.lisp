@@ -169,6 +169,8 @@
   (funcall (sym "ATARI800-CL.AESP" "AESP-SERVER-CONTROL-PORT") server))
 (defun aesp-video-port (server)
   (funcall (sym "ATARI800-CL.AESP" "AESP-SERVER-VIDEO-PORT") server))
+(defun aesp-audio-port (server)
+  (funcall (sym "ATARI800-CL.AESP" "AESP-SERVER-AUDIO-PORT") server))
 (defun machine-run-frame (machine)
   (funcall (sym "ATARI800-CL.MACHINE" "MACHINE-RUN-FRAME") machine))
 (defun machine-frame-count (machine)
@@ -231,6 +233,9 @@ wait loop ever falls through."
                                      :audio-port   0))
            (format t "AESP_CONTROL ~A~%" (aesp-control-port server))
            (format t "AESP_VIDEO   ~A~%" (aesp-video-port server))
+           ;; scripts/record.sh needs the audio port too; the three are
+           ;; bound from ephemeral ports and are not necessarily adjacent.
+           (format t "AESP_AUDIO   ~A~%" (aesp-audio-port server))
            (force-output)
            (let ((dbg-on (and (find-package :uiop)
                               (funcall (find-symbol "GETENV" "UIOP")
