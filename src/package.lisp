@@ -191,8 +191,8 @@
 ;;; atari800-cl.mmu — Memory Management Unit (PORTB bank-switching)
 ;;;
 ;;; Owns the PORTB shadow register and the OS/BASIC/self-test ROM mapping
-;;; predicates.  The PIA writes here whenever software writes $D302;
-;;; the bus consults these predicates on every read.
+;;; predicates.  The PIA writes here whenever software writes PORTB at
+;;; $D301; the bus consults these predicates on every read.
 
 (defpackage #:atari800-cl.mmu
   (:use #:cl #:atari800-cl.compat)
@@ -252,9 +252,10 @@
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.pia — 6520 PIA (joystick input + PORTB → MMU output)
 ;;;
-;;; The PIA owns PORTA / DDRA / PORTB / DDRB at $D300-$D303.  A write
-;;; to PORTB (offset 2) propagates to the attached MMU so bank-switching
-;;; takes effect on the next bus access.
+;;; The PIA owns PORTA/DDRA at $D300, PORTB/DDRB at $D301 (each pair
+;;; selected by bit 2 of the matching control register) and PACTL/PBCTL
+;;; at $D302/$D303.  A write to PORTB propagates to the attached MMU so
+;;; bank-switching takes effect on the next bus access.
 
 (defpackage #:atari800-cl.pia
   (:use #:cl #:atari800-cl.compat #:atari800-cl.mmu #:atari800-cl.bus)
@@ -263,6 +264,7 @@
            #:make-pia
            #:pia-porta #:pia-ddra
            #:pia-portb #:pia-ddrb
+           #:pia-pactl #:pia-pbctl
            #:pia-mmu
            #:pia-input
            #:pia-read

@@ -16,8 +16,9 @@
 ;;;; Bits 2-6 control other peripherals on real hardware (cassette motor,
 ;;;; light-pen, serial port direction, etc.); we don't model them.
 ;;;;
-;;;; The PIA chip ($D300-$D303) routes writes to PORTB ($D302) through
-;;;; MMU-WRITE-PORTB so the bank-switching takes effect immediately.
+;;;; The PIA chip ($D300-$D303) routes writes to PORTB ($D301, when PBCTL
+;;;; bit 2 selects the port rather than DDRB) through MMU-WRITE-PORTB so
+;;;; the bank-switching takes effect immediately.
 
 (in-package #:atari800-cl.mmu)
 
@@ -58,8 +59,8 @@ OS ROM image, so it can only appear when OS ROM is also enabled."
        (not (logtest (mmu-portb mmu) +portb-selftest-mask+))))
 
 (defun mmu-write-portb (mmu value)
-  "Update PORTB.  Called by the PIA when software writes $D302; the new
-banking takes effect on the very next bus access.  Returns MMU."
+  "Update PORTB.  Called by the PIA when software writes PORTB at $D301;
+the new banking takes effect on the very next bus access.  Returns MMU."
   (declare (type mmu mmu) (type u8 value))
   (setf (mmu-portb mmu) (ldb (byte 8 0) value))
   mmu)

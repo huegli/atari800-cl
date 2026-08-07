@@ -111,14 +111,17 @@ clear DLI-ARMED, regardless of how many CPU cycles we tick after."
 ;;; read.
 
 (test portb-write-changes-rom-mapping-immediately
-  "A BUS-WRITE to $D302 must flip ROM visibility for the very next read."
+  "A BUS-WRITE to $D301 must flip ROM visibility for the very next read."
   (let* ((m (make-test-machine)))
     ;; Cold reset leaves OS on.  $C000 reads from the synthetic OS ROM ($EA).
     (is (= #xEA (atari800-cl.bus:bus-read
                   (atari800-cl.machine:atari-machine-bus m) #xC000)))
-    ;; Software writes PORTB = 0 → OS off.  RAM (initialised to 0) shows.
+    ;; Select PORTB at $D301 (PBCTL bit 2), then write PORTB = 0 → OS off.
+    ;; RAM (initialised to 0) shows.
     (atari800-cl.bus:bus-write
-      (atari800-cl.machine:atari-machine-bus m) #xD302 #x00)
+      (atari800-cl.machine:atari-machine-bus m) #xD303 #x3C)
+    (atari800-cl.bus:bus-write
+      (atari800-cl.machine:atari-machine-bus m) #xD301 #x00)
     (is (zerop (atari800-cl.bus:bus-read
                  (atari800-cl.machine:atari-machine-bus m) #xC000)))))
 

@@ -23,8 +23,9 @@ What's implemented:
   binary is present at `roms/6502_functional_test.bin`.
 - **Memory map** — flat 64 KiB RAM + OS/BASIC/self-test ROM overlays,
   PORTB-driven bank-switching, I/O dispatch in `$D000-$D7FF`.
-- **PIA** — 6520-compatible PORTA / DDRA / PORTB / DDRB.  PORTB writes
-  propagate to the MMU.
+- **PIA** — 6520-compatible PORTA/DDRA at `$D300` and PORTB/DDRB at
+  `$D301` (each pair selected by bit 2 of PACTL/PBCTL at `$D302`/`$D303`).
+  PORTB writes propagate to the MMU.
 - **ANTIC** — scanline-oriented NTSC engine (262 × 114).  Display-list
   parsing (blank lines, JMP/JVB, modes 2-F with LMS), DRAM-refresh
   cycle stealing, P/M DMA accounting, DLI/VBI NMI generation.

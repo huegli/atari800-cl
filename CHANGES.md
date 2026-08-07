@@ -3,6 +3,39 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## PIA register map fix — the XL OS now boots
+
+The PIA decoded `addr & 3` as PORTA / DDRA / **PORTB** / DDRB.  On a real
+6520 only the first address pair is a port: `$D300` is PORTA *or* DDRA
+and `$D301` is PORTB *or* DDRB, each selected by bit 2 of its control
+register, and `$D302` / `$D303` are those control registers (PACTL /
+PBCTL) — which the model did not have at all.
+
+The consequence was fatal to booting.  The XL OS's PIA init at `$EF91`
+does `LDX #$38 / STX $D302` to select DDRA before programming it; taken
+as a PORTB write, `$38` (bit 0 clear = OS ROM off) went straight into
+`MMU-WRITE-PORTB` and unmapped the OS ROM out from under the running
+boot code.  The next fetch read `$00` from RAM, i.e. `BRK`, and the
+machine sat in a `BRK` loop for the rest of time: ANTIC was never
+programmed, so every rendered frame was background color 0 and every
+AESP `VIDEO_FRAME` (and `capture-screenshot.py` PNG) came out black.
+
+`PIA` now carries `PACTL` / `PBCTL` slots (cleared by `RESET-PIA`, so a
+just-reset chip sees the DDRs at `$D300`/`$D301` exactly like hardware);
+`PIA-READ` / `PIA-WRITE` honour the bit-2 select; control-register writes
+mask off bits 6-7, the read-only CA/CB interrupt flags.  Only a real
+PORTB write reaches the MMU — a DDRB write no longer does.  Not modelled:
+pin-level readback of input-configured PORTB bits (the port read returns
+the output latch), and the CA/CB peripheral-control lines including
+PACTL bit 3 (cassette motor) and PBCTL bit 3 (SIO command).
+
+With the fix the XL OS gets through PIA init, sets `DMACTL=$22`,
+`NMIEN=$40` and a display list at `$9C20`, and the renderer produces a
+real frame.  Tests updated for the corrected map (`test-pia.lisp`,
+`test-mmu.lisp`, `test-regressions.lisp`), including a regression that
+replays the OS's `$38`/`$3C` init dance and asserts the OS ROM stays
+mapped.  2018 checks green on SBCL and LispWorks.
+
 ## ROADMAP Phase 10 — AESP audio streaming + WAV capture
 
 The synthesised PCM from Phase 9 now leaves the process.
