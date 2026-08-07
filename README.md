@@ -66,9 +66,6 @@ What's implemented:
 
 What's *not* yet implemented:
 
-- Streaming the synthesised audio over AESP — samples are produced and
-  drainable in-process, but `AUDIO_SUBSCRIBE` still replies with a
-  config and sends no frames.
 - Serial I/O and SIO bus (cassette, disk, printer).
 - Light pen, cartridge mapper, and the right-cartridge slot.
 
@@ -129,9 +126,96 @@ In a Lisp REPL (LispWorks or SBCL):
 
 - **SBCL + SLIME or Sly (Emacs)** — no project-specific configuration
   needed; just `M-x slime` (or `sly`), then `,ql atari800-cl`.
-- **LispWorks** — `File → Open Application Builder` and load the
-  ASD file, or in the listener:
-  `(load "atari800-cl.asd") (asdf:load-system :atari800-cl)`.
+- **LispWorks** — see the walkthrough below.
+
+### LispWorks IDE walkthrough
+
+From a cold start to a PNG screenshot of the running machine, entirely
+in the LispWorks IDE Listener.  Requires ROM images in `roms/` (see
+[ROM images](#rom-images)).
+
+**1. Change into the project directory.**  LispWorks provides `cd` in
+`CL-USER`; set `*default-pathname-defaults*` as well so relative paths
+like `"roms/atariosxl.rom"` resolve:
+
+```lisp
+(cd "/path/to/atari800-cl/")                    ; = (hcl:change-directory ...)
+(setf *default-pathname-defaults* #P"/path/to/atari800-cl/")
+(hcl:get-working-directory)                     ; verify
+```
+
+**2. Load the system.**  With the repository symlinked into
+`~/quicklisp/local-projects/` (see [Getting started](#getting-started))
+this is all it takes:
+
+```lisp
+(ql:quickload :atari800-cl)
+```
+
+If the image has no Quicklisp, `(load "~/quicklisp/setup.lisp")` first,
+or stay with plain ASDF: `(load "atari800-cl.asd")` then
+`(asdf:load-system :atari800-cl)`.
+
+**3. Build a machine and start the servers.**  The AESP server installs
+the renderer hooks itself, so a video client receives a frame per
+emulated frame:
+
+```lisp
+(defparameter *m*
+  (a800:make-machine :os-rom    #P"roms/atariosxl.rom"
+                     :basic-rom #P"roms/ataribas.rom"))
+
+(defparameter *runner* (a800:start-machine     *m*))   ; background run loop
+(defparameter *aesp*   (a800:start-aesp-server *m*))   ; TCP 47800/47801/47802
+(defparameter *cli*    (a800:start-cli-socket  *m*))   ; /tmp/atari800-cl-<pid>.sock
+```
+
+The IDE Listener already runs under multiprocessing, so these threads
+start cleanly — unlike a batch `lw-console -eval` run, which needs the
+`mp:initialize-multiprocessing` wrapper shown under
+[CI batch commands](#ci-batch-commands).
+
+**4. Resume the machine.**  `start-machine` deliberately starts
+**paused**: the emulator thread parks on its command mailbox until told
+to run, so a client can subscribe before the first frame.  Until you
+resume, no frames are produced and a video client just times out.  From
+the Listener:
+
+```lisp
+(atari800-cl.machine:machine-submit
+ *m* (lambda (m) (setf (atari800-cl.machine:atari-machine-running-p m) t))
+ :priority t)
+```
+
+Equivalently from outside: send AESP `RESUME` (message type `0x03`) on
+the control port, or `printf 'resume\n' | nc -U <cli-socket-path>`.  The
+socket path is printed by
+`(atari800-cl.cli-socket:cli-server-path *cli*)`.
+
+**5. Capture a screenshot** — from a shell, while the Listener keeps the
+machine running:
+
+```sh
+python3 scripts/capture-screenshot.py --frames 60 -o screenshot.png
+```
+
+`--frames 60` discards the first second of frames so the capture shows a
+settled screen rather than the cold-reset one.  The script writes a PNG
+when Pillow is installed and falls back to a dependency-free PPM
+otherwise.
+
+**6. Shut down** when finished:
+
+```lisp
+(a800:stop-aesp-server *aesp*)
+(a800:stop-cli-socket  *cli*)
+(a800:stop-machine     *runner*)
+```
+
+For editing, `File → Open` a source file and use the Editor's
+compile-buffer / compile-form commands to redefine functions in the live
+image; after changing a `defstruct` (e.g. `atari-machine`), build a fresh
+machine rather than reusing `*m*`.
 
 ### Running the test suite
 
@@ -442,12 +526,15 @@ atari800-cl/
   color splits and similar raster tricks) render with the final
   values only.
 - **Cycle accounting is scanline-approximate.**  ANTIC's full DMA
-  steal is charged against each scanline's CPU budget, but the steal
-  is lumped at the start of the line rather than spread across it,
-  WSYNC ($D40A) writes are ignored, and playfield/display-list DMA
-  stealing is not yet counted (see `SCANLINE_ACCURACY_PLAN.md` for
-  the roadmap).  Cycle-position-sensitive tricks are out of scope
-  today.
+  steal — DRAM refresh, P/M DMA, display-list instruction fetch and
+  playfield DMA — is charged against each scanline's CPU budget, and
+  WSYNC ($D40A) stalls the CPU to the end of the current line.  But
+  the steal is lumped at the start of the line rather than spread
+  across it, and WSYNC releases at the line boundary rather than the
+  hardware's cycle 105, so *where* within a line an event lands is not
+  modelled (`SCANLINE_ACCURACY_PLAN.md` Phases 0-3 are done; intra-line
+  event positions are the stretch Phase 4).  Tricks that depend on
+  cycle position within a scanline are out of scope today.
 - **Decimal-mode quirks** for ADC/SBC follow the standard reference,
   but ARR's decimal-mode flag behaviour is not modelled (binary mode
   is always assumed for that one undocumented opcode).
