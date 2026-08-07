@@ -6,8 +6,9 @@
 > into %INIT-READ-REGS; item 5 via ROADMAP.md Phase 8 — reload offsets
 > and linked 16-bit channels, with the plan's CONFIRM-flagged period
 > figures implemented as stated and the flag carried into
-> src/pokey.lisp's header). Items 4, 9-11 remain open; item 4 is
-> ROADMAP.md Phase 12.
+> src/pokey.lisp's header). Item 4 landed on 2026-08-07 as ROADMAP.md
+> Phase 12 (`tests/test-harte.lisp`; three CPU bugs found and fixed,
+> skip list empty). Items 9-11 remain open.
 
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent

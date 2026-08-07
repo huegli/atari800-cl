@@ -99,6 +99,30 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
 
+## ROADMAP Phase 12 — CPU fixes are performance-neutral
+
+The Tom Harte harness turned up three CPU bugs (unstable-store page-cross
+address corruption, ARR decimal mode, JSR operand read order).  All three
+sit on the instruction path, so they were measured the same way as any
+hot-path change: interleaved runs against the immediately preceding
+commit (3cfec39), means of 2.
+
+| implementation | workload | 3cfec39 fps | with fixes | delta |
+|----------------|----------|-------------|------------|-------|
+| sbcl           | nop      | 3596.3      | 3540.5     | -1.6% |
+| sbcl           | klaus    | 3220.5      | 3246.1     | +0.8% |
+
+Both are inside this machine's run-to-run spread (nop varies ~1.5%
+between identical runs), and the two move in opposite directions, so
+there is no measurable cost.  Expected: the JSR change swaps one
+16-bit operand read for two 8-bit reads on a single opcode, and the
+other two fixes only add work on code paths that were already wrong.
+
+Absolute numbers here are higher than the rows above them for the same
+workloads — those were taken while the machine was busy downloading and
+parsing a gigabyte of test vectors.  Only the interleaved A/B pairs
+within a section are comparable.
+
 ## POKEY serial output (SEROR/SEROC) — implementation cost
 
 Adding the serial transmitter puts one new test on POKEY's hottest

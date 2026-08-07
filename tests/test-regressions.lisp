@@ -447,3 +447,139 @@ stall the first instructions of the next %RUN-CLOCKS call."
       (is (= #xFF (atari800-cl.bus:bus-peek-ram bus #x00))
           "the marker must be written in the first line -- a stale WSYNC ~
            flag stalled the scheduler"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #12 — unstable stores corrupt the destination address on a
+;;; page cross.
+;;;
+;;; SHA/SHX/SHY/TAS AND the stored byte with (high(base)+1).  When the
+;;; index carries into the high byte, the address bus never receives the
+;;; corrected high byte — the ANDed value is driven there instead, so the
+;;; write lands at (low(base+index) | value<<8).  src/illegal.lisp used to
+;;; write to the canonical effective address and explicitly documented not
+;;; modelling this; the Tom Harte vectors pin it precisely (849 of the
+;;; first 955 page-crossing $9C cases disagreed), so it is now modelled.
+;;;
+;;; Case ids from SingleStepTests/65x02 6502/v1/9c.json: "9c 1" below.
+
+(test unstable-store-page-cross-corrupts-target-address
+  "SHY abs,X with a page-crossing index writes to (low | value<<8), not to
+base+X.  Harte case \"9c 1\": base $DB8F, X = $D7, Y = $5E — the canonical
+target would be $DC66, but the byte ($5C) lands at $5C66."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (attach-memory-bus cpu mem)
+    (setf (cpu-pc cpu) #x1000
+          (cpu-x cpu) #xD7
+          (cpu-y cpu) #x5E)
+    (mem-write mem #x1000 #x9C)                    ; SHY abs,X
+    (mem-write mem #x1001 #x8F)                    ; base low
+    (mem-write mem #x1002 #xDB)                    ; base high
+    (step-cpu cpu)
+    (is (= #x5C (mem-read mem #x5C66))
+        "the store must land at the corrupted address $5C66")
+    (is (= #x00 (mem-read mem #xDC66))
+        "the canonical address $DC66 must be untouched")))
+
+(test unstable-store-without-page-cross-uses-plain-address
+  "Without a page cross the same opcode stores at base+X, unchanged: the
+corruption is strictly a carry-into-high-byte effect."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (attach-memory-bus cpu mem)
+    (setf (cpu-pc cpu) #x1000
+          (cpu-x cpu) #x01
+          (cpu-y cpu) #xFF)
+    (mem-write mem #x1000 #x9C)                    ; SHY abs,X
+    (mem-write mem #x1001 #x00)                    ; base = $3000
+    (mem-write mem #x1002 #x30)
+    (step-cpu cpu)
+    ;; value = Y AND (high(base)+1) = $FF AND $31 = $31, stored at $3001.
+    (is (= #x31 (mem-read mem #x3001)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #13 — ARR ($6B) in decimal mode.
+;;;
+;;; ARR is "AND then ROR" with its own flag quirks, but in decimal mode the
+;;; ADC-style nibble fixup also runs, changing both A and C.  The opcode
+;;; used to assume binary mode always, which the Tom Harte vectors caught
+;;; (132 of the first 500 $6B cases).
+;;;
+;;; Case id from SingleStepTests/65x02 6502/v1/6b.json: "6b f8 06".
+
+(test arr-decimal-mode-applies-bcd-fixup
+  "With D set, ARR #imm corrects each nibble and takes C from the
+high-nibble correction; N comes from the carry rotated in, and V/Z from
+the pre-fixup shift result."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (attach-memory-bus cpu mem)
+    (setf (cpu-pc cpu) #x1000
+          (cpu-a cpu) #xF8)
+    (set-flag cpu +flag-d+)
+    (clear-flag cpu +flag-c+)
+    (mem-write mem #x1000 #x6B)                    ; ARR #imm
+    (mem-write mem #x1001 #x06)                    ; imm = $06
+    (step-cpu cpu)
+    ;; tmp = $F8 AND $06 = $00; shift = $00; low nibble needs no fixup,
+    ;; high nibble neither, so A stays $00 -- but the same operands in
+    ;; binary mode would leave A = $00 with C from bit 6.  The decimal
+    ;; path must clear C instead.
+    (is (= #x00 (cpu-a cpu)))
+    (is-false (flag-set-p cpu +flag-c+) "C reports the high-nibble fixup")
+    (is-true (flag-set-p cpu +flag-z+))))
+
+(test arr-decimal-mode-carries-high-nibble
+  "A high nibble above 5 adds $60 and sets C -- the case binary-mode ARR
+gets wrong.  A = $99, imm = $FF, C set: tmp = $99, the shift gives $CC,
+the low-nibble fixup makes it $C2, and the high-nibble fixup adds $60 to
+land on $22 with C out."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (attach-memory-bus cpu mem)
+    (setf (cpu-pc cpu) #x1000
+          (cpu-a cpu) #x99)
+    (set-flag cpu +flag-d+)
+    (set-flag cpu +flag-c+)
+    (mem-write mem #x1000 #x6B)
+    (mem-write mem #x1001 #xFF)
+    (step-cpu cpu)
+    (is (= #x22 (cpu-a cpu)) "nibble fixups: $CC -> $C2 -> $22")
+    (is-true (flag-set-p cpu +flag-c+) "high-nibble fixup sets C")
+    (is-true (flag-set-p cpu +flag-n+) "N takes the carry rotated in")))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression #14 — JSR reads its high operand byte AFTER pushing.
+;;;
+;;; The NMOS 6502's JSR sequence is: read the target's low byte, push the
+;;; return address, THEN read the target's high byte.  Reading the whole
+;;; word up front is indistinguishable except in one case — a JSR whose
+;;; high operand byte lives in the stack page, where the push overwrites
+;;; the byte the CPU is about to read, so the jump goes somewhere else.
+;;; One case in 2,560,000 Harte cases caught this.
+;;;
+;;; Case id from SingleStepTests/65x02 6502/v1/20.json: "20 55 13".
+
+(test jsr-reads-high-operand-after-pushing-return-address
+  "When the push lands on the JSR's own high operand byte, the target's
+high byte is the pushed value, not the assembled one."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (attach-memory-bus cpu mem)
+    ;; JSR at $01FD: operand low at $01FE, operand high at $01FF.
+    ;; SP = $FF means the return-address high byte is pushed to $01FF —
+    ;; over the operand — before that operand byte is read.
+    (setf (cpu-pc cpu) #x01FD
+          (cpu-sp cpu) #xFF)
+    (mem-write mem #x01FC #x20)                ; (opcode byte, for clarity)
+    (mem-write mem #x01FD #x55)                ; low operand
+    (mem-write mem #x01FE #x13)                ; high operand (about to be clobbered)
+    ;; Execute JSR directly: PC already points past the opcode.
+    (funcall (svref *opcode-table* #x20) cpu)
+    ;; Return address is $01FE; pushing its high byte ($01) writes $01FF,
+    ;; its low byte ($FE) writes $01FE — the high operand byte.  The high
+    ;; byte read back is therefore $FE, not $13.
+    (is (= #xFE (mem-read mem #x01FE))
+        "the push must have overwritten the high operand byte")
+    (is (= #xFE55 (cpu-pc cpu))
+        "the jump target must use the byte as it reads AFTER the push")))

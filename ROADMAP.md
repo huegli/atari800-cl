@@ -65,6 +65,17 @@
 > `asm/edvent02_rasterbars.asm` → a 5.0 s 384x240 h264+AAC file;
 > `--selftest` covers the 10-frame smoke case. Phase 12 (Tom Harte
 > ProcessorTests harness) is next.
+>
+> **Phase 12 done (2026-08-07)**: `tests/test-harte.lisp` runs the
+> SingleStepTests/65x02 vectors, env-gated on `ATARI800_CL_HARTE_TESTS`
+> and skipping without them. It found three real CPU bugs, all fixed
+> with regressions in `tests/test-regressions.lisp`: the unstable stores
+> did not corrupt the destination address on a page cross, ARR ignored
+> decimal mode, and JSR read its high operand byte before pushing rather
+> than after (one case in 2.56M). XAA / LAX #imm now use the `$EE` magic
+> constant the vectors encode, so the skip list stays EMPTY: all 256
+> opcodes pass at full depth — 2,560,000 cases, zero failures, on both
+> implementations. Every phase in this roadmap is now done.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -131,8 +142,8 @@ and say so in the commit message.
 | 8     | POKEY timer fidelity                         | —          | no       | done   |
 | 9     | POKEY audio synthesis core                   | 8          | yes      | done   |
 | 10    | AESP audio streaming + WAV capture           | 9          | no       | done   |
-| 11    | A/V recording tooling (`record.sh` → mp4)    | 4, 10      | no       |
-| 12    | Tom Harte ProcessorTests harness             | —          | no       |
+| 11    | A/V recording tooling (`record.sh` → mp4)    | 4, 10      | no       | done   |
+| 12    | Tom Harte ProcessorTests harness             | —          | no       | done   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last

@@ -55,20 +55,32 @@
 ;;;;
 ;;;;   AHX/SHA, SHX, SHY, TAS:
 ;;;;     The byte stored is logical-ANDed with (high-byte-of-base + 1).
-;;;;     If the indexed addressing crosses a page boundary, real hardware
-;;;;     also writes the same ANDed value into the target's high byte,
-;;;;     corrupting the destination address.  We do NOT model that
-;;;;     fault-injection mode — the value is written to the canonical
-;;;;     effective address.
+;;;;     If the indexed addressing crosses a page boundary, the high byte
+;;;;     of the destination address is replaced by that same ANDed value
+;;;;     (the address bus never gets the carry), so the write lands
+;;;;     somewhere else entirely.  We DO model that — see
+;;;;     %UNSTABLE-STORE-ADDRESS — because it is deterministic and the
+;;;;     SingleStepTests vectors pin it; only the AND value itself is
+;;;;     genuinely chip-dependent.
 ;;;;
-;;;;   XAA/ANE ($8B):  A = (A | "magic") AND X AND imm.  The "magic"
-;;;;     constant varies (#xEE, #xEF, #xFF, or #x00 have all been
-;;;;     observed).  We implement A = X AND imm, the most consistent
-;;;;     observed result.
-;;;;
-;;;;   LAX #imm ($AB):  same family as XAA.  We implement A = X = imm.
+;;;;   XAA/ANE ($8B) and LAX #imm ($AB):  both compute through
+;;;;     (A | "magic"), where the magic constant really does vary between
+;;;;     chips and conditions (#xEE, #xEF, #xFF and #x00 have all been
+;;;;     observed).  We use #xEE (+UNSTABLE-MAGIC+): it is what the
+;;;;     SingleStepTests/65x02 vectors encode — uniquely determined over
+;;;;     thousands of their cases — and what the mainstream emulators
+;;;;     model, so it is the behaviour software of that era was tested
+;;;;     against.  With it, tests/test-harte.lisp needs no skip list.
+;;;;       XAA:      A = (A | magic) AND X AND imm
+;;;;       LAX #imm: A = X = (A | magic) AND imm
 
 (in-package #:atari800-cl.cpu)
+
+(defconstant +unstable-magic+ #xEE
+  "The \"magic\" constant XAA ($8B) and LAX #imm ($AB) OR into A before
+masking.  Chip- and condition-dependent on real hardware; #xEE is the
+value the SingleStepTests vectors and mainstream emulators use.  See the
+UNSTABLE INSTRUCTIONS note in this file's header.")
 
 ;;; Hot-path optimize policy (PERFORMANCE_PLAN.md Phase 1).  See the
 ;;; matching declaim in src/bus.lisp for the note on DECLAIM's proclaiming
@@ -214,12 +226,13 @@ Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
   (lax #xBF addr-absolute-y        4 :page-cross t))
 
 (defopcode #xAB lax-imm (cpu)
-  "LAX #imm — UNSTABLE.  Hardware computes A = X = (A | magic) AND imm.
-We implement the consistent A = X = imm (see file header)."
+  "LAX #imm — UNSTABLE.  A = X = (A | +unstable-magic+) AND imm.
+See the magic-constant note in the file header."
   (multiple-value-bind (val) (read-via cpu #'addr-immediate)
-    (setf (cpu-a cpu) val
-          (cpu-x cpu) val)
-    (update-zn cpu val))
+    (let ((r (logand (logior (cpu-a cpu) +unstable-magic+) val)))
+      (setf (cpu-a cpu) r
+            (cpu-x cpu) r)
+      (update-zn cpu r)))
   2)
 
 ;;; ---------------------------------------------------------------------------
@@ -268,26 +281,52 @@ Quirk flags (binary mode):
   Z = (result == 0)
   C = bit 6 of result        (NOT the bit that fell off!)
   V = bit 6 XOR bit 5 of result
-ARR's decimal-mode flag behaviour is NOT emulated (atari800-cl does not
-exercise BCD via this opcode)."
+
+In decimal mode (D=1) the ADC-style BCD fixup runs on top of the shift,
+which changes both the result and C:
+  N takes the OLD carry (the bit rotated into bit 7), Z and V come from
+  the un-fixed-up shift result, then each nibble is corrected — the low
+  nibble by +6 when (AL + (AL AND 1)) > 5, the high nibble by +$60 when
+  (AH + (AH AND 1)) > 5, and C reports that high-nibble correction.
+The pre-fixup value is what the flags see, which is why V and N are
+computed before the nibble corrections."
   (multiple-value-bind (val) (read-via cpu #'addr-immediate)
     (let* ((tmp (logand (cpu-a cpu) val))
-           (cin (if (flag-set-p cpu +flag-c+) #x80 0))
-           (r   (ldb (byte 8 0) (logior (ash tmp -1) cin))))
-      (setf (cpu-a cpu) r)
-      (set-flag-to cpu +flag-z+ (zerop r))
-      (set-flag-to cpu +flag-n+ (logtest r #x80))
-      (set-flag-to cpu +flag-c+ (logtest r #x40))
-      ;; V is set precisely when bits 6 and 5 of the result differ.
-      (set-flag-to cpu +flag-v+
-                   (/= (ldb (byte 1 6) r) (ldb (byte 1 5) r)))))
+           (carry-in (flag-set-p cpu +flag-c+))
+           (r (ldb (byte 8 0) (logior (ash tmp -1) (if carry-in #x80 0)))))
+      (cond
+        ((flag-set-p cpu +flag-d+)
+         (let ((al (ldb (byte 4 0) tmp))
+               (ah (ldb (byte 4 4) tmp))
+               (fixed r))
+           (set-flag-to cpu +flag-n+ carry-in)
+           (set-flag-to cpu +flag-z+ (zerop r))
+           (set-flag-to cpu +flag-v+ (logtest (logxor tmp r) #x40))
+           (when (> (+ al (logand al 1)) 5)
+             (setf fixed (logior (logand fixed #xF0)
+                                 (ldb (byte 4 0) (+ fixed 6)))))
+           (cond ((> (+ ah (logand ah 1)) 5)
+                  (setf fixed (ldb (byte 8 0) (+ fixed #x60)))
+                  (set-flag-to cpu +flag-c+ t))
+                 (t (set-flag-to cpu +flag-c+ nil)))
+           (setf (cpu-a cpu) fixed)))
+        (t
+         (setf (cpu-a cpu) r)
+         (set-flag-to cpu +flag-z+ (zerop r))
+         (set-flag-to cpu +flag-n+ (logtest r #x80))
+         (set-flag-to cpu +flag-c+ (logtest r #x40))
+         ;; V is set precisely when bits 6 and 5 of the result differ.
+         (set-flag-to cpu +flag-v+
+                      (/= (ldb (byte 1 6) r) (ldb (byte 1 5) r)))))))
   2)
 
 (defopcode #x8B xaa (cpu)
-  "XAA / ANE #imm — UNSTABLE.  Hardware: A = (A | magic) AND X AND imm.
-We implement A = X AND imm (see file header)."
+  "XAA / ANE #imm — UNSTABLE.  A = (A | +unstable-magic+) AND X AND imm.
+See the magic-constant note in the file header."
   (multiple-value-bind (val) (read-via cpu #'addr-immediate)
-    (setf (cpu-a cpu) (update-zn cpu (logand (cpu-x cpu) val))))
+    (setf (cpu-a cpu)
+          (update-zn cpu (logand (logior (cpu-a cpu) +unstable-magic+)
+                                 (cpu-x cpu) val))))
   2)
 
 (defopcode #xCB axs (cpu)
@@ -320,37 +359,49 @@ Carry-in is NOT consulted (unlike SBC)."
 ;;; the post-index address (for the write) and the pre-index high byte (for
 ;;; the AND mask).
 
-(declaim (inline %high+1))
+(declaim (inline %high+1 %unstable-store-address))
 
 (defun %high+1 (base)
   "Compute (high-byte-of BASE + 1) masked to 8 bits.  Helper for unstable stores."
   (declare (type u16 base))
   (ldb (byte 8 0) (1+ (ldb (byte 8 8) base))))
 
+(defun %unstable-store-address (base index value)
+  "Effective address of an unstable high-byte store.
+
+With no page cross this is simply BASE + INDEX.  When the index carries
+into the high byte, the address bus never receives the corrected high
+byte: the same internal bus contention that produces VALUE drives it
+there instead, so the write lands at (low(base+index) | value<<8) — the
+address corruption these opcodes are notorious for, and the behaviour the
+SingleStepTests vectors encode."
+  (declare (type u16 base) (type u8 index value))
+  (let ((addr (ldb (byte 16 0) (+ base index))))
+    (if (= (ldb (byte 8 8) base) (ldb (byte 8 8) addr))
+        addr
+        (dpb value (byte 8 8) (ldb (byte 8 0) addr)))))
+
 (defopcode #x9C shy (cpu)
   "SHY abs,X — UNSTABLE.  M[base+X] = Y AND (high(base)+1)."
-  (let* ((base   (read-pc-word cpu))
-         (addr   (ldb (byte 16 0) (+ base (cpu-x cpu))))
-         (mask   (%high+1 base))
-         (value  (logand (cpu-y cpu) mask)))
+  (let* ((base  (read-pc-word cpu))
+         (value (logand (cpu-y cpu) (%high+1 base)))
+         (addr  (%unstable-store-address base (cpu-x cpu) value)))
     (cpu-write-byte cpu addr value))
   5)
 
 (defopcode #x9E shx (cpu)
   "SHX abs,Y — UNSTABLE.  M[base+Y] = X AND (high(base)+1)."
-  (let* ((base   (read-pc-word cpu))
-         (addr   (ldb (byte 16 0) (+ base (cpu-y cpu))))
-         (mask   (%high+1 base))
-         (value  (logand (cpu-x cpu) mask)))
+  (let* ((base  (read-pc-word cpu))
+         (value (logand (cpu-x cpu) (%high+1 base)))
+         (addr  (%unstable-store-address base (cpu-y cpu) value)))
     (cpu-write-byte cpu addr value))
   5)
 
 (defopcode #x9F ahx-aby (cpu)
   "AHX / SHA abs,Y — UNSTABLE.  M[base+Y] = A AND X AND (high(base)+1)."
-  (let* ((base   (read-pc-word cpu))
-         (addr   (ldb (byte 16 0) (+ base (cpu-y cpu))))
-         (mask   (%high+1 base))
-         (value  (logand (cpu-a cpu) (cpu-x cpu) mask)))
+  (let* ((base  (read-pc-word cpu))
+         (value (logand (cpu-a cpu) (cpu-x cpu) (%high+1 base)))
+         (addr  (%unstable-store-address base (cpu-y cpu) value)))
     (cpu-write-byte cpu addr value))
   5)
 
@@ -361,19 +412,17 @@ where BASE is the 16-bit pointer read from zero page."
          (lo    (cpu-read-byte cpu zp))
          (hi    (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp))))
          (base  (dpb hi (byte 8 8) lo))
-         (addr  (ldb (byte 16 0) (+ base (cpu-y cpu))))
-         (mask  (ldb (byte 8 0) (1+ hi)))
-         (value (logand (cpu-a cpu) (cpu-x cpu) mask)))
+         (value (logand (cpu-a cpu) (cpu-x cpu) (ldb (byte 8 0) (1+ hi))))
+         (addr  (%unstable-store-address base (cpu-y cpu) value)))
     (cpu-write-byte cpu addr value))
   6)
 
 (defopcode #x9B tas (cpu)
   "TAS / SHS abs,Y — UNSTABLE.  SP = A AND X; M[base+Y] = SP AND (high(base)+1)."
-  (let* ((base    (read-pc-word cpu))
-         (addr    (ldb (byte 16 0) (+ base (cpu-y cpu))))
-         (new-sp  (logand (cpu-a cpu) (cpu-x cpu)))
-         (mask    (%high+1 base))
-         (value   (logand new-sp mask)))
+  (let* ((base   (read-pc-word cpu))
+         (new-sp (logand (cpu-a cpu) (cpu-x cpu)))
+         (value  (logand new-sp (%high+1 base)))
+         (addr   (%unstable-store-address base (cpu-y cpu) value)))
     (setf (cpu-sp cpu) new-sp)
     (cpu-write-byte cpu addr value))
   5)

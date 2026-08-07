@@ -3,6 +3,54 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 12 — Tom Harte ProcessorTests harness (3 CPU bugs found)
+
+`tests/test-harte.lisp` runs the SingleStepTests/65x02 vectors: per-opcode
+JSON cases carrying full before/after CPU + memory state and a
+cycle-by-cycle bus trace.  The data is ~1 GB and deliberately not
+vendored — point `ATARI800_CL_HARTE_TESTS` at a checkout's `6502/v1`
+directory and the harness tests whatever `<hex>.json` files it finds;
+without it the test SKIPs, like the Klaus functional test.  Depth is 500
+cases per opcode, `ATARI800_CL_HARTE_FULL=1` for all 10,000.  `shasht` is
+a new **tests-only** dependency; the runtime system stays as light as it
+was.
+
+Files are parsed incrementally — consume the opening bracket, read one
+case at a time — rather than with a single `read-json` per file.  Parsing
+a whole 3-5 MB file materialises all 10,000 cases at once and exhausts a
+default 1 GB SBCL heap partway through a 256-opcode run.
+
+**Three real bugs, all fixed, each with a regression test naming the
+failing case id:**
+
+- **Unstable stores didn't corrupt the address on a page cross.**
+  SHA/SHX/SHY/TAS AND the stored byte with `high(base)+1`; when the index
+  carries into the high byte, that same value is driven onto the address
+  bus, so the write lands at `(low(base+index) | value<<8)`.
+  `src/illegal.lisp` documented *not* modelling this; 849 of the first 955
+  page-crossing `$9C` cases disagreed.  Now modelled in
+  `%UNSTABLE-STORE-ADDRESS` — it is deterministic, only the ANDed value is
+  chip-dependent.
+- **ARR (`$6B`) ignored decimal mode.**  With D set, the ADC-style nibble
+  fixup runs on top of the shift and changes both A and C, with N taken
+  from the rotated-in carry and V/Z from the pre-fixup value.  132 of the
+  first 500 cases failed.
+- **JSR read its high operand byte before pushing.**  The NMOS sequence is
+  read-low, push, read-high, which only shows when the push overwrites the
+  JSR's own operand — one case in 2,560,000.
+
+XAA (`$8B`) and LAX #imm (`$AB`) now compute through `(A | $EE)`.  The
+magic constant genuinely varies on hardware, but `$EE` is what the vectors
+encode (uniquely determined over thousands of cases) and what mainstream
+emulators model, so adopting it beats carrying a permanent skip.
+
+Result: **all 256 opcodes pass at full depth — 2,560,000 cases, zero
+failures, and the skip list is empty** on both implementations.  Suite:
+2058 checks + 1 skip (the Harte test itself, with no data present); 2315
+with the vectors attached.  Interleaved benchmarks show the CPU changes
+are performance-neutral (SBCL `nop` -1.6%, `klaus` +0.8%, both inside
+run-to-run spread).
+
 ## ROADMAP Phase 11 — A/V recording tooling (`.asm` → `.mp4`)
 
 `scripts/record.sh <file.asm|file.xex> [-frames N] [-o out.mp4]`
@@ -804,6 +852,8 @@ Suite grew from 1254 to 1398 checks, green on both SBCL and LispWorks.
 ## Phase 6 — PIA (Prompt 6)
 
 - 6520 PIA shadow with PORTA / DDRA / PORTB / DDRB at `$D300-$D303`,
+  (register map corrected later — see "PIA register map fix" above;
+  `$D302`/`$D303` are really PACTL/PBCTL,)
   mirrored across the page by `(addr & $03)`.
 - PORTB write propagates to `MMU-WRITE-PORTB` for immediate
   bank-switching.

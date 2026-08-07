@@ -43,7 +43,8 @@
   :author "Nikolai Schlegel"
   :license "MIT"
   :depends-on (#:atari800-cl
-               #:fiveam)
+               #:fiveam
+               #:shasht)     ; JSON for the Tom Harte vectors (tests only)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -53,6 +54,7 @@
                              (:file "test-compat")
                              (:file "test-memory")
                              (:file "test-cpu")
+                             (:file "test-harte")
                              (:file "test-cpu-opcodes")
                              (:file "test-illegal")
                              (:file "test-mmu")

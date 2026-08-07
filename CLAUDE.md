@@ -170,9 +170,28 @@ Opcodes are defined via the `DEFOPCODE` macro which creates a named function (`O
 
 ### Test structure
 
-Tests use FiveAM. The root suite is `atari800-cl-suite` in `tests/test-suite.lisp`; each component file defines a child suite `:in` it: `compat-suite`, `memory-suite`, `cpu-suite`, `cpu-opcodes-suite`, `illegal-opcodes`, `mmu-suite`, `pia-suite`, `antic-suite`, `renderer-suite`, `gtia-suite`, `pokey-suite`, `machine-suite`, and `regression-suite`. Shared fixtures (`%MAKE-SYNTHETIC-OS-ROM`, `MAKE-TEST-MACHINE`, `WITH-CPU-STATE`, `%POKE`) live in `tests/test-helpers.lisp`. The test package `:import-from`s FiveAM symbols (not `:use`) to avoid name collisions between implementations.
+Tests use FiveAM. The root suite is `atari800-cl-suite` in `tests/test-suite.lisp`; each component file defines a child suite `:in` it: `compat-suite`, `memory-suite`, `cpu-suite`, `harte-suite`, `cpu-opcodes-suite`, `illegal-opcodes`, `mmu-suite`, `pia-suite`, `antic-suite`, `renderer-suite`, `gtia-suite`, `pokey-suite`, `machine-suite`, and `regression-suite`. Shared fixtures (`%MAKE-SYNTHETIC-OS-ROM`, `MAKE-TEST-MACHINE`, `WITH-CPU-STATE`, `%POKE`) live in `tests/test-helpers.lisp`. The test package `:import-from`s FiveAM symbols (not `:use`) to avoid name collisions between implementations.
 
 The **Klaus Dormann 6502 functional test** (`tests/test-cpu.lisp`) runs if `roms/6502_functional_test.bin` exists (or `$ATARI800_CL_FUNCTIONAL_TEST` points to it), otherwise it skips gracefully. Run `./scripts/fetch-test-roms.sh` to download the prebuilt binary (org=0000, load_data_direct=1) from https://github.com/Klaus2m5/6502_65C02_functional_tests into `roms/`; it no-ops if the file is already present. The run is slow (max-instructions ~200M) — a couple of minutes on SBCL, longer on LispWorks.
+
+The **Tom Harte / SingleStepTests vectors** (`tests/test-harte.lisp`) are the
+CPU accuracy ratchet: per-opcode JSON cases with full before/after CPU +
+memory state and a cycle-by-cycle bus trace. The data is ~1 GB and is not
+vendored; the harness skips unless `$ATARI800_CL_HARTE_TESTS` points at a
+checkout's `6502/v1` directory:
+
+```sh
+git clone https://github.com/SingleStepTests/65x02
+export ATARI800_CL_HARTE_TESTS=$PWD/65x02/6502/v1
+./scripts/test-sbcl.sh                    # 500 cases/opcode (~128k cases)
+ATARI800_CL_HARTE_FULL=1 ./scripts/test-sbcl.sh   # all 10,000 (~2.56M cases)
+```
+
+A partial checkout works — whichever `<hex>.json` files exist get tested.
+**A failure here is presumed a real emulator bug**: fix it in `src/`, add a
+focused regression test to `tests/test-regressions.lisp` naming the opcode
+and case id, and only then consider the (currently empty) skip list. The
+file header spells out the triage workflow.
 
 ## Development Plan
 

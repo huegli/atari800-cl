@@ -100,6 +100,7 @@ on both implementations):
 | `usocket`           | 0.8+        | TCP transport for the AESP server        |
 | `flexi-streams`     | any         | Octet/string + in-memory streams (AESP)  |
 | `fiveam` *(tests)*  | 1.4+        | Test framework                           |
+| `shasht` *(tests)*  | any         | JSON for the Tom Harte CPU vectors       |
 
 The Unix-domain socket used by the CLI server is handled per-implementation
 in `compat.lisp` (`sb-bsd-sockets` on SBCL, an FLI `AF_UNIX` wrapper on
@@ -639,13 +640,12 @@ atari800-cl/
   modelled (`SCANLINE_ACCURACY_PLAN.md` Phases 0-3 are done; intra-line
   event positions are the stretch Phase 4).  Tricks that depend on
   cycle position within a scanline are out of scope today.
-- **Decimal-mode quirks** for ADC/SBC follow the standard reference,
-  but ARR's decimal-mode flag behaviour is not modelled (binary mode
-  is always assumed for that one undocumented opcode).
-- **Unstable opcodes** (XAA, AHX, SHX, SHY, TAS, LAX #imm) use the
-  most-consistent canonical implementation — real hardware results
-  vary chip-to-chip and the emulator does not try to reproduce the
-  fault-injection that happens on indexed page crosses.
+- **Unstable opcodes** (XAA, AHX, SHX, SHY, TAS, LAX #imm) pick one of
+  several hardware behaviours.  The page-cross address corruption of the
+  store family and the `$EE` magic constant of XAA / LAX #imm are both
+  modelled, matching the SingleStepTests vectors and mainstream
+  emulators — but real chips vary with supply voltage and temperature,
+  so no software should depend on them.
 - **No light pen and no SIO bus.**  Joystick, console keys, paddles and
   key codes come from an attached host input state (`attach-input`); with
   none attached the registers read their idle stubs — PORTA $FF (no

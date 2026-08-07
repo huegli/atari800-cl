@@ -674,11 +674,20 @@ value found there.  Includes the NMOS page-wrap bug (see ADDR-INDIRECT)."
 (defopcode #x20 jsr (cpu)
   "JSR: push (PC - 1) onto the stack (pointing at the last byte of the
 JSR instruction), then jump to the target address.  RTS will pull this
-address and add 1 to resume after the JSR."
-  (let* ((target (read-pc-word cpu))
-         (return-addr (ldb (byte 16 0) (1- (cpu-pc cpu)))))
-    (push-word cpu return-addr)
-    (setf (cpu-pc cpu) target))
+address and add 1 to resume after the JSR.
+
+Operand order matters: the NMOS 6502 reads the target's LOW byte, then
+pushes the return address, and only THEN reads the HIGH byte.  A JSR
+whose high operand byte lives in the stack page can therefore read back
+one of its own pushed bytes — the target changes under it.  Reading the
+full word up front would be a cycle-order lie that this quirk exposes."
+  (let* ((lo (cpu-read-byte cpu (cpu-pc cpu)))
+         ;; The high operand byte's address is also the return address
+         ;; JSR pushes: RTS adds one to land on the next instruction.
+         (hi-addr (ldb (byte 16 0) (1+ (cpu-pc cpu)))))
+    (push-word cpu hi-addr)
+    (let ((hi (cpu-read-byte cpu hi-addr)))
+      (setf (cpu-pc cpu) (dpb hi (byte 8 8) lo))))
   6)
 
 (defopcode #x60 rts (cpu)
