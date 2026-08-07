@@ -217,6 +217,68 @@ compile-buffer / compile-form commands to redefine functions in the live
 image; after changing a `defstruct` (e.g. `atari-machine`), build a fresh
 machine rather than reusing `*m*`.
 
+### Booting the minimal XL OS
+
+The `minimal-xl/` submodule carries a stripped-down XL OS built for
+emulator bring-up: it needs only the 6502, ANTIC and GTIA, sets up a
+standard GRAPHICS 0 screen (display list at `$BC20`, screen memory at
+`$BC40`, 40×24), runs a VBI that copies the OS shadow registers into the
+chips each frame, and writes a boot banner.  It is the quickest way to
+get real display output without copyrighted ROM dumps.
+
+Fetch it if the directory is empty, then boot `minimal_os.rom` — a raw
+16 KiB image covering `$C000-$FFFF`.  No BASIC ROM is needed: the minimal
+OS never touches PORTB banking.
+
+```sh
+git submodule update --init minimal-xl
+```
+
+```lisp
+(defparameter *m*
+  (a800:make-machine :os-rom #P"minimal-xl/minimal_os.rom"))
+(a800:run-frame *m* :count 30)
+```
+
+Its screen memory is plain ATASCII screen codes, so the banner can be
+read straight out of RAM:
+
+```lisp
+(let ((bus (atari800-cl.machine:atari-machine-bus *m*)))
+  (dotimes (row 3)
+    (format t "~&|~{~A~}|"
+            (loop for col below 40
+                  for code = (logand (atari800-cl.bus:bus-read
+                                      bus (+ #xBC40 (* row 40) col))
+                                     #x7F)
+                  ;; screen-code groups: 0 → $20.., 1 → $40.., 2 → $00..
+                  collect (let ((a (+ (case (ash code -5)
+                                        (0 #x20) (1 #x40) (2 #x00) (3 #x60))
+                                      (logand code #x1F))))
+                            (if (<= #x20 a #x7E) (code-char a) #\.))))))
+;; => |             MINIMAL XL OS              |
+```
+
+After 30 frames the machine sits at `PC=$C0B6` (its idle loop — no IRQ
+sources are enabled and there is no keyboard) with `DMACTL=$22`,
+`NMIEN=$40` and `DLIST=$BC20`.  To capture a PNG instead, start the
+servers and resume as in steps 3-5 above; everything else is identical.
+
+Rebuilding the ROM from source is optional and needs MADS.  The current
+`minimal_os.asm` carries `OPT h+` / `run RESET`, so MADS emits a **XEX**,
+not a raw ROM: 16,396 bytes = a 6-byte header, the 16,384-byte ROM core
+(byte-identical to the checked-in `minimal_os.rom`), and a 6-byte RUN
+block.  Strip the header for `:os-rom` use —
+
+```sh
+cd minimal-xl && mads minimal_os.asm -o:build/minimal_os.xex
+dd if=build/minimal_os.xex of=minimal_os_core.rom bs=1 skip=6 count=16384
+```
+
+— or run the XEX through the loader path instead with `minimal-xl/run.sh`
+(assemble → `scripts/atari-run.sh` → screenshot), which loads the XEX
+into RAM rather than mapping it as an OS ROM.
+
 ### Running the test suite
 
 ```lisp
