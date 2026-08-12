@@ -85,6 +85,18 @@
 > Phases 13-20 are ordered payoff-for-effort, not by theme; 13 is the
 > recommended start (small, and it makes the machine interactive), 14
 > and 15 are cheap hygiene, 16 is the next substantial feature.
+>
+> **Amended (2026-08-07) after a critique of the Phases 1-12 execution.**
+> Ground rule 2 gains a strict gate (env-gated skips become failures on
+> the machine that has the assets), rule 3 now prescribes
+> `scripts/bench-ab.sh` (the interleaved A/B method that survived
+> session drift, promoted from prose in `PERFORMANCE_LOG.md` to a
+> command), and a new rule 9 makes the post-phase review and the
+> cycle-ledger tests mandatory. Four phases appended: 21 (strict test
+> gate + skip census), 22 (POKEY pending-work bitmask -- land BEFORE 13
+> and 16a so their hooks join it), 23 (CONFIRM retirement), 24 (Acid800
+> gate -- run before 17). Recommended order is now 21, 22, 13, 14/15/23,
+> 24, 16, 17, then the rest as listed.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -113,13 +125,29 @@ and say so in the commit message.
    `./scripts/test-lispworks.sh`. Both must exit 0 before committing.
    The suite currently passes 2058 checks plus 1 skip on both (the skip
    is the Harte test with no vector data present; 2315 checks with it).
+   Once Phase 21 lands, also run `ATARI800_CL_STRICT=1
+   ./scripts/test-sbcl.sh` on this machine: strict mode turns the
+   env-gated skips (Klaus, Harte, real-ROM boot, later the ATR boot and
+   typing tests) into failures, so a phase cannot go green while the
+   tests that need local assets silently skip. Sandbox and CI runs stay
+   lenient; the strict run is the done-gate on the machine that rule 8
+   says has the ROMs.
 3. **Benchmark rule**: any phase touching the hot path
    (`src/machine.lisp` `%run-clocks`, `src/antic.lisp` scanline events,
    `src/pokey.lisp` tick/advance, `src/renderer.lisp` per-line work)
-   must run `./scripts/bench-sbcl.sh` and `./scripts/bench-lispworks.sh`
-   three times each before and after, and add mean-of-3 rows plus a
-   short note to `PERFORMANCE_LOG.md`. Phases 3, 5, 6, and 9 below
-   are hot-path phases.
+   must measure with `./scripts/bench-ab.sh <pre-phase-ref>`, which
+   builds the baseline in a git worktree and INTERLEAVES baseline and
+   working-tree runs (B-A-B-A) so session drift hits both sides
+   equally, then add its paired-delta table plus a short note to
+   `PERFORMANCE_LOG.md`. Treat a delta as real only when the runs
+   separate cleanly (every A run on one side of every B run -- the
+   script reports CLEAN/MIXED per workload); absolute fps values are
+   comparable only within one bench-ab session, so do not extend the
+   longitudinal table at the top of the log. (The old
+   three-runs-before/three-after method is retired: session drift
+   defeated it twice -- see the log's Phase 9 and Phase 12 notes.)
+   Phases 3, 5, 6, and 9 were the original tranche's hot-path phases;
+   of the open work, 18 and 22 are.
 4. Each phase gets a `CHANGES.md` entry at the TOP of the file (the log
    is newest-first) and updates the status header of whichever plan
    document it advances (`SCANLINE_ACCURACY_PLAN.md`,
@@ -137,6 +165,19 @@ and say so in the commit message.
 8. ROM images live in `roms/` (gitignored). `ATARIXL.ROM`,
    `ATARIBAS.ROM`, and `6502_functional_test.bin` are already present
    on this machine.
+9. **Review rule**: after the suite is green and before a phase is
+   declared done, review the phase's full diff against hardware
+   references and first principles -- the plan text is itself under
+   review, not the standard to review against. A plan sentence that
+   asserts emulator-bookkeeping semantics ("clamping to 0 is
+   deliberate", "X cannot happen here") is a claim with the same
+   standing as a CONFIRM-flagged hardware number: verify it or pin it
+   with a test before trusting it. Any phase touching `%run-clocks` or
+   cycle accounting must include at least one ledger test asserting an
+   exact cycle total over a multi-line window, computed on paper, not
+   recorded from a run of the code. (Precedent: the Phases 1-5 review
+   caught the WSYNC clamp forgiving a budget deficit -- commit 21e6749
+   -- after this plan had specified that clamp as deliberate.)
 
 ## Phase overview and dependencies
 
@@ -154,24 +195,38 @@ and say so in the commit message.
 | 10    | AESP audio streaming + WAV capture           | 9          | no       | done   |
 | 11    | A/V recording tooling (`record.sh` -> mp4)    | 4, 10      | no       | done   |
 | 12    | Tom Harte ProcessorTests harness             | --          | no       | done   |
-| 13    | POKEY keyboard IRQ (typing into BASIC)       | --          | no       | open   |
+| 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | open   |
 | 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | open   |
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | open   |
-| 16    | SIO receive path + virtual disk (ATR)        | 13         | no       | open   |
+| 16    | SIO receive path + virtual disk (ATR)        | 13, 22     | no       | open   |
 | 17    | Harte bus-trace comparison                   | 12         | no       | open   |
 | 18    | LispWorks profiling pass                     | --          | yes      | open   |
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
 | 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
+| 21    | Strict test gate + skip census               | --          | no       | open   |
+| 22    | POKEY pending-work bitmask                   | --          | yes      | open   |
+| 23    | CONFIRM retirement pass                      | --          | no       | open   |
+| 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | open   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
 of the original tranche only because it produces no video-visible
 payoff.
 
-Of the new tranche, only 16 depends on another new phase (13 gives it
-the interrupt plumbing and a way to drive DOS once it boots). 17 is
+Of the 13-20 tranche, only 16 depends on another new phase (13 gives
+it the interrupt plumbing and a way to drive DOS once it boots). 17 is
 what turns SCANLINE_ACCURACY_PLAN.md's stretch Phase 5 from guesswork
 into a checkable target, so run it before attempting those quirks.
+
+The 21-24 amendments adjust the recommended order: 21 first (it makes
+the real-ROM tests un-skippable on this machine before the phases that
+lean on them), 22 before 13 and 16a (their per-advance POKEY hooks
+join the bitmask instead of adding two more branch tests to the hot
+path -- the Phases 1-12 pattern was one such test per feature, each
+individually measured and shrugged at), 24 before 17 (Acid800's ANTIC
+subset is the first external check the Phase 5 steal tables and Phase
+3 WSYNC have ever faced; 17 deepens the CPU's already-strongest
+evidence), and 23 alongside 14/15 as hygiene.
 
 ---
 
@@ -742,7 +797,13 @@ runs real software instead of hand-assembled demos. The OS already
 sends a complete command frame and times out waiting for a reply -- the
 missing half is everything after that.
 
-Stage it; do not attempt one commit.
+Stage it; do not attempt one commit. And write the acceptance test
+FIRST: the DOS-menu boot test lands in `tests/test-machine.lisp`'s
+real-ROM group -- strict-gated (Phase 21) and skipping -- in the same
+commit as 16a, so the phase is done when that test stops skipping and
+passes, not when the sub-items feel complete. (Lesson from Phases
+1-12: the PIA and serial-transmitter showstoppers survived twelve
+green phases because no phase gated on booting the real ROMs.)
 
 **16a -- serial receive.** POKEY's input side: SERIN, the
 serial-input-ready IRQ (IRQEN bit 5), and the SKSTAT framing/overrun
@@ -851,6 +912,135 @@ Commit: "Document the ANTIC display-list latch simplification".
 
 ---
 
+## Phase 21 -- Strict test gate + skip census
+
+Phases 1-12 went green while the machine could not boot the real OS:
+the tests that matter most (Klaus, Harte, real-ROM boot) are env-gated
+and self-skipping, so a suite pass proves least exactly where the
+stakes are highest. The PIA register-map and missing-serial-transmitter
+showstoppers were found by unplanned work between Phases 10 and 11, not
+by any phase's gate. Make the skips impossible to not notice.
+
+1. `tests/test-helpers.lisp`: `%skip-or-fail (reason)` -- when
+   `ATARI800_CL_STRICT` is set (non-empty), FAIL with the reason;
+   otherwise skip as today. Convert the Klaus, Harte, and real-ROM
+   boot tests to it, and use it for every future env-gated test (the
+   Phase 13 typing test, Phase 16 ATR boot, Phase 24 Acid800).
+2. Skip census: `./scripts/test-sbcl.sh` and `test-lispworks.sh` echo
+   one `SKIPPED: <test> (<reason>)` line per skipped test after the
+   run -- both already inspect the `fiveam:run!` result list for the
+   exit code, so the skipped entries are in hand. Holes stay visible
+   in every transcript instead of hiding inside "N checks, 1 skip".
+3. This makes ground rule 2's strict sentence operative: on this
+   machine (rule 8 says the ROMs are present), a phase is done only
+   when the strict run also exits 0.
+
+Tests: the helper itself (strict env var -> failure recorded; unset ->
+skip), in `tests/test-compat.lisp` or a small new group -- exercise it
+via a dummy test body, not by unsetting real assets.
+
+Commit: "Strict test gate: env-gated skips fail under ATARI800_CL_STRICT".
+
+---
+
+## Phase 22 -- POKEY pending-work bitmask  [hot path -> benchmark]
+
+Serial output cost -1.2% to -4.8% depending on workload, the audio
+slot cost -4.2% on `nop`, and Phases 13 and 16a each plan to add
+another "one slot read plus branch" to `pokey-advance`. Four
+independent per-advance branch tests where one will do. Consolidate
+BEFORE 13 and 16a land, so their flags join the mask for free instead
+of repeating the measure-and-shrug cycle.
+
+1. One fixnum slot `pokey-pending` on the `pokey` struct: bit 0 =
+   serial transmitter active, bit 1 = audio attached, bits 2-3
+   reserved for key-pending (Phase 13) and serial receive (Phase 16a).
+   The fast path in `pokey-advance` / `pokey-tick` tests `(zerop
+   pending)` ONCE per call; nonzero branches to a NOT-inlined cold
+   function that dispatches on the set bits. The audio advance moves
+   into the cold function too -- audio is a do-work-every-advance bit
+   where the others are event flags, but both shapes live behind the
+   same single test.
+2. Setters maintain the mask: `machine-attach-audio` (and detach)
+   toggles bit 1, transmitter start/finish toggles bit 0. Keep
+   `%expire-channel` untouched -- the serial commit's log entry records
+   why hooks in there cost 8-9%.
+3. The 50,000-cycle `pokey-tick` == `pokey-advance` equivalence test
+   must run under several mask states (audio attached, serial
+   mid-byte, both at once) so the consolidation cannot silently
+   diverge the two paths.
+4. Measure with `./scripts/bench-ab.sh` (rule 3) against the
+   pre-phase commit; expect to recover part of the ~4% `nop` cost.
+   Log the paired-delta table either way -- a null result is still a
+   result, and it caps the cost of Phases 13 and 16a at zero new
+   hot-path branches.
+
+Commit: "POKEY: consolidate per-advance hooks into one pending-work bitmask".
+
+---
+
+## Phase 23 -- CONFIRM retirement pass
+
+The CONFIRM flag means "verify against a reference"; after twelve
+phases it functions as a footnote. The status headers above admit the
+PRIOR priority orderings, mode 10's nibbles 9-15, and the POKEY reload
+offsets all still carry theirs. Retire every flag still standing:
+`grep -rn CONFIRM src/ *.md` (currently `src/pokey.lisp:55`,
+`src/renderer.lisp:74`, `src/renderer.lisp:413`, plus the flags this
+file and the other plan documents carry).
+
+For each one, either:
+
+- (a) verify it against the Altirra Hardware Reference Manual or the
+  atari800 source -- the PRIOR orderings and mode-10 nibble behaviour
+  against `gtia.c`'s priority tables, the reload offsets and poly taps
+  against `pokey.c` -- replace the flag with a file+line citation
+  comment, and add a test asserting the confirmed value where one does
+  not already pin it; or
+- (b) if it genuinely cannot be verified from those sources, record it
+  in README.md's known-limitations list as a documented-unverified
+  value and say which sources were checked.
+
+No flag survives as a bare CONFIRM. This is an hour or two of
+cross-reading the original phases already asked for and nobody did.
+
+Commit: "Retire the CONFIRM flags: citations and tests, or documented
+divergence".
+
+---
+
+## Phase 24 -- Acid800 gate (CPU + ANTIC subsets)
+
+The CPU has an external ratchet (Harte); ANTIC, GTIA, and POKEY are
+tested only against this emulator's own model -- their tests assert
+the implementation back at itself. Acid800 under the real OS ROM is
+the cheapest external check available and has been "aspirational" in
+the definition of done long enough. Run it BEFORE Phase 17: the ANTIC
+subset is the first outside evidence the Phase 5 steal tables and
+Phase 3 WSYNC have ever faced, where 17 only deepens the CPU's
+already-strongest evidence.
+
+1. `scripts/fetch-acid800.sh`, modelled on `fetch-test-roms.sh`:
+   download the Acid800 test suite into `roms/acid800/` (gitignored),
+   no-op when present, note the license and source URL.
+2. Env-gated tests in `tests/test-machine.lisp`'s real-ROM group,
+   strict-gated via Phase 21's `%skip-or-fail`: load each test XEX via
+   the existing XEX loader (`scripts/xex-loader.lisp` mechanism), run
+   frames, and read the pass/fail state from screen memory the way the
+   boot test reads `Ready`.
+3. CPU subset first -- expected to pass given Harte; a failure here is
+   information about the BUS or interrupt timing, which
+   per-instruction vectors cannot see. Then the ANTIC subset. Triage
+   failures the Harte way: presumed real emulator bugs, fix in `src/`,
+   regression test per fix, skip only with a documented reason.
+4. Move the definition-of-done bullet from "aspirational" to gated on
+   whichever subsets pass, and list the ones that do not yet in
+   README.md's limitations.
+
+Commit: "Add the Acid800 harness: CPU and ANTIC subsets under the real OS".
+
+---
+
 ## Roadmap definition of done
 
 - Suite green on SBCL and LispWorks after every phase (rule 2).
@@ -864,10 +1054,14 @@ Commit: "Document the ANTIC display-list latch simplification".
   1-8 done, 9 and 10 open, 11 obsolete (superseded by item 4);
   `PERFORMANCE_PLAN.md` Phases 0-3 done (2 rejected on measurement),
   Phase 4 open as Phase 18 below.
-- Aspirational, not gating: Acid800's CPU + ANTIC subsets under the
-  real OS ROM -- track once Phases 3-6 land.
+- Acid800's CPU + ANTIC subsets under the real OS ROM: gated once
+  Phase 24 lands (previously aspirational).
 
-For the 13-20 tranche, done means: the machine can be typed at (13) and
+For the 13-24 tranche, done means: the machine can be typed at (13) and
 booted from a disk image (16), the Harte data is one command away (14)
-and checks bus traces rather than cycle counts alone (17), and the
-docs match the code (15, 20).
+and checks bus traces rather than cycle counts alone (17), the docs
+match the code (15, 20), a suite pass on this machine proves the
+real-ROM paths instead of skipping them (21), the POKEY hot path
+carries one pending-work test instead of four (22), no bare CONFIRM
+flag remains anywhere (23), and Acid800's CPU subset passes under the
+real OS (24).
