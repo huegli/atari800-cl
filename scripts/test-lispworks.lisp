@@ -45,9 +45,7 @@
         (configure-asdf-for-sandbox)
         (asdf:load-system :atari800-cl/tests)
         (setf *test-status*
-              (if (uiop:symbol-call :fiveam :run!
-                                    (uiop:find-symbol* :atari800-cl-suite
-                                                       :atari800-cl/tests))
+              (if (uiop:symbol-call :atari800-cl/tests :run-tests)
                   0
                   1)))
     (error (condition)

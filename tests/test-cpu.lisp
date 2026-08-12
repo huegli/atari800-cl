@@ -69,7 +69,9 @@
 ;;; the OS/BASIC images, or point ATARI800_CL_FUNCTIONAL_TEST at it.
 ;;;
 ;;; If the binary is absent (CI's common case), this test SKIPs with a
-;;; message that names the path it tried.
+;;; message that names the path it tried -- unless $ATARI800_CL_STRICT is
+;;; set, in which case the skip becomes a FAILURE (ROADMAP.md Phase 21;
+;;; see %SKIP-OR-FAIL in test-helpers.lisp).
 
 (defparameter *klaus-functional-test-filename* "6502_functional_test.bin")
 
@@ -156,9 +158,11 @@ that PC value.  If it's the success address ($3469), all checks passed."
   "Run Klaus Dormann's 6502 functional test to its success trap."
   (let ((path (%klaus-functional-test-binary-path)))
     (cond
-      ;; If the binary isn't available, skip gracefully rather than failing.
+      ;; If the binary isn't available, skip gracefully rather than failing
+      ;; -- unless $ATARI800_CL_STRICT is set, in which case this becomes a
+      ;; failure (ROADMAP.md Phase 21: this machine is supposed to have it).
       ((null path)
-       (skip "Klaus Dormann functional-test binary ~A not found in roms/ ~
+       (%skip-or-fail "Klaus Dormann functional-test binary ~A not found in roms/ ~
               (or via $ATARI800_CL_FUNCTIONAL_TEST). ~
               Build from https://github.com/Klaus2m5/6502_65C02_functional_tests ~
               with org=0000 and load_data_direct=1 to produce a 64KiB image, ~

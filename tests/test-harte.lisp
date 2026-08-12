@@ -19,7 +19,9 @@
 ;;;;
 ;;;; A partial checkout works too: the harness tests whichever `<hex>.json`
 ;;;; files it finds.  With the variable unset (or the directory empty) the
-;;;; test SKIPs, exactly like the Klaus functional test in test-cpu.lisp.
+;;;; test SKIPs, exactly like the Klaus functional test in test-cpu.lisp --
+;;;; unless $ATARI800_CL_STRICT is set, in which case the skip becomes a
+;;;; FAILURE (ROADMAP.md Phase 21; see %SKIP-OR-FAIL in test-helpers.lisp).
 ;;;;
 ;;;; Depth: 500 cases per opcode by default, so a full 256-opcode run stays
 ;;;; minutes rather than hours.  `ATARI800_CL_HARTE_FULL=1` runs all 10,000.
@@ -213,7 +215,7 @@ default depth, parses 500 objects instead of 10,000."
 registers, memory and cycle count after a single STEP-CPU."
   (let ((dir (%harte-directory)))
     (if (null dir)
-        (skip "$ATARI800_CL_HARTE_TESTS is unset or does not exist; skipping ~
+        (%skip-or-fail "$ATARI800_CL_HARTE_TESTS is unset or does not exist; skipping ~
                the Tom Harte vectors.  Clone SingleStepTests/65x02 and point ~
                the variable at its 6502/v1 directory to enable them.")
         (let ((files (%harte-vector-files dir))
@@ -221,7 +223,7 @@ registers, memory and cycle count after a single STEP-CPU."
               (total-cases 0)
               (total-failures 0))
           (if (null files)
-              (skip "No <hex>.json vector files in ~A; skipping." dir)
+              (%skip-or-fail "No <hex>.json vector files in ~A; skipping." dir)
               (progn
                 (dolist (entry files)
                   (destructuring-bind (opcode . path) entry

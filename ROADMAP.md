@@ -97,6 +97,16 @@
 > and 16a so their hooks join it), 23 (CONFIRM retirement), 24 (Acid800
 > gate -- run before 17). Recommended order is now 21, 22, 13, 14/15/23,
 > 24, 16, 17, then the rest as listed.
+>
+> **Phase 21 done (2026-08-11)**: `%SKIP-OR-FAIL` (`tests/test-helpers.lisp`)
+> replaces the bare `SKIP` calls in the Klaus, Harte, and real-ROM boot
+> tests; `$ATARI800_CL_STRICT=1` turns those skips into failures. Verified
+> on this machine (Klaus binary and both ROM images present, no Harte
+> checkout): lenient runs unchanged, strict runs execute and pass Klaus
+> and both boot tests for real and fail only on the genuinely-absent Harte
+> vectors, on both implementations. `RUN-TESTS` (`tests/test-suite.lisp`,
+> now what both test scripts call) also prints a grep-able skip census
+> after every run. Phase 22 (POKEY pending-work bitmask) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -203,7 +213,7 @@ and say so in the commit message.
 | 18    | LispWorks profiling pass                     | --          | yes      | open   |
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
 | 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
-| 21    | Strict test gate + skip census               | --          | no       | open   |
+| 21    | Strict test gate + skip census               | --          | no       | done   |
 | 22    | POKEY pending-work bitmask                   | --          | yes      | open   |
 | 23    | CONFIRM retirement pass                      | --          | no       | open   |
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | open   |

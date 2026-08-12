@@ -27,4 +27,4 @@ sbcl --noinform --no-userinit --non-interactive \
   --eval "(asdf:initialize-output-translations '(:output-translations (t (#P\"$CACHE_PATH\" :implementation)) :ignore-inherited-configuration))" \
   --eval "(asdf:initialize-source-registry '(:source-registry (:tree #P\"$ROOT_PATH\") (:tree #P\"$QL_PATH\") :ignore-inherited-configuration))" \
   --eval "(asdf:load-system :atari800-cl/tests)" \
-  --eval "(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))"
+  --eval "(uiop:quit (if (uiop:symbol-call :atari800-cl/tests :run-tests) 0 1))"

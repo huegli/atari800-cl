@@ -425,7 +425,11 @@ detaching with NIL clears them."
 ;;; POKEY serial-output interrupts SIO's command frame depends on.
 ;;;
 ;;; Both skip when ROM images are absent (as the Klaus test does), so a
-;;; checkout without dumps still runs green.
+;;; checkout without dumps still runs green -- unless $ATARI800_CL_STRICT
+;;; is set, in which case the skip becomes a failure (ROADMAP.md Phase
+;;; 21). It was exactly this pair of skips that let the PIA bug above
+;;; pass twelve green phases undetected on a machine that had the ROMs
+;;; the whole time; strict mode closes that hole.
 
 (defparameter *os-rom-candidates* '("atariosxl.rom" "ATARIXL.ROM" "atarixl.rom")
   "Filenames to try for the 16 KiB 800 XL OS ROM, in preference order.")
@@ -485,7 +489,7 @@ ROM.  A machine that has fallen into a BRK loop at $0000 — what a broken
 PIA/MMU mapping produces — fails every one of these."
   (let ((m (%boot-machine-with-real-roms)))
     (if (null m)
-        (skip "OS/BASIC ROM images not found in roms/ (or via ~
+        (%skip-or-fail "OS/BASIC ROM images not found in roms/ (or via ~
                $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM); ~
                skipping the real-ROM boot test.")
         (let ((cpu   (atari800-cl.machine:atari-machine-cpu m))
@@ -510,7 +514,7 @@ Reaching this depends on POKEY's serial-output interrupts (SEROR/SEROC):
 without them the OS spins forever waiting for XMTDON."
   (let ((m (%boot-machine-with-real-roms)))
     (if (null m)
-        (skip "OS/BASIC ROM images not found; skipping the boot-to-BASIC test.")
+        (%skip-or-fail "OS/BASIC ROM images not found; skipping the boot-to-BASIC test.")
         (let ((found nil))
           ;; ~25 s of emulated time is ample; stop as soon as the prompt shows.
           (loop repeat 1500

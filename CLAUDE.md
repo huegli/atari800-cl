@@ -51,7 +51,8 @@ LispWorks init-file side effects, or Quicklisp writing to
 - redirect ASDF/FASL output into `.cache/fasls/` inside the repository via
   `asdf:initialize-output-translations`, because some sandboxes forbid writes
   to `~/.cache/common-lisp`;
-- run `fiveam:run!` directly for the shell exit status, because
+- run `atari800-cl/tests::run-tests` (a thin wrapper around `fiveam:run!`
+  plus a skip census, see below) directly for the shell exit status, because
   `asdf:test-system` can return successfully even when FiveAM reports failed
   checks;
 - run the LispWorks test body inside `mp:initialize-multiprocessing`, because
@@ -66,6 +67,23 @@ the repository. The live AESP TCP server tests, CLI Unix socket server tests,
 and Unix socket roundtrip test probe this capability and skip themselves when
 listener bind is prohibited. On an unrestricted local shell these tests should
 run normally.
+
+**Strict mode and the skip census (ROADMAP.md Phase 21).** Every run prints
+a `Skip census:` block after FiveAM's own report -- one `SKIPPED: <test>
+(<reason>)` line per skipped check, or `(none)` -- so an asset-gated test
+that silently skipped can never hide inside a bare "N checks, 1 skip"
+count; `grep SKIPPED` a saved log to see exactly what did not run and why.
+Three tests are asset-gated this way: the Klaus functional test, the Tom
+Harte vectors, and the real-ROM boot tests. Set `ATARI800_CL_STRICT=1` (any
+non-empty value) to turn those skips into failures instead -- the gate to
+run on a machine that is supposed to have the assets (rule 8 above lists
+which ones are already present here) before calling a phase done:
+```sh
+ATARI800_CL_STRICT=1 ./scripts/test-sbcl.sh
+```
+Without the ROMs or vectors present, strict mode fails exactly those tests
+by design -- it is meant to be run only once you believe the assets are in
+place, not as the default CI posture.
 
 > **Exit-code gotcha:** `asdf:test-system` returns `T` even when tests
 > *fail*, so it is useless for shell/CI exit codes. Always key the exit

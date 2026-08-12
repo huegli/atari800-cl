@@ -3,6 +3,41 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 21 -- Strict test gate + skip census
+
+Three tests skip gracefully when an asset they need is absent (the Klaus
+functional-test binary, the Tom Harte vectors, the real OS/BASIC ROM
+images) -- correct for a checkout that has never had the asset, but on a
+machine that is supposed to have it (`CLAUDE.md`/`ROADMAP.md` rule 8) a
+silent skip can hide a real regression. It did: the PIA register-map and
+missing-serial-transmitter bugs that once made the emulator unable to
+boot the real OS survived twelve green suite runs, because the one test
+that would have caught it was in a skip-tolerant posture the whole time.
+
+`tests/test-helpers.lisp` adds `%SKIP-OR-FAIL`: skips exactly as `SKIP`
+would, unless `$ATARI800_CL_STRICT` is set to a non-empty value, in which
+case the same reason becomes a failure instead. The Klaus test
+(`tests/test-cpu.lisp`), the Tom Harte harness (`tests/test-harte.lisp`,
+both skip sites), and the two real-ROM boot tests
+(`tests/test-machine.lisp`) now use it. A self-test
+(`SKIP-OR-FAIL-RESPECTS-STRICT-MODE` in `tests/test-compat.lisp`) exercises
+both branches against two standalone probe tests via a test-only dynamic
+override (`*STRICT-MODE-OVERRIDE*`), so it never has to touch the process
+environment or a real asset.
+
+`tests/test-suite.lisp`'s `RUN-TESTS` (now what both `scripts/test-sbcl.sh`
+and `scripts/test-lispworks.lisp` call, in place of a bare `fiveam:run!`)
+prints a "Skip census" after FiveAM's own report: one `SKIPPED: <test>
+(<reason>)` line per skipped check, or `(none)`, so a skip that matters is
+always grep-able and never buried in scrollback.
+
+Verified on this machine (which has the Klaus binary and both ROM images,
+but not a Harte checkout): lenient runs are unchanged (2081 checks, 1
+skip, exit 0, both implementations); `ATARI800_CL_STRICT=1` runs execute
+Klaus and both real-ROM tests for real (they pass) and fail only on Harte,
+whose vectors are genuinely absent here (2063 checks, 0 skip, 1 fail, exit
+1, both implementations) -- exactly the intended behavior.
+
 ## ROADMAP Phase 12 -- Tom Harte ProcessorTests harness (3 CPU bugs found)
 
 `tests/test-harte.lisp` runs the SingleStepTests/65x02 vectors: per-opcode

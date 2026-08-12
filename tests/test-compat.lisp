@@ -166,3 +166,34 @@ across a Unix-domain socket on whichever implementation we're running."
                (is (string= "hello-unix" reply)
                    "server read what the client wrote; got ~S" reply))
           (close-unix-listener listener)))))
+
+;;; ---------------------------------------------------------------------------
+;;; %SKIP-OR-FAIL self-test (ROADMAP.md Phase 21 -- the strict test gate)
+;;;
+;;; %SKIP-OR-FAIL (tests/test-helpers.lisp) is what turns the Klaus, Harte,
+;;; and real-ROM boot tests' graceful skips into failures under
+;;; $ATARI800_CL_STRICT.  Exercised here via *STRICT-MODE-OVERRIDE* rather
+;;; than the real environment variable, against two standalone probe tests
+;;; (%PROBE-SKIP-OR-FAIL-LENIENT / -STRICT, also in test-helpers.lisp) that
+;;; are never members of any suite, so running FIVEAM:RUN on them here is
+;;; the only way they ever execute.
+
+(test skip-or-fail-respects-strict-mode
+  "%SKIP-OR-FAIL skips when strict mode is off and fails when it is on,
+using the same reason either way."
+  (let ((*strict-mode-override* nil))
+    (let ((results (fiveam:run '%probe-skip-or-fail-lenient)))
+      (is (= 1 (length results))
+          "expected exactly one result from the lenient probe, got ~D"
+          (length results))
+      (is (typep (first results) 'fiveam::test-skipped)
+          "lenient mode: %SKIP-OR-FAIL should SKIP, got a ~A"
+          (type-of (first results)))))
+  (let ((*strict-mode-override* t))
+    (let ((results (fiveam:run '%probe-skip-or-fail-strict)))
+      (is (= 1 (length results))
+          "expected exactly one result from the strict probe, got ~D"
+          (length results))
+      (is (typep (first results) 'fiveam::test-failure)
+          "strict mode: %SKIP-OR-FAIL should FAIL, got a ~A"
+          (type-of (first results))))))

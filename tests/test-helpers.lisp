@@ -13,6 +13,8 @@
 ;;;;   %MAKE-SYNTHETIC-BASIC-ROM — bare 8K-of-NOPs.
 ;;;;   %POKE                    — NOTINLINE AREF setter that dodges the
 ;;;;                              SBCL/arm64 codegen bug on >=4 KiB offsets.
+;;;;   %SKIP-OR-FAIL             — SKIP unless $ATARI800_CL_STRICT is set,
+;;;;                              in which case FAIL (ROADMAP.md Phase 21).
 
 (in-package #:atari800-cl/tests)
 
@@ -55,6 +57,68 @@ folding I into a constant STR immediate."
   "8 KiB of NOP filler so the bus reads return predictable bytes when
 PORTB is configured to expose BASIC."
   (make-array #x2000 :element-type '(unsigned-byte 8) :initial-element #xEA))
+
+;;; ---------------------------------------------------------------------------
+;;; %SKIP-OR-FAIL — the strict test gate (ROADMAP.md Phase 21)
+;;;
+;;; Several tests depend on an asset this project does not vendor (a ROM
+;;; image, a downloaded vector corpus) and SKIP gracefully when it is
+;;; absent, exactly like a missing optional dependency.  That is correct
+;;; for a checkout or sandbox that has never had the asset — but on a
+;;; machine that is SUPPOSED to have it (CLAUDE.md/ROADMAP.md rule 8 lists
+;;; the ROM images as already present here), a silent skip can hide a real
+;;; regression: the suite went green for ten phases in this project's own
+;;; history while the emulator could not boot the real OS at all, because
+;;; the one test that would have caught it was in a skip-tolerant posture.
+;;;
+;;; %SKIP-OR-FAIL is a drop-in replacement for a bare SKIP call: it skips
+;;; exactly as before unless $ATARI800_CL_STRICT is set to a non-empty
+;;; value, in which case the same reason becomes a FAILURE instead.  Every
+;;; env-gated test that depends on an asset rule 8 promises is present
+;;; (Klaus, Harte, the real-ROM boot tests, and future ones — Phase 13's
+;;; typing test, Phase 16's ATR boot test, Phase 24's Acid800 tests) should
+;;; use this instead of SKIP directly.  Tests that skip because the
+;;; EXECUTION ENVIRONMENT forbids something (TCP/Unix listener bind denied
+;;; in a sandbox) are a different category — that is not an asset this
+;;; machine promises, so those keep using bare SKIP.
+
+(defvar *strict-mode-override* :unset
+  "Test-only override for %STRICT-MODE-P.  When not :UNSET, its value (T
+or NIL) is used verbatim instead of reading $ATARI800_CL_STRICT, so the
+self-test below can exercise both branches without touching the process
+environment (which is not portable to set at runtime on both SBCL and
+LispWorks, and would race any other test reading the same variable).")
+
+(defun %strict-mode-p ()
+  "True when strict mode is active: *STRICT-MODE-OVERRIDE* if bound to
+other than :UNSET, else whether $ATARI800_CL_STRICT is set to a non-empty
+value.  See %SKIP-OR-FAIL."
+  (if (eq *strict-mode-override* :unset)
+      (let ((value (uiop:getenv "ATARI800_CL_STRICT")))
+        (and value (plusp (length value)) t))
+      *strict-mode-override*))
+
+(defmacro %skip-or-fail (reason-control &rest reason-args)
+  "Record a TEST-SKIPPED result with the given reason (as SKIP would),
+unless strict mode (%STRICT-MODE-P) is active, in which case record a
+FAILURE with the same reason instead.  REASON-CONTROL/REASON-ARGS are a
+FORMAT control string and its arguments, exactly as passed to SKIP."
+  `(if (%strict-mode-p)
+       (is-true nil ,reason-control ,@reason-args)
+       (skip ,reason-control ,@reason-args)))
+
+;;; Two standalone probes used only by the self-test in
+;;; tests/test-compat.lisp (SKIP-OR-FAIL-RESPECTS-STRICT-MODE).  :SUITE NIL
+;;; keeps them out of every suite's tree -- they must never run as part of
+;;; an ordinary suite pass (their whole purpose is to fail or skip on
+;;; command), only when invoked by name via FIVEAM:RUN under a bound
+;;; *STRICT-MODE-OVERRIDE*.
+
+(test (%probe-skip-or-fail-lenient :suite nil)
+  (%skip-or-fail "probe: lenient mode should skip, not fail"))
+
+(test (%probe-skip-or-fail-strict :suite nil)
+  (%skip-or-fail "probe: strict mode should fail, not skip"))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Environment probes for live socket integration tests
