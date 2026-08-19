@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# run-edvent02-lispworks.sh -- Launch the real LispWorks IDE (not lw-console)
+# run-asm-lispworks.sh -- Launch the real LispWorks IDE (not lw-console)
 # and, inside it, build an a800 machine against the minimal-xl OS, assemble
-# and load asm/edvent02.asm, and start the AESP + CLI servers.  Once the
-# machine reports ready, grab a screenshot and print how to point the Attic
-# GUI/CLI at the running servers.
+# and load the given MADS assembly file, and start the AESP + CLI servers.
+# Once the machine reports ready, grab a screenshot and print how to point
+# the Attic GUI/CLI at the running servers.
 #
 # All of the actual bring-up work happens inside LispWorks; see
-# scripts/run-edvent02-lispworks.lisp, which is loaded via `-init`.
+# scripts/run-asm-lispworks.lisp, which is loaded via `-init` and reads the
+# ATARI800_CL_ASM_FILE environment variable this script sets below.
 #
-# Usage:  scripts/run-edvent02-lispworks.sh
+# Usage:  scripts/run-asm-lispworks.sh <path/to/file.asm>
+#         scripts/run-asm-lispworks.sh asm/edvent02.asm
 #
 # Override LISPWORKS_APP to point at a different LispWorks executable (the
 # binary inside <App>.app/Contents/MacOS/, not the .app bundle itself).
@@ -18,8 +20,22 @@
 
 set -euo pipefail
 
+if [[ $# -lt 1 ]]; then
+  echo "usage: $(basename "$0") <path/to/file.asm>" >&2
+  echo "e.g.:  $(basename "$0") asm/edvent02.asm" >&2
+  exit 3
+fi
+
+ASM_FILE="$1"
+if [[ ! -f "$ASM_FILE" ]]; then
+  echo "error: assembly source not found: $ASM_FILE" >&2
+  exit 3
+fi
+ASM_FILE="$(cd "$(dirname "$ASM_FILE")" && pwd)/$(basename "$ASM_FILE")"
+ASM_STEM="$(basename "${ASM_FILE%.*}")"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INIT_FILE="$REPO_ROOT/scripts/run-edvent02-lispworks.lisp"
+INIT_FILE="$REPO_ROOT/scripts/run-asm-lispworks.lisp"
 
 LISPWORKS_APP="${LISPWORKS_APP:-/Applications/LispWorks 8.1 (64-bit)/LispWorks (64-bit).app/Contents/MacOS/lispworks-8-1-0-macos64-universal}"
 ATTIC_DIR="${ATTIC_DIR:-/Users/nikolai/Source/Repos/GitHub/huegli/attic}"
@@ -36,7 +52,7 @@ if [[ ! -f "$INIT_FILE" ]]; then
 fi
 
 if ! command -v mads >/dev/null 2>&1; then
-  echo "warning: mads not found on PATH; asm/edvent02.asm assembly will fail" \
+  echo "warning: mads not found on PATH; assembling $ASM_FILE will fail" \
        "inside the IDE unless MADS_BIN is set for scripts/mads-build.sh." >&2
 fi
 
@@ -67,17 +83,18 @@ if [[ -n "$STALE_PIDS" ]]; then
   fi
 fi
 
-LOG_FILE="$(mktemp -t edvent02-lispworks.XXXXXX)"
+LOG_FILE="$(mktemp -t asm-lispworks.XXXXXX)"
 
-echo "Launching LispWorks IDE (log: $LOG_FILE)..."
+echo "Launching LispWorks IDE for $ASM_FILE (log: $LOG_FILE)..."
 # Invoke the app's binary directly (bypassing `open -a`/LaunchServices) so
 # this always starts a fresh, distinct process with our -init file, even if
 # another LispWorks IDE instance is already running.
-nohup "$LISPWORKS_APP" -init "$INIT_FILE" >"$LOG_FILE" 2>&1 &
+ATARI800_CL_ASM_FILE="$ASM_FILE" \
+  nohup "$LISPWORKS_APP" -init "$INIT_FILE" >"$LOG_FILE" 2>&1 &
 PID=$!
 
 echo "LispWorks IDE starting (pid $PID)."
-echo "It will build the machine, assemble + load asm/edvent02.asm against"
+echo "It will build the machine, assemble + load $ASM_FILE against"
 echo "the minimal-xl OS, and start the AESP (127.0.0.1:47800-47802) and CLI"
 echo "servers automatically once the IDE finishes loading."
 echo "Watch progress with:  tail -f \"$LOG_FILE\""
@@ -87,7 +104,7 @@ echo "Watch progress with:  tail -f \"$LOG_FILE\""
 # print how to point Attic's GUI/CLI at the running servers.
 #
 # This polls the CLI socket directly with a real PING instead of grepping
-# the log for the Lisp side's EDVENT02_READY line: LispWorks' redirected
+# the log for the Lisp side's PROGRAM_READY line: LispWorks' redirected
 # stdout under `nohup ... &` does not reliably flush that final line to
 # the log file by the time bring-up has actually finished (observed: the
 # machine is already serving PING/pong on both AESP and CLI while the log
@@ -112,7 +129,7 @@ while true; do
     STATUS="ready"
     break
   fi
-  if grep -q '^fatal: edvent02 bring-up failed' "$LOG_FILE" 2>/dev/null; then
+  if grep -q '^fatal: program bring-up failed' "$LOG_FILE" 2>/dev/null; then
     STATUS="failed"
     break
   fi
@@ -128,12 +145,12 @@ while true; do
 done
 
 if [[ "$STATUS" == "failed" ]]; then
-  echo "error: edvent02 bring-up failed inside the IDE; see $LOG_FILE" >&2
+  echo "error: program bring-up failed inside the IDE; see $LOG_FILE" >&2
   grep '^fatal:' "$LOG_FILE" >&2 || true
   exit 1
 fi
 
-SCREENSHOT="$REPO_ROOT/asm/build/edvent02.png"
+SCREENSHOT="$(dirname "$ASM_FILE")/build/$ASM_STEM.png"
 echo "Machine is up; capturing a screenshot to $SCREENSHOT..."
 if command -v python3 >/dev/null 2>&1; then
   if python3 "$REPO_ROOT/scripts/capture-screenshot.py" -o "$SCREENSHOT"; then
@@ -147,7 +164,7 @@ else
 fi
 
 echo
-echo "=== EdVenture video 2 is running ==="
+echo "=== $ASM_STEM is running ==="
 echo "AESP:  127.0.0.1:47800 (control) / 47801 (video) / 47802 (audio)"
 echo "CLI:   ${CLI_SOCKET:-<not found in log; see $LOG_FILE>}"
 echo

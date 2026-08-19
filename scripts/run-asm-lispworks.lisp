@@ -1,13 +1,15 @@
-;;;; scripts/run-edvent02-lispworks.lisp --- LispWorks IDE bring-up for
-;;;; EdVenture video 2 (asm/edvent02.asm) against the minimal-xl OS.
+;;;; scripts/run-asm-lispworks.lisp --- LispWorks IDE bring-up for an
+;;;; arbitrary MADS assembly program against the minimal-xl OS.
 ;;;;
 ;;;; Invoked as the LispWorks `-init` file:
 ;;;;
-;;;;   lispworks-binary -init scripts/run-edvent02-lispworks.lisp
+;;;;   lispworks-binary -init scripts/run-asm-lispworks.lisp
 ;;;;
-;;;; (see scripts/run-edvent02-lispworks.sh, which launches the real
-;;;; LispWorks IDE executable this way -- NOT lw-console, so you get the
-;;;; full interactive environment with listener/editor/inspector).
+;;;; (see scripts/run-asm-lispworks.sh, which launches the real LispWorks
+;;;; IDE executable this way -- NOT lw-console, so you get the full
+;;;; interactive environment with listener/editor/inspector -- and sets
+;;;; the ATARI800_CL_ASM_FILE environment variable this file reads below
+;;;; to know which .asm file to build and run).
 ;;;;
 ;;;; `-init` REPLACES the normal ~/.lispworks load, so step 1 below loads
 ;;;; the user's own init file explicitly (Quicklisp + local-projects setup)
@@ -18,7 +20,7 @@
 ;;;;     top-level forms (see the note above STEP 2 below for why this
 ;;;;     ordering matters)
 ;;;;   - build minimal-xl/minimal_os.rom via `make` if it isn't there yet
-;;;;   - assemble asm/edvent02.asm with MADS via scripts/mads-build.sh
+;;;;   - assemble $ATARI800_CL_ASM_FILE with MADS via scripts/mads-build.sh
 ;;;;   - build an atari-machine cold-reset against the minimal-xl OS ROM
 ;;;;     (no BASIC ROM -- minimal-xl is a complete OS replacement)
 ;;;;   - load the assembled XEX onto the bus and park the CPU at its entry
@@ -53,6 +55,12 @@
 (defparameter *root*
   (uiop:pathname-parent-directory-pathname
    (uiop:pathname-directory-pathname *load-truename*)))
+
+(defparameter *asm-file*
+  (let ((v (lispworks:environment-variable "ATARI800_CL_ASM_FILE")))
+    (unless (and v (plusp (length v)))
+      (error "ATARI800_CL_ASM_FILE is not set -- run this via scripts/run-asm-lispworks.sh <path/to/file.asm>, not -init directly."))
+    (pathname v)))
 
 ;; 2.  Load :atari800-cl and the XEX loader as their OWN top-level forms,
 ;;     executed here.  `-init` LOADs this file, which reads and evaluates
@@ -102,35 +110,39 @@
       (error "minimal-xl OS ROM still missing after build: ~A" rom))
     rom))
 
-(defun assemble-edvent02 (root)
-  "Assemble asm/edvent02.asm to asm/build/edvent02.xex with MADS via
-scripts/mads-build.sh, so listing/label output and error handling stay
-consistent with the rest of the project's asm workflow."
-  (let* ((src (merge-pathnames #P"asm/edvent02.asm" root))
-         (xex (merge-pathnames #P"asm/build/edvent02.xex" root))
-         (builder (merge-pathnames #P"scripts/mads-build.sh" root)))
+(defun assemble-program (asm-path)
+  "Assemble ASM-PATH to <its-directory>/build/<stem>.xex with MADS via
+scripts/mads-build.sh (which owns that build/<stem>.xex output-path
+convention), so listing/label output and error handling stay consistent
+with the rest of the project's asm workflow."
+  (let* ((src (truename asm-path))
+         (xex (merge-pathnames
+               (make-pathname :directory '(:relative "build")
+                              :name (pathname-name src) :type "xex")
+               src))
+         (builder (merge-pathnames #P"scripts/mads-build.sh" *root*)))
     (format t "~&==> assembling ~A~%" src)
     (run-program-or-die (list (namestring builder) (namestring src)) "mads-build.sh")
     (unless (probe-file xex)
       (error "expected XEX not found after build: ~A" xex))
     xex))
 
-(defun start-edvent02 ()
+(defun start-program ()
   (let* ((root *root*)
          (os-rom (build-minimal-xl-os root))
-         (xex    (assemble-edvent02 root)))
+         (xex    (assemble-program *asm-file*)))
 
     (setf *machine* (atari800-cl:make-machine :os-rom os-rom))
 
     ;; Let the minimal-xl OS's own RESET routine run for a few frames before
-    ;; we hijack the CPU.  edvent02.asm only points SDLSTL at its own
-    ;; display list and never touches DMACTL itself -- it assumes, like any
+    ;; we hijack the CPU.  A program that only points SDLSTL at its own
+    ;; display list (never touching DMACTL itself) assumes, like any
     ;; program run from a normal Atari boot, that the OS has already turned
     ;; playfield DMA on (minimal_os.asm sets SDMCTL/DMACTL early in RESET,
     ;; well within one frame, long before its CIO/disk-boot code runs).
     ;; Skip this and DMACTL stays at its post-reset $00 (DMA off): ANTIC
     ;; never fetches any display list and the screen just shows background
-    ;; color forever, however correct the rest of edvent02's state is.
+    ;; color forever, however correct the rest of the program's state is.
     (dotimes (i 5)
       (atari800-cl.machine:machine-run-frame *machine*))
 
@@ -149,15 +161,16 @@ consistent with the rest of the project's asm workflow."
       ;; stage -- which copies SDLSTL into the real DLISTL/DLISTH hardware
       ;; registers every frame -- explicitly skips itself whenever either
       ;; is set ("skipped when CRITIC is set or the interrupted code had
-      ;; IRQs disabled").  Left stuck, edvent02's SDLSTL write would never
-      ;; reach ANTIC: RTCLOK keeps ticking (the immediate stage is
-      ;; unconditional) but the display list never changes, so the screen
-      ;; stays on the OS's own boot banner forever.  Clear both, matching
-      ;; the idle state a real boot reaches once it gives up on SIO.
+      ;; IRQs disabled").  Left stuck, a display-list write from the loaded
+      ;; program would never reach ANTIC: RTCLOK keeps ticking (the
+      ;; immediate stage is unconditional) but the display list never
+      ;; changes, so the screen stays on the OS's own boot banner forever.
+      ;; Clear both, matching the idle state a real boot reaches once it
+      ;; gives up on SIO.
       (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-i+)
       (atari800-cl.bus:bus-write (atari800-cl.machine:atari-machine-bus *machine*)
                                   #x0042 0)
-      (format t "~&==> edvent02 loaded, entry $~4,'0X~%" entry))
+      (format t "~&==> ~A loaded, entry $~4,'0X~%" (file-namestring *asm-file*) entry))
 
     ;; START-MACHINE spawns the run-loop thread but leaves the machine
     ;; PAUSED (RUNNING-P NIL) -- it's normally a protocol client's RESUME
@@ -174,23 +187,23 @@ consistent with the rest of the project's asm workflow."
     (setf *aesp-server* (atari800-cl:start-aesp-server *machine*))
     (setf *cli-server* (atari800-cl:start-cli-socket *machine*))
 
-    (format t "~&=== atari800-cl running EdVenture video 2 (LispWorks IDE) ===~%")
+    (format t "~&=== atari800-cl running ~A (LispWorks IDE) ===~%" (file-namestring *asm-file*))
     (format t "AESP control: 127.0.0.1:47800~%")
     (format t "AESP video:   127.0.0.1:47801~%")
     (format t "AESP audio:   127.0.0.1:47802~%")
     (format t "CLI socket:   ~A~%"
             (atari800-cl.cli-socket:cli-server-path *cli-server*))
     (format t "~&Type (atari800-cl-launch:stop-all) to shut down.~%")
-    ;; Machine-readable sentinel: scripts/run-edvent02-lispworks.sh polls the
+    ;; Machine-readable sentinel: scripts/run-asm-lispworks.sh polls the
     ;; log for this exact line to know when it's safe to take a screenshot
     ;; and print the Attic launch instructions.
-    (format t "~&EDVENT02_READY~%")
+    (format t "~&PROGRAM_READY~%")
     (force-output)))
 
-(defun start-edvent02/safe ()
-  (handler-case (start-edvent02)
+(defun start-program/safe ()
+  (handler-case (start-program)
     (error (c)
-      (format *error-output* "~&fatal: edvent02 bring-up failed: ~A~%" c)
+      (format *error-output* "~&fatal: program bring-up failed: ~A~%" c)
       (force-output *error-output*))))
 
 ;; 4.  -init runs before the IDE has started multiprocessing (env:start-
@@ -198,9 +211,9 @@ consistent with the rest of the project's asm workflow."
 ;;     signal "Cannot create processes before multiprocessing is
 ;;     initialized" if called directly here.  Per the LispWorks manual's
 ;;     own recipe for this exact situation, push a process spec onto
-;;     MP:*INITIAL-PROCESSES* instead of calling start-edvent02/safe now --
+;;     MP:*INITIAL-PROCESSES* instead of calling start-program/safe now --
 ;;     the IDE's own startup calls MP:INITIALIZE-MULTIPROCESSING shortly
 ;;     after -init finishes, which spawns everything on *INITIAL-PROCESSES*
 ;;     once multiprocessing is actually available.
-(push (list "edvent02-bringup" nil #'start-edvent02/safe)
+(push (list "program-bringup" nil #'start-program/safe)
       mp:*initial-processes*)
