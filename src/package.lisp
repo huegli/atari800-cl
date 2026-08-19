@@ -550,8 +550,8 @@
            #:+aesp-status+ #:+aesp-info+ #:+aesp-ack+ #:+aesp-error+
            #:+aesp-key-down+ #:+aesp-key-up+ #:+aesp-joystick+
            #:+aesp-console-keys+ #:+aesp-paddle+
+           #:+aesp-frame-raw+
            #:+aesp-frame-config+ #:+aesp-video-subscribe+ #:+aesp-video-unsubscribe+
-           #:+aesp-video-frame+
            #:+aesp-audio-pcm+
            #:+aesp-audio-config+ #:+aesp-audio-subscribe+ #:+aesp-audio-unsubscribe+
            #:+aesp-err-server-busy+ #:+aesp-err-not-implemented+

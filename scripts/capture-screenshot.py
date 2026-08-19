@@ -2,15 +2,14 @@
 """Capture a single screenshot from a running atari800-cl AESP server.
 
 The AESP server (started by scripts/atari-run.sh or scripts/record.sh)
-pushes one VIDEO_FRAME message per emulated NTSC frame to every client
-connected to its video port.  Each frame is:
+pushes one FRAME_RAW message per emulated NTSC frame to every client
+connected to its video port.  Each frame is exactly 384 * 240 * 4 bytes
+of BGRA8888 pixel data (row-major, top scanline first, no padding, no
+frame-number prefix -- see docs/PROTOCOL.md in the Attic project).
 
-    payload[0:4]   -- big-endian u32 frame number
-    payload[4:]    -- 384 * 240 * 3 bytes of 24-bit RGB pixel data
-                      (row-major, top scanline first, no padding)
-
-This script connects to the video port, reads the first VIDEO_FRAME,
-and writes it to a PNG (via Pillow if available) or a PPM (no deps).
+This script connects to the video port, reads the first FRAME_RAW, converts
+it to RGB, and writes it to a PNG (via Pillow if available) or a PPM (no
+deps).
 
 Usage:
     ./scripts/capture-screenshot.py [-o OUTFILE] [-H HOST]
@@ -43,17 +42,16 @@ import aesp_client as aesp
 
 
 def capture_frame(host: str, video_port: int, timeout: float,
-                  skip: int, expected_bytes: int) -> tuple[int, bytes]:
-    """Connect to the video port and read until the (skip+1)th VIDEO_FRAME.
+                  skip: int, expected_bytes: int) -> bytes:
+    """Connect to the video port and read until the (skip+1)th FRAME_RAW.
 
-    Returns (frame_number, rgb_bytes).  Non-frame messages are ignored.
+    Returns its BGRA payload.  Non-frame messages are ignored.
     """
     with socket.create_connection((host, video_port), timeout=timeout) as s:
         s.settimeout(timeout)
         for skipped in range(skip):
-            frame_no, _ = aesp.read_video_frame(s, expected_bytes)
-            print(f"  frame {frame_no} skipped ({skipped + 1}/{skip})",
-                  file=sys.stderr)
+            aesp.read_video_frame(s, expected_bytes)
+            print(f"  frame skipped ({skipped + 1}/{skip})", file=sys.stderr)
         return aesp.read_video_frame(s, expected_bytes)
 
 
@@ -83,27 +81,27 @@ def main(argv: list[str] | None = None) -> int:
 
     width, height, bpp = aesp.resolve_video_geometry(
         args.host, args.control_port, args.timeout, not args.no_control)
-    if bpp != 24:
-        print(f"error: unsupported bpp {bpp} (only 24-bit RGB supported)",
+    if bpp != 4:
+        print(f"error: unsupported bytes-per-pixel {bpp} (only BGRA32 supported)",
               file=sys.stderr)
         return 2
 
-    expected = width * height * 3
+    expected = width * height * bpp
     print(f"connecting to video port {args.host}:{args.video_port} "
-          f"(expecting {expected} RGB bytes/frame)")
+          f"(expecting {expected} BGRA bytes/frame)")
 
     try:
-        frame_no, rgb = capture_frame(
+        bgra = capture_frame(
             args.host, args.video_port, args.timeout,
             skip=args.frames - 1, expected_bytes=expected)
     except (OSError, aesp.AESPError) as e:
         print(f"error: capture failed: {e}", file=sys.stderr)
         return 1
 
-    print(f"captured frame #{frame_no} ({len(rgb)} bytes)")
+    print(f"captured frame ({len(bgra)} bytes)")
 
     try:
-        written = aesp.write_image(Path(args.out), width, height, rgb,
+        written = aesp.write_image(Path(args.out), width, height, bgra,
                                    args.format)
     except (OSError, RuntimeError) as e:
         print(f"error: write failed: {e}", file=sys.stderr)

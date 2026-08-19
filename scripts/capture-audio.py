@@ -12,8 +12,8 @@ and it switches on at the end of the frame during which this script
 connects, so the first push arrives one frame later.  That means the
 capture always starts on a frame boundary with no partial buffer.
 
-Frames pair 1:1 with the video port's VIDEO_FRAME messages -- the Nth
-AUDIO_PCM describes the same frame as the Nth VIDEO_FRAME -- which is
+Frames pair 1:1 with the video port's FRAME_RAW messages -- the Nth
+AUDIO_PCM describes the same frame as the Nth FRAME_RAW -- which is
 what lets scripts/record.sh mux the two streams without timestamps.
 
 Usage:

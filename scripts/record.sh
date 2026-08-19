@@ -17,7 +17,7 @@
 # assemble command is printed, so nothing is lost.
 #
 # A/V sync: the video and audio ports are pushed from the same post-frame
-# hook, so the Nth AUDIO_PCM belongs to the Nth VIDEO_FRAME.  The two
+# hook, so the Nth AUDIO_PCM belongs to the Nth FRAME_RAW.  The two
 # capture processes connect a moment apart, though, and audio synthesis
 # only attaches at the end of the frame during which the audio client
 # connects — expect the streams to be offset by a frame or two (~30 ms),

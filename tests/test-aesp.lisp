@@ -181,13 +181,16 @@ the machine to running."
                        (flexi-streams:octets-to-string pl :external-format :utf-8))))))
 
 (test aesp-server-subscribe-replies-config
-  "VIDEO_SUBSCRIBE returns FRAME_CONFIG (384,240,24,60); AUDIO_SUBSCRIBE
-returns AUDIO_CONFIG (44744,8,1) — the synthesiser's real rate, $0000AEC8,
-not the 44,100 declared before there were samples to describe."
+  "VIDEO_SUBSCRIBE returns FRAME_CONFIG (336,240,4,60) -- the cropped
+width FRAME_RAW actually sends (Attic-compatible, not the renderer's
+internal 384; see +AESP-FRAME-RAW-WIDTH+); byte 4 is bytes per pixel,
+matching FRAME_RAW's BGRA8888 wire format.  AUDIO_SUBSCRIBE returns
+AUDIO_CONFIG (44744,8,1) -- the synthesiser's real rate, $0000AEC8, not
+the 44,100 declared before there were samples to describe."
   (with-aesp-server (m srv s)
     (multiple-value-bind (ty pl) (%aesp-request s atari800-cl.aesp:+aesp-video-subscribe+)
       (is (= atari800-cl.aesp:+aesp-frame-config+ ty))
-      (is (equalp (%octets #x01 #x80 #x00 #xF0 #x18 #x3C) pl)))
+      (is (equalp (%octets #x01 #x50 #x00 #xF0 #x04 #x3C) pl)))
     (multiple-value-bind (ty pl) (%aesp-request s atari800-cl.aesp:+aesp-audio-subscribe+)
       (is (= atari800-cl.aesp:+aesp-audio-config+ ty))
       (is (equalp (%octets #x00 #x00 #xAE #xC8 #x08 #x01) pl))

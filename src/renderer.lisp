@@ -191,25 +191,39 @@ hoisted out of the loop."
   "Return the 8-bit glyph pattern for one row of a character.
 CHBASE is the ANTIC register value (character set base address >> 8).
 CHAR-CODE is the raw byte from screen memory.
-SCAN-Y is the 0-based row within the current mode line.
+SCAN-Y is the 0-based row within the current mode line (0..7 for modes
+2/4/6; 0..9 for mode 3; 0..15 for modes 5/7 -- see MODE-LINE-SCANLINES).
 MODE is the ANTIC mode nibble (2-7).
 
-Modes 2/3: 64-character set; bits 6-7 of char-code are attribute flags,
-not part of the character index.  Glyph address:
-  chbase*256 + (char-code & 0x3F)*8 + (scan-y mod 8).
+Modes 2/3/6/7: 64-character set; bits 6-7 of char-code are attribute
+flags (inverse/blink for 2/3; on-color select for 6/7), not part of the
+character index.  Glyph address: chbase*256 + (char-code & 0x3F)*8 + row.
 
-Modes 4/5: same 64-char layout but the upper 2 bits select color.
+Modes 4/5: 128-character set -- only bit 7 is special (it swaps which
+color register a glyph's \"11\" pixel-pairs use; see
+%RENDER-MULTICOLOR-CHAR-MODE), so the glyph index keeps bit 6.  Glyph
+address: chbase*256 + (char-code & 0x7F)*8 + row.  Source: Compute!'s
+First Book of Atari Graphics ch.3, \"The Four-Color Character Modes\".
 
-Modes 6/7: 64 wide characters, glyph row at mod 8 of scan-y."
+Modes 5/7 are double-height (16 real scanlines per mode line, per
+MODE-LINE-SCANLINES) but the character ROM only has 8 rows per glyph:
+each glyph row is stretched across 2 scanlines (row = SCAN-Y/2), not
+repeated over 8-then-8 (which would draw the same 8 rows twice and,
+for text, produce two visible copies of every line)."
   (declare (type (unsigned-byte 8) chbase char-code scan-y mode)
            (type bus bus))
-  (let* ((char-idx (ldb (byte 6 0) char-code))
-         (row-y    (ldb (byte 3 0) scan-y))
+  (let* ((wide-glyph-p     (or (= mode 4) (= mode 5)))
+         (double-height-p  (or (= mode 5) (= mode 7)))
+         (char-idx (if wide-glyph-p
+                       (ldb (byte 7 0) char-code)
+                       (ldb (byte 6 0) char-code)))
+         (row-y    (if double-height-p
+                       (ldb (byte 3 0) (ash scan-y -1))
+                       (ldb (byte 3 0) scan-y)))
          (addr     (ldb (byte 16 0)
                         (+ (* (the fixnum chbase) 256)
                            (* char-idx 8)
                            row-y))))
-    (declare (ignore mode))
     (atari800-cl.bus:bus-read bus addr)))
 
 ;;; ---------------------------------------------------------------------------
@@ -217,15 +231,17 @@ Modes 6/7: 64 wide characters, glyph row at mod 8 of scan-y."
 
 (defun %render-char-mode (fb pf-base screen-ptr scan-y mode gtia-wr bus chbase
                           &optional tags)
-  "Render character modes 2-7 into PF-BASE columns of FB.
-Produces 320 output pixels (modes 2-5: 40 chars × 8px; modes 6-7: 20 chars × 16px).
+  "Render single-color-per-character modes 2/3/6/7 into PF-BASE columns
+of FB.  (Modes 4/5 are true 2-bits-per-pixel and go through
+%RENDER-MULTICOLOR-CHAR-MODE instead -- see that function.)  Produces
+320 output pixels (modes 2/3: 40 chars x 8px; modes 6/7: 20 chars x 16px).
 When TAGS (the GTIA's PF-TAG-ROW) is non-NIL, also record each output
 column's playfield source tag for P/M priority arbitration.
 
 A character row has at most two colors — the glyph-on color and the
 glyph-off color — both fixed per character: modes 2/3 pick them from
 the character's attribute bits (bit 7 inverse video swaps them, bit 6
-selects COLPF1), modes 4-7 pick the on-color from the character's top
+selects COLPF1), modes 6/7 pick the on-color from the character's top
 two bits (COLPF0-3) with COLBK off.  Both RGB triples are therefore
 resolved ONCE per character, and the 8-bit glyph loop only stores raw
 bytes.  (The previous version dispatched on the mode and did three
@@ -298,6 +314,62 @@ implementations.)"
               (when tags (setf (aref tags tx) tag))
               (incf p 3)
               (incf tx))))))))
+
+(defun %render-multicolor-char-mode (fb pf-base screen-ptr scan-y mode gtia-wr
+                                     bus chbase &optional tags)
+  "Render ANTIC's four-color character modes 4/5 into PF-BASE columns of FB.
+
+Unlike modes 2/3/6/7 (one on/off color pair per whole character; see
+%RENDER-CHAR-MODE), modes 4/5 read each glyph byte as four 2-bit pixel
+pairs, MSB first: 00 -> COLBK, 01 -> COLPF0, 10 -> COLPF1, 11 -> COLPF2,
+or COLPF3 instead of COLPF2 when the character code's bit 7 is set.
+(Source: Compute!'s First Book of Atari Graphics ch.3, \"The Four-Color
+Character Modes\".)  Each 2-bit pixel is 2 output columns wide, so 4
+pixels x 2 = 8 columns per character; these modes are always the
+40-character-wide layout (never the mode 6/7 \"wide\" 16px/char one).
+When TAGS (the GTIA's PF-TAG-ROW) is non-NIL, also record each output
+column's playfield source tag for P/M priority arbitration."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb gtia-wr)
+           (type fixnum pf-base scan-y)
+           (type (unsigned-byte 16) screen-ptr)
+           (type (unsigned-byte 8) mode chbase)
+           (type bus bus)
+           (type (or null (simple-array (unsigned-byte 8) (384))) tags))
+  (let ((colbk  (aref gtia-wr +w-colbk+))
+        (colpf0 (aref gtia-wr +w-colpf0+))
+        (colpf1 (aref gtia-wr (+ +w-colpf0+ 1)))
+        (colpf2 (aref gtia-wr (+ +w-colpf0+ 2)))
+        (colpf3 (aref gtia-wr (+ +w-colpf0+ 3))))
+    (dotimes (cx 40)
+      (let* ((ch       (atari800-cl.bus:bus-read
+                        bus (ldb (byte 16 0) (+ screen-ptr cx))))
+             (bits     (%char-row-bits bus chbase ch (ldb (byte 8 0) scan-y) mode))
+             ;; Bit 7 of the character code swaps which register the
+             ;; "11" pixel-pairs use -- this is NOT the mode 2/3 style
+             ;; whole-character inverse video.
+             (hi3-color (if (logbitp 7 ch) colpf3 colpf2))
+             (hi3-tag   (if (logbitp 7 ch) +tag-pf3+ +tag-pf2+))
+             (p        (+ pf-base (* cx 8 3)))
+             (tx       (+ +playfield-left-border+ (* cx 8))))
+        (declare (type fixnum p tx))
+        (dotimes (px 4)
+          (multiple-value-bind (color tag)
+              (case (ldb (byte 2 (- 6 (* px 2))) bits)
+                (0 (values colbk  +tag-bak+))
+                (1 (values colpf0 +tag-pf0+))
+                (2 (values colpf1 +tag-pf1+))
+                (t (values hi3-color hi3-tag)))
+            (let ((r (atari-color->r color))
+                  (g (atari-color->g color))
+                  (b (atari-color->b color)))
+              ;; Each 2-bit pixel covers 2 output columns.
+              (dotimes (rep 2)
+                (setf (aref fb p)       r
+                      (aref fb (+ p 1)) g
+                      (aref fb (+ p 2)) b)
+                (when tags (setf (aref tags tx) tag))
+                (incf p 3)
+                (incf tx)))))))))
 
 (defun %render-bitmap-mode (fb pf-base screen-ptr mode gtia-wr bus
                             &optional tags)
@@ -674,6 +746,8 @@ taken at the start of the scanline before any end-of-line advancement)."
                    colbk)
        (let ((gtia-mode (ldb (byte 2 6) prior)))
          (cond
+           ((or (= mode 4) (= mode 5))
+            (%render-multicolor-char-mode fb pf-base sptr scan-y mode wr bus chbase tags))
            ((<= mode 7)
             (%render-char-mode fb pf-base sptr scan-y mode wr bus chbase tags))
            ;; GTIA color modes reinterpret an ANTIC mode-F fetch.

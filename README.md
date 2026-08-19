@@ -430,8 +430,8 @@ through to its BASIC prompt entirely from the REPL:
 
 The emulator runs headless: it opens no window and plays no sound
 itself.  The built-in pixel renderer paints a 384x240 RGB framebuffer
-each frame, which AESP video subscribers receive as `VIDEO_FRAME`
-pushes, and POKEY synthesises mono 8-bit PCM which audio subscribers
+each frame, converted to BGRA8888 and pushed to AESP video subscribers
+as `FRAME_RAW`, and POKEY synthesises mono 8-bit PCM which audio subscribers
 receive as `AUDIO_PCM` pushes.  In-process, attach synthesis with
 `a800:machine-attach-audio` and collect samples with
 `a800:machine-audio-drain` after each frame; to capture from outside,
@@ -518,12 +518,13 @@ to the machine's command mailbox and executed on the emulator thread.
 -- followed by the payload.  The MVP control surface: `PING`->`PONG`;
 `PAUSE`/`RESUME`/`RESET`->`ACK`; `STATUS`/`INFO`; the input events
 `KEY_DOWN`/`KEY_UP`/`JOYSTICK`/`CONSOLE_KEYS`/`PADDLE`->`ACK`;
-`VIDEO_SUBSCRIBE`->`FRAME_CONFIG` followed by per-frame `VIDEO_FRAME`
-pushes of the rendered 384x240 RGB framebuffer, and
+`VIDEO_SUBSCRIBE`->`FRAME_CONFIG` followed by per-frame `FRAME_RAW`
+pushes of the rendered 384x240 framebuffer as BGRA8888 (converted from
+the renderer's internal 24-bit RGB), and
 `AUDIO_SUBSCRIBE`->`AUDIO_CONFIG` (44 744 Hz, 8-bit, mono) followed by
 per-frame `AUDIO_PCM` pushes of 746-747 raw mono samples to audio-port
 clients; any other type -> `ERROR`.  The Nth `AUDIO_PCM` pairs with the
-Nth `VIDEO_FRAME` -- both are pushed from the same post-frame hook, so
+Nth `FRAME_RAW` -- both are pushed from the same post-frame hook, so
 A/V capture needs no timestamps.  Synthesis runs only while an audio
 client is connected.
 

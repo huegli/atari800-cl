@@ -3,6 +3,36 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## AESP video push: fix FRAME_RAW to match the Attic protocol spec
+
+The AESP video-port push had drifted from the Attic project's
+`docs/PROTOCOL.md` on three points at once: it used message type `0x65`
+("VIDEO_FRAME") where the spec defines `FRAME_RAW` at `0x60`; it sent the
+renderer's native 24-bit RGB pixel data where the spec requires BGRA8888;
+and it prefixed the payload with a 4-byte frame number the spec doesn't
+have. A real Attic client (AtticGUI) connecting to an atari800-cl server
+therefore failed immediately with "Unknown message type: 0x65" -- this
+project's own `tools/protocol-comparison/protocol_spec.py` already had
+the correct values (`FRAME_RAW: 0x60`), so the drift was isolated to
+`src/aesp.lisp`'s implementation, not a spec ambiguity.
+
+`src/aesp.lisp` now sends `+aesp-frame-raw+` (`0x60`) with a `%rgb24->bgra32`
+conversion of the framebuffer applied at the push boundary only -- the
+renderer's internal representation is untouched, so nothing outside
+`%push-video-frame` needed to change. `%frame-config-payload`'s byte 4 now
+reports `4` (bytes per pixel) instead of `24` (bits), matching
+`FRAME_CONFIG`'s spec'd `bytes-per-pixel` field and what `FRAME_RAW` now
+actually sends. `scripts/aesp_client.py` and the `capture-*.py` tools were
+updated to match: `read_video_frame` returns the raw BGRA payload (no more
+frame-number unpacking), and `write_image`/`write_png`/`write_ppm` convert
+BGRA to RGB before writing, so screenshot/video output is unchanged
+(3-byte RGB PNG/PPM) even though the wire format is now BGRA. Both
+`atari800-cl` and Attic (`AtticGUI`) can now display the same running
+emulator's frames.
+
+Verified on this machine: 2080 pass, 1 skip (Tom Harte, no checkout
+here), 0 fail, both SBCL and LispWorks.
+
 ## ROADMAP Phase 21 -- Strict test gate + skip census
 
 Three tests skip gracefully when an asset they need is absent (the Klaus

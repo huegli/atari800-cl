@@ -27,23 +27,27 @@ AESP_MAGIC = 0xAE50
 AESP_VERSION = 1
 AESP_HEADER_SIZE = 8
 
-# Message types (src/aesp.lisp).
+# Message types (src/aesp.lisp; matches the Attic project's
+# docs/PROTOCOL.md and tools/protocol-comparison/protocol_spec.py).
 MSG_PING = 0x00
 MSG_PONG = 0x01
 MSG_ACK = 0x0F
 MSG_ERROR = 0x3F
+MSG_FRAME_RAW = 0x60
 MSG_FRAME_CONFIG = 0x62
 MSG_VIDEO_SUBSCRIBE = 0x63
-MSG_VIDEO_FRAME = 0x65
 MSG_AUDIO_PCM = 0x80
 MSG_AUDIO_CONFIG = 0x81
 MSG_AUDIO_SUBSCRIBE = 0x83
 
 # Defaults matching src/aesp.lisp's %FRAME-CONFIG-PAYLOAD and
 # %AUDIO-CONFIG-PAYLOAD, used when the control-port exchange is skipped.
-DEFAULT_WIDTH = 384
+# FRAME_RAW is cropped to the Attic project's 336-pixel visible width
+# (see +AESP-FRAME-RAW-WIDTH+ in src/aesp.lisp) -- these are only the
+# fallback used when --no-control skips the FRAME_CONFIG exchange.
+DEFAULT_WIDTH = 336
 DEFAULT_HEIGHT = 240
-DEFAULT_BPP = 24
+DEFAULT_BYTES_PER_PIXEL = 4  # BGRA8888
 DEFAULT_SAMPLE_RATE = 44744
 DEFAULT_BITS = 8
 DEFAULT_CHANNELS = 1
@@ -101,10 +105,11 @@ def read_message(sock: socket.socket) -> tuple[int, bytes]:
 
 def fetch_frame_config(host: str, control_port: int,
                        timeout: float) -> tuple[int, int, int]:
-    """Send VIDEO_SUBSCRIBE on the control port; return (width, height, bpp).
+    """Send VIDEO_SUBSCRIBE on the control port; return (width, height,
+    bytes_per_pixel).
 
-    The server replies with FRAME_CONFIG: width(u16) height(u16) bpp(u8)
-    fps(u8).  Raises AESPError on an unexpected reply.
+    The server replies with FRAME_CONFIG: width(u16) height(u16)
+    bytes-per-pixel(u8) fps(u8).  Raises AESPError on an unexpected reply.
     """
     with socket.create_connection((host, control_port), timeout=timeout) as s:
         s.settimeout(timeout)
@@ -145,47 +150,44 @@ def resolve_video_geometry(host: str, control_port: int, timeout: float,
                            use_control: bool) -> tuple[int, int, int]:
     """Geometry from the server, falling back to the built-in defaults.
 
-    A failed exchange warns and falls back rather than aborting: the video
-    port pushes frames to every connection regardless of subscription, so
-    a capture can still succeed without the control port.
+    Returns (width, height, bytes_per_pixel).  A failed exchange warns and
+    falls back rather than aborting: the video port pushes frames to every
+    connection regardless of subscription, so a capture can still succeed
+    without the control port.
     """
     if not use_control:
-        return DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_BPP
+        return DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_BYTES_PER_PIXEL
     try:
         width, height, bpp = fetch_frame_config(host, control_port, timeout)
-        print(f"FRAME_CONFIG: {width}x{height} {bpp}bpp", file=sys.stderr)
+        print(f"FRAME_CONFIG: {width}x{height} {bpp} bytes/pixel", file=sys.stderr)
         return width, height, bpp
     except (OSError, AESPError) as e:
         print(f"warning: FRAME_CONFIG fetch failed ({e}); using default "
               f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}", file=sys.stderr)
-        return DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_BPP
+        return DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_BYTES_PER_PIXEL
 
 
 # ---------------------------------------------------------------------------
 # Frame readers
 
 
-def read_video_frame(sock: socket.socket, expected_bytes: int) -> tuple[int, bytes]:
-    """Read messages until one VIDEO_FRAME arrives; return (frame_no, rgb).
+def read_video_frame(sock: socket.socket, expected_bytes: int) -> bytes:
+    """Read messages until one FRAME_RAW arrives; return its BGRA payload.
 
-    The payload is a big-endian u32 frame number followed by
-    width*height*3 bytes of RGB, top scanline first.
+    The payload is exactly width*height*4 bytes of BGRA8888, row-major, top
+    scanline first -- no frame-number prefix (see docs/PROTOCOL.md in the
+    Attic project).  EXPECTED_BYTES is width*height*4.
     """
     while True:
         msg_type, payload = read_message(sock)
-        if msg_type != MSG_VIDEO_FRAME:
+        if msg_type != MSG_FRAME_RAW:
             print(f"  (ignoring non-frame message 0x{msg_type:02X})",
                   file=sys.stderr)
             continue
-        if len(payload) < 4:
-            raise AESPError("VIDEO_FRAME payload shorter than 4 bytes")
-        frame_no = struct.unpack(">I", payload[:4])[0]
-        rgb = payload[4:]
-        if len(rgb) != expected_bytes:
+        if len(payload) != expected_bytes:
             raise AESPError(
-                f"frame {frame_no}: expected {expected_bytes} RGB bytes, "
-                f"got {len(rgb)}")
-        return frame_no, rgb
+                f"expected {expected_bytes} BGRA bytes, got {len(payload)}")
+        return payload
 
 
 def read_audio_pcm(sock: socket.socket) -> bytes:
@@ -216,6 +218,21 @@ def have_pillow() -> bool:
         return False
 
 
+def bgra_to_rgb(bgra: bytes) -> bytes:
+    """Drop the alpha byte and swap B/R: BGRA8888 -> RGB (3 bytes/pixel).
+
+    Pure Python via bytearray slice assignment (C-implemented, no per-pixel
+    loop) so this has no Pillow/numpy dependency -- needed for the PPM
+    fallback path, and used unconditionally so write_png/write_ppm both take
+    plain RGB.
+    """
+    rgb = bytearray(len(bgra) // 4 * 3)
+    rgb[0::3] = bgra[2::4]  # R
+    rgb[1::3] = bgra[1::4]  # G
+    rgb[2::3] = bgra[0::4]  # B
+    return bytes(rgb)
+
+
 def write_png(path: Path, width: int, height: int, rgb: bytes) -> None:
     """Write RGB as a PNG.  Requires Pillow."""
     try:
@@ -232,9 +249,10 @@ def write_ppm(path: Path, width: int, height: int, rgb: bytes) -> None:
         f.write(rgb)
 
 
-def write_image(path: Path, width: int, height: int, rgb: bytes,
+def write_image(path: Path, width: int, height: int, bgra: bytes,
                 fmt: str = "auto") -> Path:
-    """Write RGB to PATH; return the path actually written.
+    """Convert BGRA (the FRAME_RAW wire format) to RGB and write it to
+    PATH; return the path actually written.
 
     "auto" picks PNG when Pillow is installed and PPM otherwise, except
     that an explicit .ppm suffix always means PPM.  When PNG was asked
@@ -243,6 +261,7 @@ def write_image(path: Path, width: int, height: int, rgb: bytes,
     convention scripts/atari-run.sh and minimal-xl/run.sh expect.  An
     explicit fmt="png" without Pillow raises instead of falling back.
     """
+    rgb = bgra_to_rgb(bgra)
     if fmt == "auto":
         fmt = "ppm" if path.suffix.lower() == ".ppm" or not have_pillow() else "png"
     if fmt == "png":

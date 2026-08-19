@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture N frames of video from a running atari800-cl AESP server.
 
-Connects to the AESP video port and writes every VIDEO_FRAME it receives
+Connects to the AESP video port and writes every FRAME_RAW it receives
 as a numbered image in a directory: frame00001.png, frame00002.png, ...
 — the layout ffmpeg's `-i frame%05d.png` pattern expects, which is how
 scripts/record.sh turns a capture into an mp4.
@@ -20,11 +20,11 @@ DIR=frames, frames=60 (one second of NTSC video), TIMEOUT=10.
 
 Prints one line per completed capture run:
 
-    VIDEO_CAPTURE dir=<dir> pattern=<prefix>%05d.<ext> frames=<n> first=<frame-no>
+    VIDEO_CAPTURE dir=<dir> pattern=<prefix>%05d.<ext> frames=<n>
 
 so a calling script can pick up the pattern without guessing.  The frame
-numbers in the filenames are capture-relative (1..N); the emulator's own
-frame counter for the first captured frame is reported as `first=`.
+numbers in the filenames are capture-relative (1..N) -- FRAME_RAW carries
+no frame number of its own (see docs/PROTOCOL.md in the Attic project).
 
 Frames pair 1:1 with the audio port's AUDIO_PCM messages — both are
 pushed from the same post-frame hook — so a video and an audio capture
@@ -45,30 +45,27 @@ import aesp_client as aesp
 
 
 def capture_frames(host: str, video_port: int, timeout: float, frames: int,
-                   width: int, height: int, out_dir: Path, prefix: str,
-                   fmt: str) -> tuple[int, int, str]:
+                   width: int, height: int, bytes_per_pixel: int,
+                   out_dir: Path, prefix: str, fmt: str) -> tuple[int, str]:
     """Capture FRAMES frames into OUT_DIR.
 
-    Returns (count_written, first_emulator_frame_number, extension).
+    Returns (count_written, extension).
     """
-    expected = width * height * 3
+    expected = width * height * bytes_per_pixel
     out_dir.mkdir(parents=True, exist_ok=True)
-    first_frame_no = -1
     ext = "png"
     written = 0
     with socket.create_connection((host, video_port), timeout=timeout) as s:
         s.settimeout(timeout)
         while written < frames:
-            frame_no, rgb = aesp.read_video_frame(s, expected)
-            if first_frame_no < 0:
-                first_frame_no = frame_no
+            bgra = aesp.read_video_frame(s, expected)
             path = out_dir / f"{prefix}{written + 1:05d}.png"
-            actual = aesp.write_image(path, width, height, rgb, fmt)
+            actual = aesp.write_image(path, width, height, bgra, fmt)
             ext = actual.suffix.lstrip(".")
             written += 1
             if written % 60 == 0 or written == frames:
                 print(f"  {written}/{frames} frames", file=sys.stderr)
-    return written, first_frame_no, ext
+    return written, ext
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,8 +97,8 @@ def main(argv: list[str] | None = None) -> int:
 
     width, height, bpp = aesp.resolve_video_geometry(
         args.host, args.control_port, args.timeout, not args.no_control)
-    if bpp != 24:
-        print(f"error: unsupported bpp {bpp} (only 24-bit RGB supported)",
+    if bpp != 4:
+        print(f"error: unsupported bytes-per-pixel {bpp} (only BGRA32 supported)",
               file=sys.stderr)
         return 2
 
@@ -110,15 +107,15 @@ def main(argv: list[str] | None = None) -> int:
           f"into {out_dir}/", file=sys.stderr)
 
     try:
-        written, first, ext = capture_frames(
+        written, ext = capture_frames(
             args.host, args.video_port, args.timeout, args.frames,
-            width, height, out_dir, args.prefix, args.format)
+            width, height, bpp, out_dir, args.prefix, args.format)
     except (OSError, RuntimeError, aesp.AESPError, ConnectionError) as e:
         print(f"error: video capture failed: {e}", file=sys.stderr)
         return 1
 
     print(f"VIDEO_CAPTURE dir={out_dir} "
-          f"pattern={args.prefix}%05d.{ext} frames={written} first={first}")
+          f"pattern={args.prefix}%05d.{ext} frames={written}")
     return 0
 
 

@@ -23,15 +23,21 @@
 ;;;;   JOYSTICK       : [port][bits] bits: 0 up,1 down,2 left,3 right,4 trigger.
 ;;;;   CONSOLE_KEYS   : [bits] bits: 0 start,1 select,2 option.
 ;;;;   PADDLE         : [port][value].
-;;;;   FRAME_CONFIG   : width(u16) height(u16) bpp(u8) fps(u8) = 384,240,4,60.
+;;;;   FRAME_CONFIG   : width(u16) height(u16) bytes-per-pixel(u8) fps(u8)
+;;;;                    = 336,240,4,60 (see +AESP-FRAME-RAW-WIDTH+).
+;;;;   FRAME_RAW      : width*height*4 bytes of BGRA8888 pixel data
+;;;;                    (row-major, top scanline first, no padding, no
+;;;;                    frame-number prefix) — converted per push from the
+;;;;                    renderer's internal 24-bit RGB framebuffer to match
+;;;;                    the Attic project's PROTOCOL.md exactly.
 ;;;;   AUDIO_CONFIG   : sample-rate(u32) bits(u8) channels(u8) = 44744,8,1.
 ;;;;   AUDIO_PCM      : raw mono unsigned-8 samples; the payload length IS
 ;;;;                    the sample count (746-747 per NTSC frame at
 ;;;;                    44,744 Hz).  Pushed once per emulated frame from
-;;;;                    the same post-frame hook as VIDEO_FRAME, so the
-;;;;                    Nth AUDIO_PCM and the Nth VIDEO_FRAME describe the
+;;;;                    the same post-frame hook as FRAME_RAW, so the
+;;;;                    Nth AUDIO_PCM and the Nth FRAME_RAW describe the
 ;;;;                    same frame — that 1:1 pairing is what A/V capture
-;;;;                    relies on for sync, since the payload carries no
+;;;;                    relies on for sync, since neither payload carries a
 ;;;;                    frame number of its own.
 
 (in-package #:atari800-cl.aesp)
@@ -61,6 +67,12 @@
   (defconstant +aesp-joystick+          #x42)
   (defconstant +aesp-console-keys+      #x43)
   (defconstant +aesp-paddle+            #x44)
+  ;; FRAME_RAW's code (0x60) is the protocol's own, per
+  ;; tools/protocol-comparison/protocol_spec.py's AESP_MESSAGES table and
+  ;; the Attic project's docs/PROTOCOL.md -- this used to be a locally
+  ;; invented 0x65 "VIDEO_FRAME" carrying 24-bit RGB, which an actual
+  ;; Attic client cannot decode (unknown message type).  See CHANGES.md.
+  (defconstant +aesp-frame-raw+         #x60)  ; server-push: completed BGRA frame
   (defconstant +aesp-frame-config+      #x62)
   (defconstant +aesp-video-subscribe+   #x63)
   (defconstant +aesp-video-unsubscribe+ #x64)
@@ -72,7 +84,21 @@
   (defconstant +aesp-audio-config+      #x81)
   (defconstant +aesp-audio-subscribe+   #x83)
   (defconstant +aesp-audio-unsubscribe+ #x84)
-  (defconstant +aesp-video-frame+       #x65)  ; server-push: completed 24-bit RGB frame
+
+  ;; FRAME_RAW geometry.  The renderer's framebuffer is 384 wide (320-pixel
+  ;; playfield + border), but the Attic project's own client code -- not
+  ;; just its docs -- hard-codes a 336-pixel visible width, cropping 24
+  ;; columns off each edge before ever touching the network (see
+  ;; Sources/AtticCore/LibAtari800Wrapper.swift's AtariScreen: "atari800
+  ;; source screen.h -- Screen_visible_x1=24, Screen_visible_x2=360").
+  ;; AtticGUI's MetalRenderer rejects any FRAME_RAW payload whose byte
+  ;; count isn't exactly width*height*4, silently dropping the frame, so
+  ;; matching this crop is required for interop, not optional -- pushing
+  ;; the full 384 columns (matching docs/PROTOCOL.md's literal "384x240"
+  ;; example) fails against the real client.  We crop analogously: 24
+  ;; columns off each side of our own 384-wide buffer.
+  (defconstant +aesp-frame-raw-x1+      24)
+  (defconstant +aesp-frame-raw-width+   336)
 
   ;; ERROR payload codes.
   (defconstant +aesp-err-server-busy+     #x04)
@@ -187,10 +213,13 @@ AESP-PROTOCOL-ERROR on a truncated/malformed frame."
    :external-format :utf-8))
 
 (defun %frame-config-payload ()
-  "FRAME_CONFIG: width(u16) height(u16) bpp(u8) fps(u8) = 384,240,24,60."
+  "FRAME_CONFIG: width(u16) height(u16) bytes-per-pixel(u8) fps(u8)
+= 336,240,4,60 -- the cropped width FRAME_RAW actually sends (see
++AESP-FRAME-RAW-WIDTH+), not the renderer's internal 384.  Byte 4 is
+bytes per pixel (matching FRAME_RAW's BGRA payload), not bits."
   (let ((b (%make-octets 6)))
-    (%u16-be b 0 384) (%u16-be b 2 240)
-    (setf (aref b 4) 24 (aref b 5) 60)
+    (%u16-be b 0 +aesp-frame-raw-width+) (%u16-be b 2 240)
+    (setf (aref b 4) 4 (aref b 5) 60)
     b))
 
 (defun %audio-config-payload ()
@@ -238,7 +267,9 @@ the bound port numbers (useful when started on ephemeral port 0).
 
 Extra slots for rendering:
   FRAMEBUFFER   — 384×240 24-bit RGB pixel array written by the scanline
-                  callback and pushed to VIDEO-CLIENTS after each frame.
+                  callback; converted to BGRA8888 and pushed to
+                  VIDEO-CLIENTS as FRAME_RAW after each frame (see
+                  %RGB24->BGRA32).
   VIDEO-CLIENTS — connections on the video port; frame data is pushed here.
   AUDIO-CLIENTS — connections on the audio port; PCM is pushed here.
   AUDIO-UNIT    — the AUDIO-UNIT attached to the machine while at least
@@ -314,7 +345,7 @@ connected, so that client's first PCM push arrives one frame later."
 client as one AUDIO_PCM message (payload = the raw mono u8 samples).
 Called on the emulator thread from ATARI-MACHINE-POST-FRAME-FN, right
 after %PUSH-VIDEO-FRAME, so the Nth AUDIO_PCM pairs with the Nth
-VIDEO_FRAME.  Clients that error during the write are silently dropped."
+FRAME_RAW.  Clients that error during the write are silently dropped."
   (let ((clients (with-lock ((aesp-server-lock server))
                    (copy-list (aesp-server-audio-clients server)))))
     (%sync-audio-attachment server machine (and clients t))
@@ -329,23 +360,46 @@ VIDEO_FRAME.  Clients that error during the write are silently dropped."
                 (%unregister-audio-client server conn)
                 (ignore-errors (tcp-close conn))))))))))
 
+(defun %rgb24->bgra32-cropped (rgb full-width height)
+  "Crop RGB (row-major, FULL-WIDTH x HEIGHT x 3 bytes/pixel) to the
+Attic-compatible +AESP-FRAME-RAW-WIDTH+-column visible area (dropping
++AESP-FRAME-RAW-X1+ columns off each edge) and convert to BGRA8888
+(4 bytes/pixel, alpha 0xFF) for the FRAME_RAW wire format.  The
+renderer's internal framebuffer stays full-width 24-bit RGB; both the
+crop and the channel conversion happen only at this AESP push boundary."
+  (let* ((out-width +aesp-frame-raw-width+)
+         (out (%make-octets (* out-width height 4))))
+    (dotimes (y height)
+      (let ((row-src (* y full-width 3))
+            (row-dst (* y out-width 4)))
+        (dotimes (x out-width)
+          (let ((si (+ row-src (* (+ x +aesp-frame-raw-x1+) 3)))
+                (di (+ row-dst (* x 4))))
+            (setf (aref out di)       (aref rgb (+ si 2))    ; B
+                  (aref out (1+ di))  (aref rgb (1+ si))      ; G
+                  (aref out (+ di 2)) (aref rgb si)            ; R
+                  (aref out (+ di 3)) 255)))))                 ; A
+    out))
+
 (defun %push-video-frame (server machine)
-  "Encode and send the current framebuffer to all video-port clients.
-Called on the emulator thread (from ATARI-MACHINE-POST-FRAME-FN).
-Clients that error during the write are silently dropped."
+  "Encode and send the current framebuffer to all video-port clients as
+FRAME_RAW (BGRA8888, no frame-number prefix -- see docs/PROTOCOL.md in
+the Attic project).  Called on the emulator thread (from
+ATARI-MACHINE-POST-FRAME-FN).  Clients that error during the write are
+silently dropped."
+  (declare (ignore machine))
   (let ((fb (aesp-server-framebuffer server)))
     (when (null fb) (return-from %push-video-frame nil))
-    (let* ((fno     (atari-machine-frame-count machine))
-           (payload (%make-octets (+ 4 (length fb)))))
-      (%u32-be payload 0 fno)
-      (replace payload fb :start1 4)
+    (let ((payload (%rgb24->bgra32-cropped
+                    fb atari800-cl.renderer:+framebuffer-width+
+                    atari800-cl.renderer:+framebuffer-height+)))
       ;; Snapshot the list under lock, then write outside the lock so a slow
       ;; client doesn't block the emulator thread indefinitely.
       (let ((clients (with-lock ((aesp-server-lock server))
                        (copy-list (aesp-server-video-clients server)))))
         (dolist (conn clients)
           (handler-case
-              (write-aesp-message (tcp-stream conn) +aesp-video-frame+ payload)
+              (write-aesp-message (tcp-stream conn) +aesp-frame-raw+ payload)
             (error ()
               (%unregister-video-client server conn)
               (ignore-errors (tcp-close conn)))))))))

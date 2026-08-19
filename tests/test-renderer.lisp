@@ -343,6 +343,73 @@ color (00 -> COLPF0, 01 -> COLPF1) and each glyph bit spans 2 columns."
       (is (= pf1-r (%fb-r fb 48)) "top bits 01 -> COLPF1")
       (is (= bk-r  (%fb-r fb 50))))))
 
+(test render-mode-5-multicolor-pixel-pairs
+  "Mode 5 (and 4): each glyph byte is 4 pixel-pairs (MSB first), not 8
+on/off bits -- 00/01/10/11 -> BAK/PF0/PF1/PF2, and 11 -> PF3 instead of
+PF2 when the character code's bit 7 is set (Compute!'s First Book of
+Atari Graphics ch.3, \"The Four-Color Character Modes\").  This pins the
+FRAME_RAW/Attic interop bug where mode 4/5 text rendered as flat
+single-color glyphs instead of genuine per-pixel-pair multicolor."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    (atari800-cl.gtia:gtia-write gtia #xD019 #x8A)   ; COLPF3
+    ;; Char 1 row 0 = 0b00_01_10_11: BAK, PF0, PF1, PF2 (or PF3).
+    (atari800-cl.bus:bus-poke-ram bus #x6008 #x1B)
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x01)   ; char 1, bit 7 clear
+    (atari800-cl.bus:bus-poke-ram bus #x4001 #x81)   ; char 1, bit 7 set
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x05
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22
+          (aref (atari800-cl.antic:antic-registers antic)
+                atari800-cl.antic:+reg-chbase+)                  #x60)
+    (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+    (let ((bk-r  (atari800-cl.renderer:atari-color->r #x00))
+          (pf0-r (atari800-cl.renderer:atari-color->r #x24))
+          (pf1-r (atari800-cl.renderer:atari-color->r #x46))
+          (pf2-r (atari800-cl.renderer:atari-color->r #x68))
+          (pf3-r (atari800-cl.renderer:atari-color->r #x8A)))
+      ;; Char 0 (cols 32-39), bit 7 clear: pairs 00/01/10/11 -> BAK/PF0/PF1/PF2,
+      ;; each pair 2 columns wide.
+      (is (= bk-r  (%fb-r fb 32)) "pair 00 -> COLBK")
+      (is (= bk-r  (%fb-r fb 33)) "pixel-pair spans 2 columns")
+      (is (= pf0-r (%fb-r fb 34)) "pair 01 -> COLPF0")
+      (is (= pf1-r (%fb-r fb 36)) "pair 10 -> COLPF1")
+      (is (= pf2-r (%fb-r fb 38)) "pair 11, bit7 clear -> COLPF2")
+      ;; Char 1 (cols 40-47), bit 7 set: only the 11 pair changes, to PF3.
+      (is (= bk-r  (%fb-r fb 40)) "bit7 set: pair 00 is still COLBK")
+      (is (= pf0-r (%fb-r fb 42)) "bit7 set: pair 01 is still COLPF0")
+      (is (= pf1-r (%fb-r fb 44)) "bit7 set: pair 10 is still COLPF1")
+      (is (= pf3-r (%fb-r fb 46)) "bit7 set: pair 11 -> COLPF3, not COLPF2"))))
+
+(test render-mode-5-double-height-stretches-glyph-rows
+  "Mode 5 is 16 real scanlines per mode line but the character ROM only
+has 8 rows per glyph: row = SCAN-Y/2 (each ROM row shown for 2 scanlines
+running down the character), not SCAN-Y mod 8 (which would show ROM
+rows 0-7 again for scanlines 8-15, drawing the line's text a second
+time -- exactly what a real Atari does not do, and what edvent02.asm's
+\"HELLO ATARI!\" banner visibly doubled before this fix)."
+  (multiple-value-bind (bus antic gtia fb) (%make-render-fixture)
+    ;; Char 1: ROM row 0 = all PF2 (0xFF -> four 11 pairs); ROM row 4 =
+    ;; all BAK (0x00).  Real scanlines 0-1 show ROM row 0; scanlines 8-9
+    ;; (SCAN-Y/2 = 4) show ROM row 4 -- the buggy SCAN-Y mod 8 would
+    ;; instead show ROM row 0 again at scanline 8.
+    (atari800-cl.bus:bus-poke-ram bus #x6008 #xFF)   ; chbase*256 + 1*8 + 0
+    (atari800-cl.bus:bus-poke-ram bus #x600C #x00)   ; chbase*256 + 1*8 + 4
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x01)   ; char 1, bit 7 clear
+    (setf (atari800-cl.antic:antic-current-mode           antic) #x05
+          (atari800-cl.antic:antic-render-screen-data-ptr antic) #x4000
+          (atari800-cl.antic:antic-dmactl                 antic) #x22
+          (aref (atari800-cl.antic:antic-registers antic)
+                atari800-cl.antic:+reg-chbase+)                  #x60)
+    (let ((bk-r  (atari800-cl.renderer:atari-color->r #x00))
+          (pf2-r (atari800-cl.renderer:atari-color->r #x68)))
+      (setf (atari800-cl.antic:antic-scan-y antic) 0)
+      (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+      (is (= pf2-r (%fb-r fb 32)) "scan-y=0 -> ROM row 0 (all PF2)")
+      (setf (atari800-cl.antic:antic-scan-y antic) 8)
+      (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
+      (is (= bk-r (%fb-r fb 32))
+          "scan-y=8 must show ROM row 4 (all BAK), not ROM row 0 again"))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Span-based P/M compositing semantics
 ;;;
@@ -416,14 +483,16 @@ HPOSP0 = 10 (fully off-screen left) paints nothing; HPOSP1 = 220 with a
         "the right-edge player paints through the last column")))
 
 ;;; ---------------------------------------------------------------------------
-;;; AESP frame-config bpp
+;;; AESP frame-config bytes-per-pixel
 
-(test aesp-frame-config-is-24bpp
-  "FRAME_CONFIG payload byte 4 must report 24 bits per pixel."
+(test aesp-frame-config-is-4-bytes-per-pixel
+  "FRAME_CONFIG payload byte 4 must report 4 bytes per pixel, matching
+FRAME_RAW's BGRA8888 wire format (see docs/PROTOCOL.md in the Attic
+project) -- not the 24 bits this used to (wrongly) report."
   ;; Call the internal helper via the package-qualified name.
   (let ((payload (atari800-cl.aesp::%frame-config-payload)))
-    (is (= 24 (aref payload 4))
-        "Expected bpp=24 but got ~D" (aref payload 4))))
+    (is (= 4 (aref payload 4))
+        "Expected bytes-per-pixel=4 but got ~D" (aref payload 4))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Full PRIOR priority arbitration (ROADMAP.md Phase 6b)
