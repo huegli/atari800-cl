@@ -50,11 +50,14 @@
 ;;;;     - 64 kHz / 15 kHz:         AUDF + 1 of the DIVIDED clock
 ;;;;   Implemented by loading the countdown with %TIMER-RELOAD-VALUE
 ;;;;   (the period minus one divided-clock tick, since the counter
-;;;;   underflows on the transition past zero).  These figures are
-;;;;   stated by MISC_IMPROVEMENTS_PLAN.md item 5 from the Altirra
-;;;;   Hardware Reference; they are **CONFIRM**-flagged there and were
-;;;;   implemented as stated — no independent source was available in
-;;;;   this environment to re-derive them.
+;;;;   underflows on the transition past zero).  These figures were
+;;;;   originally stated by MISC_IMPROVEMENTS_PLAN.md item 5 from the
+;;;;   Altirra Hardware Reference and CONFIRMED (ROADMAP.md Phase 23)
+;;;;   against the atari800 emulator's own POKEY_AUDF reload logic
+;;;;   (src/pokeysnd.c): `new_val = AUDF + 4` for the 1.79 MHz unlinked
+;;;;   case, `AUDF_lo + 256*AUDF_hi + 7` for a linked pair, and
+;;;;   `(AUDF + 1) * Base_mult` for the divided clocks -- all three
+;;;;   match this file's model exactly.
 ;;;;
 ;;;; Linked 16-bit channels (AUDCTL bits 4 and 3):
 ;;;;   Bit 4 joins channels 1+2, bit 3 joins 3+4.  The pair behaves as

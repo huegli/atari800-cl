@@ -689,21 +689,27 @@ this test is the reminder to revisit if that ever happens."
 
 (test gtia-mode-10-nibble-selects-color-register
   "PRIOR bits 6-7 = 10 (mode 10): nibble 0-3 selects COLPM0-3, 4-7
-COLPF0-3, 8 COLBK.  Out-of-range nibbles 9-15 clamp to COLBK (CONFIRM
-pending -- see %RENDER-GTIA-MODE)."
+COLPF0-3, 8-11 all collapse to COLBK, and (a hardware quirk, not a
+clamp) 12-15 repeat COLPF0-3 rather than staying on COLBK.  CONFIRMED
+(ROADMAP.md Phase 23) against atari800's DRAW_AN_GTIA10 lookup table --
+see %GTIA-MODE10-REGISTER-OFFSET."
   (multiple-value-bind (bus antic gtia fb)
-      ;; Bytes: $05 -> nibbles 0,5 ; $83 -> 8,3 ; $9F -> 9,F.
-      (%gtia-mode-fixture #x80 #x1C #x05 #x83 #x9F)
+      ;; Bytes: $05 -> nibbles 0,5 ; $83 -> 8,3 ; $9B -> 9,B ; $CF -> C,F.
+      (%gtia-mode-fixture #x80 #x1C #x05 #x83 #x9B #xCF)
     (atari800-cl.gtia:gtia-write gtia #xD012 #x3A)   ; COLPM0
     (atari800-cl.gtia:gtia-write gtia #xD015 #x7E)   ; COLPM3
+    (atari800-cl.gtia:gtia-write gtia #xD016 #x92)   ; COLPF0
     (atari800-cl.gtia:gtia-write gtia #xD017 #x56)   ; COLPF1
+    (atari800-cl.gtia:gtia-write gtia #xD019 #xB4)   ; COLPF3
     (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
     (is (equal (%color-rgb #x3A) (%fb-rgb fb 32)) "nibble 0 -> COLPM0")
     (is (equal (%color-rgb #x56) (%fb-rgb fb 36)) "nibble 5 -> COLPF1")
     (is (equal (%color-rgb #x1C) (%fb-rgb fb 40)) "nibble 8 -> COLBK")
     (is (equal (%color-rgb #x7E) (%fb-rgb fb 44)) "nibble 3 -> COLPM3")
-    (is (equal (%color-rgb #x1C) (%fb-rgb fb 48)) "nibble 9 clamps to COLBK")
-    (is (equal (%color-rgb #x1C) (%fb-rgb fb 52)) "nibble F clamps to COLBK")))
+    (is (equal (%color-rgb #x1C) (%fb-rgb fb 48)) "nibble 9 -> COLBK")
+    (is (equal (%color-rgb #x1C) (%fb-rgb fb 52)) "nibble B -> COLBK")
+    (is (equal (%color-rgb #x92) (%fb-rgb fb 56)) "nibble C -> COLPF0, not COLBK")
+    (is (equal (%color-rgb #xB4) (%fb-rgb fb 60)) "nibble F -> COLPF3, not COLBK")))
 
 (test gtia-mode-11-nibble-is-hue-at-colbk-luminance
   "PRIOR bits 6-7 = 11 (mode 11): the nibble supplies the hue and COLBK

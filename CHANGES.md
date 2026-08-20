@@ -3,6 +3,84 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 23 -- CONFIRM retirement pass (one real bug found)
+
+Three hardware values had stood behind a bare **CONFIRM** flag since
+their phases landed -- "implemented as stated, unverified" -- rather
+than checked against a reference. Checked all three against the
+`atari800` emulator's own C source (`atari800/atari800` on GitHub:
+`src/pokeysnd.c`, `src/antic.c`).
+
+- **POKEY timer reload offsets** (`src/pokey.lisp`): AUDF+4 at 1.79 MHz
+  unlinked, AUDF_lo + 256*AUDF_hi + 7 for a linked 16-bit pair, and
+  (AUDF+1) times the divisor for the divided clocks. `pokeysnd.c`'s own
+  reload code (`new_val = AUDF + 4`, `... + 7`, `(AUDF + 1) *
+  Base_mult`) matches this project's implementation exactly. CONFIRMED,
+  no code change -- the flag is now a citation.
+- **PRIOR player/playfield priority orderings**
+  (`+PM-BEATS-PF-MASKS+` in `src/renderer.lisp`): the four orderings for
+  PRIOR bits 0-3. `antic.c`'s `ANTIC_SetPrior` doesn't publish a simple
+  ordered list -- it's a bit-conditional table build (tested against
+  `byte & 3`, `& 0xc`, `& 4`, `& 9`, `& 6`, `& 1` in turn) that models a
+  richer space than "exactly one bit set". Traced its logic by hand for
+  each of `byte = $01/$02/$04/$08` (the normal, documented case, and
+  this project's deliberate scope) and it reduces to exactly the four
+  orderings already implemented. CONFIRMED, no code change.
+- **GTIA mode 10's out-of-range nibbles 9-15** (`src/renderer.lisp`):
+  this one was actually WRONG. The old code clamped every nibble above
+  8 to register 8 (COLBK) -- a guess, documented as unverified. The real
+  hardware quirk, per `antic.c`'s `DRAW_AN_GTIA10` lookup table
+  (`lookup_gtia10[]`): nibbles 9-11 do collapse to COLBK, but 12-15
+  repeat COLPF0-3 rather than staying on COLBK. Fixed: new
+  `%GTIA-MODE10-REGISTER-OFFSET` implements the real table
+  (`nibble<8 -> nibble; nibble<12 -> 8; else -> nibble-8`), and
+  `GTIA-MODE-10-NIBBLE-SELECTS-COLOR-REGISTER` (`tests/test-
+  renderer.lisp`) now asserts nibbles 12 and 15 render COLPF0/COLPF3,
+  not COLBK -- the old test had pinned the wrong behavior as "nibble F
+  clamps to COLBK".
+
+Verified on both implementations, lenient and strict
+(`ATARI800_CL_STRICT=1`, with the Phase-14-fetched Harte subset
+present): 2112 checks, 0 fail, 0 skip, exit 0 -- fully green including
+Harte, on both SBCL and LispWorks.
+
+## ROADMAP Phase 15 -- documentation drift sweep (misc item 9)
+
+`CLAUDE.md`'s "not modelled" list and Development Plan paragraph were
+both stale. "Keyboard scanning" and "the serial/SIO bus" as blanket
+unmodelled claims were wrong: Phase 13 modelled keyboard/BREAK IRQs, and
+serial output (SEROR/SEROC) has been modelled since before this
+tranche -- only SIO receive is still absent, so the sentence now says
+that precisely. "Prompt 12's Unix-socket IPC layer was later removed"
+was accurate as far as it went but never mentioned that a much larger,
+unrelated stack replaced it afterward: AESP (`src/aesp.lisp`) and the
+CLI (`src/cli-socket.lisp`), sharing `src/transport.lisp`, are now core
+to the project -- `record.sh` and the `capture-*.py` tools depend on
+them.
+
+Re-verifying `README.md`'s "Known limitations" against the code (per the
+plan's own instruction) found two more drift items: the feature list
+undersold host input (didn't mention keyboard/BREAK IRQ delivery, only
+polled KBCODE), and the unmodelled-features line still listed "paddles"
+alongside light pen even though paddles have been fully modelled since
+the AESP/CLI stage work (`input-set-paddle`/`input-pokey-pot`). Both
+fixed.
+
+Also closed a `CHANGES.md` gap of its own (see the next entry below):
+the ANTIC modes 4/5 renderer fix, landed alongside the AESP video
+protocol fix in the same commit, had never gotten an entry.
+
+Swept for the plan's named renamed symbols (`flag-set?`, `run-cpu` with
+a memory arg, `+color-clocks-per-scanline+`) across every `.md` file: no
+live drift found. Every hit was either the plan's own text describing
+the symbols to check, or a historical record of the rename itself --
+correctly describing a past event, not stale current-state
+documentation. `AI-Docs/*.md` are explicitly out of scope per
+`CLAUDE.md`'s own framing (historical build-prompt records).
+
+`MISC_IMPROVEMENTS_PLAN.md` item 9 marked done. No `.lisp` source
+touched; both implementations reconfirmed green (2106 checks, 0 fail).
+
 ## ROADMAP Phase 14 -- `fetch-harte.sh` for the SingleStepTests vectors
 
 The Harte harness was only as useful as its data was easy to get, which

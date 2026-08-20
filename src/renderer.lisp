@@ -70,8 +70,15 @@ Row = the normalized PRIOR priority select (index of the lowest set bit
 of PRIOR bits 0-3); column = player channel 0-3; value = a 5-bit mask
 over tags (bit T set means the player draws over tag T, tags being
 BAK=0, PF0-PF3=1-4).  Derived from the four orderings (top priority
-first; standard table, cross-check pending against Altirra/atari800 per
-the ROADMAP CONFIRM note):
+first).  CONFIRMED against the atari800 emulator's ANTIC_SetPrior
+(src/antic.c): its bit-conditional table build (tested against byte &
+3, & 0xc, & 4, & 9, & 6, & 1 in turn) was traced by hand for each of
+byte = $01/$02/$04/$08 and produces exactly these four orderings when
+precisely one PRIOR priority bit is set -- the normal, documented case.
+atari800 additionally models combinations of these bits (and none set)
+as its own richer priority structure; this project follows the
+ROADMAP's original scope decision to model only the one-bit-set case
+and does not attempt that generality.
   PRIOR bit 0: P0 P1 P2 P3 PF0 PF1 PF2 PF3 BAK — players beat every tag
   PRIOR bit 1: P0 P1 PF0-PF3 P2 P3 BAK         — P0/P1 beat all; P2/P3 only BAK
   PRIOR bit 2: PF0-PF3 P0 P1 P2 P3 BAK         — players beat only BAK
@@ -452,6 +459,23 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
                         (setf (aref tags (+ +playfield-left-border+ out-x dp))
                               tag))))))))))))
 
+(declaim (inline %gtia-mode10-register-offset))
+
+(defun %gtia-mode10-register-offset (nibble)
+  "GTIA mode 10 register offset (from +W-COLPM0+) for NIBBLE (0-15).
+
+CONFIRMED against the atari800 emulator's DRAW_AN_GTIA10 lookup table
+(src/antic.c, LOOKUP_GTIA10[0..15]): 0-3 index COLPM0-3, 4-7 COLPF0-3,
+and 8 COLBK, exactly as this project's own model already had them.  The
+tail is a genuine hardware quirk, not a simple clamp: 8-11 ALL collapse
+to COLBK, but 12-15 repeat COLPF0-3 rather than staying on COLBK
+(LOOKUP_GTIA10[12..15] = COLPF0..COLPF3, matching [4..7])."
+  (declare (type (integer 0 15) nibble))
+  (cond
+    ((< nibble 8)  nibble)
+    ((< nibble 12) 8)
+    (t             (- nibble 8))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; GTIA color modes 9/10/11 (ROADMAP.md Phase 7)
 
@@ -477,13 +501,12 @@ Nibble → color byte:
            entries would recover all 16 shades and is the only change
            needed (GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE pins the
            current behaviour).
-  Mode 10: the nibble selects a color REGISTER — 0-3 → COLPM0-3,
-           4-7 → COLPF0-3, 8 → COLBK.  Those nine registers are
-           contiguous in the write window ($12-$1A), so the nibble
-           indexes them directly.  Values 9-15 are outside the
-           documented range; we clamp them to 8 (COLBK), matching a
-           minimal 'bit 3 set selects background' decode.  **CONFIRM**
-           against Altirra/atari800 gtia.c — unverified here.
+  Mode 10: the nibble selects a color REGISTER via
+           %GTIA-MODE10-REGISTER-OFFSET — 0-3 → COLPM0-3, 4-7 →
+           COLPF0-3, 8-11 → COLBK, and (a hardware quirk, not a clamp)
+           12-15 repeat COLPF0-3 rather than staying on COLBK.
+           CONFIRMED against atari800's DRAW_AN_GTIA10 lookup table
+           (src/antic.c) — see that function's docstring.
   Mode 11: (nibble << 4) | (COLBK & $0F) — the nibble supplies the hue
            and COLBK the luminance.  Nibble 0 is therefore hue 0 at
            COLBK's luminance (a gray, not black): GTIA mode 11 cannot
@@ -509,7 +532,8 @@ priority rather than playfield priority — are NOT modelled."
                              (ldb (byte 4 0) byte)))
                  (color  (case gtia-mode
                            (1 (logior (logand colbk #xF0) nibble))
-                           (2 (aref gtia-wr (+ +w-colpm0+ (min nibble 8))))
+                           (2 (aref gtia-wr (+ +w-colpm0+
+                                              (%gtia-mode10-register-offset nibble))))
                            (t (logior (ash nibble 4) (logand colbk #x0F)))))
                  (out-x  (* (+ (* bx 2) half) 4))
                  (p      (+ pf-base (* out-x 3))))

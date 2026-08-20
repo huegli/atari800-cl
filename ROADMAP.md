@@ -190,8 +190,25 @@
 > (`flag-set?`, `run-cpu` with a memory arg,
 > `+color-clocks-per-scanline+`) -- no live drift found; every hit was
 > either the plan's own text or a historical record of the rename.
-> `MISC_IMPROVEMENTS_PLAN.md` item 9 marked done. Phase 23 (CONFIRM
-> retirement) is next.
+> `MISC_IMPROVEMENTS_PLAN.md` item 9 marked done.
+>
+> **Phase 23 done (2026-08-20)**: checked all three standing CONFIRM
+> flags against the `atari800` emulator's own C source
+> (`atari800/atari800` on GitHub). POKEY's reload offsets
+> (`src/pokey.lisp`) and the PRIOR priority orderings
+> (`src/renderer.lisp`) both CONFIRMED correct as implemented --
+> `pokeysnd.c`'s reload code matches exactly, and hand-tracing
+> `antic.c`'s `ANTIC_SetPrior` bit logic for each one-hot PRIOR byte
+> reduces to the same four orderings already coded. GTIA mode 10's
+> nibbles 9-15 were actually WRONG: the old code clamped every nibble
+> above 8 to COLBK, but `antic.c`'s `DRAW_AN_GTIA10` lookup table shows
+> 9-11 collapse to COLBK while 12-15 repeat COLPF0-3 -- a hardware
+> quirk, not a clamp. Fixed (new `%GTIA-MODE10-REGISTER-OFFSET`); the
+> existing test had pinned the wrong behavior and now asserts the
+> correct one. No flag survives as a bare CONFIRM. Verified on both
+> implementations, lenient and strict (with the Phase-14-fetched Harte
+> subset): 2112 checks, 0 fail, 0 skip, exit 0 -- fully green including
+> Harte. Phase 24 (Acid800 gate) is next per the recommended order.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -300,7 +317,7 @@ and say so in the commit message.
 | 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
 | 21    | Strict test gate + skip census               | --          | no       | done   |
 | 22    | POKEY pending-work bitmask                   | --          | yes      | done   |
-| 23    | CONFIRM retirement pass                      | --          | no       | open   |
+| 23    | CONFIRM retirement pass                      | --          | no       | done   |
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | open   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
