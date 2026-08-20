@@ -238,6 +238,44 @@ integers 0..255."
               (%registers-string cpu)))))
       (%with-machine server (lambda (m) (%registers-string (atari-machine-cpu m))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Host disk bridge (ROADMAP.md Phase 16, revised; stage 16e)
+;;;
+;;; State-mutating, so each runs through %WITH-MACHINE like every other
+;;; verb above; a bad unit / missing file / malformed ATR-or-XEX signals
+;;; an ordinary error from inside the thunk, which MACHINE-SUBMIT re-
+;;; signals on this thread and DISPATCH-CLI-LINE's catch-all turns into
+;;; an ERR: reply -- no extra handling needed here.
+
+(defun %verb-mount (server args)
+  (unless (>= (length args) 2)
+    (error 'cli-parse-error :message "usage: mount UNIT PATH"))
+  (let ((unit (%parse-count (first args)))
+        (path (second args)))
+    (%with-machine server
+      (lambda (m)
+        (atari800-cl.hostdev:mount-disk-file (atari-machine-hostdev m) unit path)
+        (format nil "OK:mounted ~A on D~D:" path unit)))))
+
+(defun %verb-unmount (server args)
+  (unless (>= (length args) 1)
+    (error 'cli-parse-error :message "usage: unmount UNIT"))
+  (let ((unit (%parse-count (first args))))
+    (%with-machine server
+      (lambda (m)
+        (atari800-cl.hostdev:unmount-disk (atari-machine-hostdev m) unit)
+        (format nil "OK:unmounted D~D:" unit)))))
+
+(defun %verb-loadxex (server args)
+  (unless (>= (length args) 1)
+    (error 'cli-parse-error :message "usage: loadxex PATH [UNIT]"))
+  (let ((path (first args))
+        (unit (if (second args) (%parse-count (second args)) 1)))
+    (%with-machine server
+      (lambda (m)
+        (atari800-cl.hostdev:load-xex (atari-machine-hostdev m) unit path)
+        (format nil "OK:loaded ~A on D~D:" path unit)))))
+
 (defparameter *cli-verbs*
   (list (cons "ping"      #'%verb-ping)
         (cons "version"   #'%verb-version)
@@ -249,13 +287,16 @@ integers 0..255."
         (cons "read"      #'%verb-read)
         (cons "write"     #'%verb-write)
         (cons "fill"      #'%verb-fill)
-        (cons "registers" #'%verb-registers))
+        (cons "registers" #'%verb-registers)
+        (cons "mount"     #'%verb-mount)
+        (cons "unmount"   #'%verb-unmount)
+        (cons "loadxex"   #'%verb-loadxex))
   "Alist mapping a CLI verb string to its handler (server args -> reply
 string).  Add a verb by adding a line here.")
 
 (defparameter +cli-deferred-verbs+
   '("basic" "dos" "boot" "screen" "disassemble" "assemble" "breakpoint"
-    "mount" "unmount" "drives" "state" "screenshot" "inject" "shutdown")
+    "drives" "state" "screenshot" "inject" "shutdown")
   "Recognized-but-unimplemented verbs; these reply ERR:Not implemented.")
 
 (defun dispatch-cli-line (server line)

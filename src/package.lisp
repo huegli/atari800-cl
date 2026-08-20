@@ -624,7 +624,9 @@
            #:+aesp-frame-config+ #:+aesp-video-subscribe+ #:+aesp-video-unsubscribe+
            #:+aesp-audio-pcm+
            #:+aesp-audio-config+ #:+aesp-audio-subscribe+ #:+aesp-audio-unsubscribe+
+           #:+aesp-mount+ #:+aesp-unmount+ #:+aesp-load-xex+
            #:+aesp-err-server-busy+ #:+aesp-err-not-implemented+
+           #:+aesp-err-mount-failed+
            ;; Server
            #:aesp-server #:aesp-server-p
            #:start-aesp-server #:stop-aesp-server
@@ -681,6 +683,10 @@
            #:+audio-sample-rate+
            #:load-os-rom
            #:load-basic-rom
+           ;; Host disk bridge (ROADMAP.md Phase 16, revised)
+           #:mount-disk
+           #:unmount-disk
+           #:load-xex
            ;; Background run loop + protocol servers
            #:start-machine
            #:stop-machine

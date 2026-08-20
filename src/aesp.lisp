@@ -39,6 +39,20 @@
 ;;;;                    same frame — that 1:1 pairing is what A/V capture
 ;;;;                    relies on for sync, since neither payload carries a
 ;;;;                    frame number of its own.
+;;;;   MOUNT          : [unit(u8)][read-only(u8: 0/1)][path, UTF-8, rest of
+;;;;                    payload] — mounts PATH (an .atr file the SERVER
+;;;;                    reads from its own filesystem) into the host disk
+;;;;                    bridge at drive UNIT (ROADMAP.md Phase 16, revised;
+;;;;                    src/hostdev.lisp).  ACK on success, else ERROR with
+;;;;                    +AESP-ERR-MOUNT-FAILED+.
+;;;;   UNMOUNT        : [unit(u8)] — clears whatever is mounted at UNIT.
+;;;;                    ACK always (no error path: unmounting an empty
+;;;;                    unit is a no-op, per ATARI800-CL.HOSTDEV:UNMOUNT-DISK).
+;;;;   LOAD_XEX       : [unit(u8)][read-only(u8: 0/1)][path, UTF-8, rest of
+;;;;                    payload] — synthesizes a bootable ATR in memory
+;;;;                    from the XEX/OBX binary at PATH (ATARI800-CL.
+;;;;                    HOSTDEV:LOAD-XEX) and mounts it at UNIT.  Same
+;;;;                    reply convention as MOUNT.
 
 (in-package #:atari800-cl.aesp)
 
@@ -60,6 +74,13 @@
   (defconstant +aesp-status+            #x05)
   (defconstant +aesp-info+              #x06)
   (defconstant +aesp-boot-file+         #x07)   ; deferred
+  ;; Host disk bridge (ROADMAP.md Phase 16, revised; stage 16e).  Distinct
+  ;; from the still-deferred BOOT_FILE above: these name a PATH the SERVER
+  ;; reads from its own filesystem (like the CLI's mount/loadxex verbs),
+  ;; not a stream of file bytes the client uploads.
+  (defconstant +aesp-mount+             #x08)
+  (defconstant +aesp-unmount+           #x09)
+  (defconstant +aesp-load-xex+          #x0A)
   (defconstant +aesp-ack+               #x0F)
   (defconstant +aesp-error+             #x3F)
   (defconstant +aesp-key-down+          #x40)
@@ -102,7 +123,8 @@
 
   ;; ERROR payload codes.
   (defconstant +aesp-err-server-busy+     #x04)
-  (defconstant +aesp-err-not-implemented+ #x05))
+  (defconstant +aesp-err-not-implemented+ #x05)
+  (defconstant +aesp-err-mount-failed+    #x06))
 
 (deftype octet-vector () '(simple-array (unsigned-byte 8) (*)))
 
@@ -416,6 +438,60 @@ MACHINE-RUN-LOOP to drain the mailbox."
     (mailbox-full ()
       (write-aesp-message stream +aesp-error+ (%octets-of +aesp-err-server-busy+)))))
 
+;;; ---------------------------------------------------------------------------
+;;; Host disk bridge (ROADMAP.md Phase 16, revised; stage 16e)
+
+(defun %decode-mount-path (payload)
+  "Decode the UTF-8 path bytes following MOUNT/LOAD_XEX's leading
+[unit][read-only] pair."
+  (flexi-streams:octets-to-string payload :start 2 :external-format :utf-8))
+
+(defun %submit-hostdev-op (server stream thunk)
+  "Like %SUBMIT-OR-BUSY, but also maps any other error (bad unit, missing
+file, malformed ATR/XEX) to ERROR/+AESP-ERR-MOUNT-FAILED+ instead of
+letting it escape the reader loop and drop the connection.  THUNK is
+called with the machine's HOST-BRIDGE (not the machine itself) as its
+only argument, since every hostdev entry point takes a bridge."
+  (handler-case
+      (progn (machine-submit (aesp-server-machine server)
+                             (lambda (m) (funcall thunk (atari-machine-hostdev m)))
+                             :priority t)
+             (%ack stream))
+    (mailbox-full ()
+      (write-aesp-message stream +aesp-error+ (%octets-of +aesp-err-server-busy+)))
+    (error ()
+      (write-aesp-message stream +aesp-error+ (%octets-of +aesp-err-mount-failed+)))))
+
+(defun %handle-mount (server stream payload)
+  "MOUNT: [unit][read-only][path...] -> ATARI800-CL.HOSTDEV:MOUNT-DISK-FILE."
+  (if (< (length payload) 3)
+      (write-aesp-message stream +aesp-error+ (%octets-of +aesp-err-mount-failed+))
+      (let ((unit (aref payload 0))
+            (read-only (/= 0 (aref payload 1)))
+            (path (%decode-mount-path payload)))
+        (%submit-hostdev-op server stream
+          (lambda (bridge)
+            (atari800-cl.hostdev:mount-disk-file bridge unit path :read-only read-only))))))
+
+(defun %handle-unmount (server stream payload)
+  "UNMOUNT: [unit] -> ATARI800-CL.HOSTDEV:UNMOUNT-DISK."
+  (if (< (length payload) 1)
+      (write-aesp-message stream +aesp-error+ (%octets-of +aesp-err-mount-failed+))
+      (let ((unit (aref payload 0)))
+        (%submit-hostdev-op server stream
+          (lambda (bridge) (atari800-cl.hostdev:unmount-disk bridge unit))))))
+
+(defun %handle-load-xex (server stream payload)
+  "LOAD_XEX: [unit][read-only][path...] -> ATARI800-CL.HOSTDEV:LOAD-XEX."
+  (if (< (length payload) 3)
+      (write-aesp-message stream +aesp-error+ (%octets-of +aesp-err-mount-failed+))
+      (let ((unit (aref payload 0))
+            (read-only (/= 0 (aref payload 1)))
+            (path (%decode-mount-path payload)))
+        (%submit-hostdev-op server stream
+          (lambda (bridge)
+            (atari800-cl.hostdev:load-xex bridge unit path :read-only read-only))))))
+
 (defun %handle-control (server stream type payload)
   "Dispatch one control-port message and write its reply."
   (let ((machine (aesp-server-machine server)))
@@ -440,6 +516,9 @@ MACHINE-RUN-LOOP to drain the mailbox."
       (#.+aesp-audio-subscribe+
        (write-aesp-message stream +aesp-audio-config+ (%audio-config-payload)))
       (#.+aesp-audio-unsubscribe+ (%ack stream))
+      (#.+aesp-mount+     (%handle-mount server stream payload))
+      (#.+aesp-unmount+   (%handle-unmount server stream payload))
+      (#.+aesp-load-xex+  (%handle-load-xex server stream payload))
       (t (write-aesp-message stream +aesp-error+
                              (%octets-of +aesp-err-not-implemented+))))))
 

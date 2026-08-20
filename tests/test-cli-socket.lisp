@@ -165,3 +165,51 @@ connect a client (STREAMVAR), run BODY, then tear it all down."
   "STOP-CLI-SOCKET returns promptly with a client still connected."
   (with-cli-server (m srv s)
     (is (atari800-cl.cli-socket:cli-server-p srv))))
+
+;;; ---------------------------------------------------------------------------
+;;; Host disk bridge (ROADMAP.md Phase 16, revised; stage 16e).  Reuses
+;;; %MAKE-SD-ATR-BYTES / %MAKE-SYNTHETIC-XEX from test-hostdev.lisp -- one
+;;; ATARI800-CL/TESTS package, no import needed.
+
+(defparameter *cli-mount-test-counter* 0)
+(defun %cli-mount-test-path (ext)
+  (format nil "/tmp/atari800-cl-cli-mounttest-~D-~D.~A"
+          (current-process-id) (incf *cli-mount-test-counter*) ext))
+
+(test cli-server-mount-and-unmount-round-trip
+  "mount UNIT PATH loads an .atr file into the host bridge; unmount UNIT
+clears it again."
+  (with-cli-server (m srv s)
+    (let ((path (%cli-mount-test-path "atr"))
+          (bridge (atari800-cl.machine:atari-machine-hostdev m)))
+      (write-binary-file path (%make-sd-atr-bytes 4))
+      (unwind-protect
+           (progn
+             (is-false (atari800-cl.hostdev:mounted-disk bridge 2))
+             (is (eql 0 (search "OK:mounted"
+                                (%cli-request s (format nil "CMD:mount 2 ~A" path)))))
+             (is-true (atari800-cl.hostdev:mounted-disk bridge 2))
+             (is (eql 0 (search "OK:unmounted" (%cli-request s "CMD:unmount 2"))))
+             (is-false (atari800-cl.hostdev:mounted-disk bridge 2)))
+        (ignore-errors (delete-file path))))))
+
+(test cli-server-mount-missing-file-errors
+  "mount against a nonexistent path replies ERR:, and the connection
+stays usable afterward."
+  (with-cli-server (m srv s)
+    (is (eql 0 (search "ERR:" (%cli-request s "CMD:mount 1 /nonexistent/nope.atr"))))
+    (is (string= "OK:pong" (%cli-request s "CMD:ping")))))
+
+(test cli-server-loadxex-mounts-synthesized-atr-on-d1-by-default
+  "loadxex PATH synthesizes a bootable ATR from an XEX file in memory and
+mounts it on D1: (unit 1) when no unit is given."
+  (with-cli-server (m srv s)
+    (let ((path (%cli-mount-test-path "xex"))
+          (bridge (atari800-cl.machine:atari-machine-hostdev m)))
+      (write-binary-file path (%make-synthetic-xex
+                                :segments (list (cons #x600 '(#xA9 #x2A #x60)))))
+      (unwind-protect
+           (progn
+             (is (eql 0 (search "OK:loaded" (%cli-request s (format nil "CMD:loadxex ~A" path)))))
+             (is-true (atari800-cl.hostdev:mounted-disk bridge 1)))
+        (ignore-errors (delete-file path))))))

@@ -142,8 +142,11 @@ destroy-thread) -- now only in git history: `git show 57e237f^:src/ipc.lisp`.
 | `KEY_DOWN` 0x40, `KEY_UP` 0x41, `JOYSTICK` 0x42, `CONSOLE_KEYS` 0x43, `PADDLE` 0x44 | C->S | direct -> `input-set-*` -> ACK |
 | `VIDEO_SUBSCRIBE` 0x63 / `_UNSUBSCRIBE` 0x64 | C->S | mark subscriber; on subscribe immediately reply `FRAME_CONFIG` 0x62 (384, 240, 4, 60). **No FRAME_RAW/DELTA sent in MVP.** |
 | `AUDIO_SUBSCRIBE` 0x83 / `_UNSUBSCRIBE` 0x84 | C->S | mark subscriber; reply `AUDIO_CONFIG` 0x81 (44100, 8, 1). **No AUDIO_PCM in MVP.** |
+| `MOUNT` 0x08 | C->S | `[unit][read-only][path...]` -> mailbox -> `atari800-cl.hostdev:mount-disk-file` -> ACK, or `ERROR` 0x3F with `+aesp-err-mount-failed+` (0x06) |
+| `UNMOUNT` 0x09 | C->S | `[unit]` -> mailbox -> `atari800-cl.hostdev:unmount-disk` -> ACK |
+| `LOAD_XEX` 0x0A | C->S | `[unit][read-only][path...]` -> mailbox -> `atari800-cl.hostdev:load-xex` (synthesizes a bootable ATR from an XEX/OBX file in memory) -> ACK, or `ERROR` 0x06 |
 | Any other type | C->S | reply `ERROR` 0x3F with `+aesp-err-not-implemented+` (0x05) |
-| `BOOT_FILE` 0x07 | -- | **deferred** (no XEX loader yet) |
+| `BOOT_FILE` 0x07 | -- | **deferred** -- distinct from `MOUNT`/`LOAD_XEX` above: would stream file bytes from the client rather than name a path the server reads itself (ROADMAP.md Phase 16, revised, stage 16e added the path-based pair; `BOOT_FILE` itself is still unimplemented) |
 
 PIA PORTA encoding: AESP `JOYSTICK` gives 5 bits per port; PIA PORTA packs
 joystick 0 in the low nibble (direction bits active-low) and joystick 1
@@ -154,14 +157,21 @@ in the high nibble; the trigger bit lives on GTIA TRIG0/TRIG1. The
 
 `ping`, `version`, `pause`, `resume`, `step [count]`, `reset [cold|warm]`,
 `status`, `read $ADDR COUNT`, `write $ADDR HEX,HEX,...`,
-`fill $START $END $VALUE`, `registers`, `registers REG=$VAL ...`, `quit`.
+`fill $START $END $VALUE`, `registers`, `registers REG=$VAL ...`,
+`mount UNIT PATH`, `unmount UNIT`, `loadxex PATH [UNIT]` (defaults to
+D1:), `quit`. The last three (ROADMAP.md Phase 16, revised, stage 16e)
+drive the same `atari800-cl.hostdev` entry points as the AESP `MOUNT`/
+`UNMOUNT`/`LOAD_XEX` messages above -- a bad unit, missing file, or
+malformed ATR/XEX signals an ordinary error inside the mailbox thunk,
+which the CLI's catch-all turns into `ERR:<message>` (no special-casing
+needed, unlike AESP's fixed-payload `ERROR` reply).
 
 Everything else (the entire `basic`/`dos` namespace, `boot`, `screen`,
-`disassemble`, `assemble`, `breakpoint *`, `mount`/`unmount`/`drives`,
-`state save`/`load`, `screenshot`, `inject *`, `shutdown`) is dispatched
-to a single fallback handler that replies `ERR:Not implemented`. The
-verb table is a `defparameter *cli-verbs*` alist so each future verb
-becomes a one-line addition.
+`disassemble`, `assemble`, `breakpoint *`, `drives`, `state save`/`load`,
+`screenshot`, `inject *`, `shutdown`) is dispatched to a single fallback
+handler that replies `ERR:Not implemented`. The verb table is a
+`defparameter *cli-verbs*` alist so each future verb becomes a one-line
+addition.
 
 `step` is capped at 65535 instructions per call (single mailbox round-
 trip would otherwise stall the emulator).

@@ -278,3 +278,65 @@ frame, so a machine nobody is listening to stops paying for it."
     ;; The WITH-AESP-SERVER teardown stops the server while the client stream
     ;; is still open; reaching here without hanging is the assertion.
     (is (atari800-cl.aesp:aesp-server-p srv))))
+
+;;; ---------------------------------------------------------------------------
+;;; Host disk bridge (ROADMAP.md Phase 16, revised; stage 16e).  Reuses
+;;; %MAKE-SD-ATR-BYTES / %MAKE-SYNTHETIC-XEX from test-hostdev.lisp -- one
+;;; ATARI800-CL/TESTS package, no import needed.
+
+(defun %mount-payload (unit read-only path)
+  (concatenate '(vector (unsigned-byte 8))
+               (%octets unit (if read-only 1 0))
+               (flexi-streams:string-to-octets path :external-format :utf-8)))
+
+(defparameter *aesp-mount-test-counter* 0)
+(defun %aesp-mount-test-path (ext)
+  (format nil "/tmp/atari800-cl-aesptest-~D-~D.~A"
+          (current-process-id) (incf *aesp-mount-test-counter*) ext))
+
+(test aesp-server-mount-and-unmount-round-trip
+  "MOUNT loads an .atr file into the host bridge at the given unit and
+ACKs; MOUNTED-DISK then reports it; UNMOUNT clears it again."
+  (with-aesp-server (m srv s)
+    (let ((path (%aesp-mount-test-path "atr"))
+          (bridge (atari800-cl.machine:atari-machine-hostdev m)))
+      (write-binary-file path (%make-sd-atr-bytes 4))
+      (unwind-protect
+           (progn
+             (is-false (atari800-cl.hostdev:mounted-disk bridge 3))
+             (is (= atari800-cl.aesp:+aesp-ack+
+                    (%aesp-request s atari800-cl.aesp:+aesp-mount+
+                                   (%mount-payload 3 t path))))
+             (is-true (atari800-cl.hostdev:mounted-disk bridge 3))
+             (is (= atari800-cl.aesp:+aesp-ack+
+                    (%aesp-request s atari800-cl.aesp:+aesp-unmount+ (%octets 3))))
+             (is-false (atari800-cl.hostdev:mounted-disk bridge 3)))
+        (ignore-errors (delete-file path))))))
+
+(test aesp-server-mount-missing-file-errors
+  "MOUNT against a nonexistent path replies ERROR/+AESP-ERR-MOUNT-FAILED+
+rather than dropping the connection."
+  (with-aesp-server (m srv s)
+    (multiple-value-bind (ty pl)
+        (%aesp-request s atari800-cl.aesp:+aesp-mount+
+                       (%mount-payload 1 t "/nonexistent/does-not-exist.atr"))
+      (is (= atari800-cl.aesp:+aesp-error+ ty))
+      (is (equalp (%octets atari800-cl.aesp:+aesp-err-mount-failed+) pl)))
+    ;; connection still usable afterward
+    (is (= atari800-cl.aesp:+aesp-pong+ (%aesp-request s atari800-cl.aesp:+aesp-ping+)))))
+
+(test aesp-server-load-xex-mounts-synthesized-atr
+  "LOAD_XEX synthesizes a bootable ATR from an XEX file in memory and
+mounts it at the given unit, exactly like MOUNT does for a real .atr."
+  (with-aesp-server (m srv s)
+    (let ((path (%aesp-mount-test-path "xex"))
+          (bridge (atari800-cl.machine:atari-machine-hostdev m)))
+      (write-binary-file path (%make-synthetic-xex
+                                :segments (list (cons #x600 '(#xA9 #x2A #x60)))))
+      (unwind-protect
+           (progn
+             (is (= atari800-cl.aesp:+aesp-ack+
+                    (%aesp-request s atari800-cl.aesp:+aesp-load-xex+
+                                   (%mount-payload 1 t path))))
+             (is-true (atari800-cl.hostdev:mounted-disk bridge 1)))
+        (ignore-errors (delete-file path))))))

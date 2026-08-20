@@ -122,6 +122,50 @@ Returns MACHINE for chaining."
   machine)
 
 ;;; ---------------------------------------------------------------------------
+;;; Host disk bridge (ROADMAP.md Phase 16, revised; src/hostdev.lisp,
+;;; src/xex.lisp) -- mounting real ATR images and synthesizing bootable
+;;; ones from raw XEX/OBX binaries.  MAKE-MACHINE always builds a machine
+;;; with a HOST-BRIDGE already attached (ATARI800-CL.MACHINE:MAKE-ATARI-
+;;; MACHINE does this unconditionally), so these three functions work
+;;; against any MACHINE with no extra setup.
+
+(defun mount-disk (machine unit path &key (read-only t))
+  "Mount PATH (an .atr disk image file) into MACHINE's host disk bridge
+at drive UNIT (1-8, i.e. D1: through D8:), replacing whatever was
+mounted there.  READ-ONLY defaults to true -- WRITE commands against a
+read-only image answer the SIO write-protect status; write SUPPORT
+itself does not exist yet regardless of this flag (see
+ATARI800-CL.HOSTDEV's package docstring).  Does not reset MACHINE; call
+RESET-MACHINE afterward (or mount before the machine's first cold reset)
+so the OS's boot sequence sees the new disk.  Returns MACHINE for
+chaining."
+  (atari800-cl.hostdev:mount-disk-file
+   (atari800-cl.machine:atari-machine-hostdev machine) unit path
+   :read-only read-only)
+  machine)
+
+(defun unmount-disk (machine unit)
+  "Remove whatever disk image is mounted at MACHINE's host disk bridge
+drive UNIT (1-8), if any.  Returns MACHINE for chaining."
+  (atari800-cl.hostdev:unmount-disk
+   (atari800-cl.machine:atari-machine-hostdev machine) unit)
+  machine)
+
+(defun load-xex (machine path &key (unit 1) (read-only t))
+  "Synthesize a bootable ATR disk image in memory from the XEX/OBX binary
+at PATH (ATARI800-CL.HOSTDEV:LOAD-XEX, prepending fixtures/xexboot.bin's
+assembled boot-sector loader -- see its docstring) and mount it into
+MACHINE's host disk bridge at drive UNIT (default 1, i.e. D1:).  No file
+of the synthesized image is ever written to disk.  Does NOT reset
+MACHINE -- call RESET-MACHINE afterward (or build a fresh machine and
+cold-reset it) so the OS's boot sequence loads the program from the
+newly mounted disk.  Returns MACHINE for chaining."
+  (atari800-cl.hostdev:load-xex
+   (atari800-cl.machine:atari-machine-hostdev machine) unit path
+   :read-only read-only)
+  machine)
+
+;;; ---------------------------------------------------------------------------
 ;;; Background run loop + protocol servers
 ;;;
 ;;; The servers post state-mutating commands to the machine's command mailbox,
