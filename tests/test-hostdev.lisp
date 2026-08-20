@@ -302,3 +302,113 @@ machine's bus already answers the $D1FE signature probe."
               (atari800-cl.machine:atari-machine-hostdev m)))
     (is (= atari800-cl.hostdev:+signature+
            (atari800-cl.bus:bus-read (atari800-cl.machine:atari-machine-bus m) #xD1FE)))))
+
+;;; ---------------------------------------------------------------------------
+;;; XEX/OBX loading (src/xex.lisp; ROADMAP.md Phase 16, stage 16d)
+;;;
+;;; %MAKE-SYNTHETIC-XEX builds a byte vector in the Atari DOS binary-load
+;;; format MAKE-XEX-ATR consumes: an optional leading $FFFF marker,
+;;; followed by any number of (START . BYTES) segments, each encoded as
+;;; its 2-byte little-endian start address, 2-byte little-endian inclusive
+;;; end address, then the segment's own bytes.  A segment targeting
+;;; $02E0-$02E1 (RUNAD) is exactly how MADS's own trailing run-address
+;;; segment sets the loader's default -- ordinary memory, no special case
+;;; needed on either end.
+
+(defun %make-synthetic-xex (&key (with-ffff-header t) segments)
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                           :adjustable t :fill-pointer 0)))
+    (flet ((push-byte (b) (vector-push-extend b out)))
+      (when with-ffff-header (push-byte #xFF) (push-byte #xFF))
+      (dolist (seg segments)
+        (destructuring-bind (start . bytes) seg
+          (let ((end (+ start (length bytes) -1)))
+            (push-byte (logand start #xFF)) (push-byte (ash start -8))
+            (push-byte (logand end #xFF))   (push-byte (ash end -8))
+            (dolist (b bytes) (push-byte b))))))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
+(defun %xexboot-fixture-bytes ()
+  "fixtures/xexboot.bin's bytes, resolved the same way MAKE-XEX-ATR's own
+default does -- independent of this test file's %DEFAULT-XEXBOOT-BYTES
+access so the expected NBSEC/JMP-offset math below isn't hand-copied
+from the implementation it is checking."
+  (read-binary-file
+   (merge-pathnames "fixtures/xexboot.bin" (asdf:system-source-directory "atari800-cl"))))
+
+(test make-xex-atr-patches-boot-sector-and-lays-out-sectors
+  "MAKE-XEX-ATR prepends fixtures/xexboot.bin's assembled boot-sector
+loader, patches its FSEC word (offsets 9/10) with the last data sector
+number, pads the XEX payload to 128-byte sectors, and produces bytes
+PARSE-ATR-BYTES accepts -- with the payload's own bytes readable back out
+of the sectors that follow the loader."
+  (let* ((xexboot (%xexboot-fixture-bytes))
+         (nbsec (ceiling (length xexboot) 128))
+         (xex (%make-synthetic-xex
+               :segments (list (cons #x2000 '(#xA9 #x00 #x8D #x00 #x02 #x60))
+                                (cons #x02E0 (list #x00 #x20)))))
+         (data-sectors (ceiling (length xex) 128))
+         (expected-fsec (+ nbsec data-sectors))
+         (img (atari800-cl.hostdev:make-xex-atr xex)))
+    (is-true (atari800-cl.hostdev:atr-image-p img))
+    (is (= 128 (atari800-cl.hostdev:atr-image-sector-size img)))
+    (is (= (+ nbsec data-sectors) (atari800-cl.hostdev:atr-image-sector-count img))
+        "sector count must be the loader's sectors plus the padded payload's")
+    (is-true (atari800-cl.hostdev:atr-image-read-only img)
+             "MAKE-XEX-ATR defaults to read-only")
+    (let ((boot1 (atari800-cl.hostdev:atr-read-sector img 1)))
+      (is (= (logand expected-fsec #xFF) (aref boot1 9)) "FSEC low byte")
+      (is (= (ash expected-fsec -8) (aref boot1 10)) "FSEC high byte"))
+    ;; The XEX payload begins verbatim in the first data sector.
+    (let ((first-data-sector (atari800-cl.hostdev:atr-read-sector img (1+ nbsec))))
+      (dotimes (i (length xex))
+        (is (= (aref xex i) (aref first-data-sector i))
+            "data sector byte ~D must match the XEX payload" i)))))
+
+(test make-xex-atr-read-only-override
+  "READ-ONLY NIL is honoured by MAKE-XEX-ATR, exactly like PARSE-ATR-BYTES."
+  (let ((img (atari800-cl.hostdev:make-xex-atr
+              (%make-synthetic-xex :segments (list (cons #x600 '(#x60))))
+              :read-only nil)))
+    (is-false (atari800-cl.hostdev:atr-image-read-only img))))
+
+(test make-xex-atr-rejects-empty-xex
+  "An empty XEX payload signals XEX-FORMAT-ERROR rather than building a
+disk image with no data sectors at all."
+  (signals atari800-cl.hostdev:xex-format-error
+    (atari800-cl.hostdev:make-xex-atr (make-array 0 :element-type '(unsigned-byte 8)))))
+
+(test make-xex-atr-rejects-loader-with-wrong-sector-count
+  "A supplied XEXBOOT-BYTES whose header sector count (offset 1) disagrees
+with its own padded length signals XEX-FORMAT-ERROR."
+  (let ((bad-loader (make-array 128 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (setf (aref bad-loader 1) 2                ; claims 2 sectors; only 1 present
+          (aref bad-loader 6) #x4C)
+    (signals atari800-cl.hostdev:xex-format-error
+      (atari800-cl.hostdev:make-xex-atr
+       (%make-synthetic-xex :segments (list (cons #x600 '(#x60))))
+       :xexboot-bytes bad-loader))))
+
+(test make-xex-atr-rejects-loader-without-jmp
+  "A supplied XEXBOOT-BYTES with no JMP opcode ($4C) at offset 6 (the
+boot-continuation entry) signals XEX-FORMAT-ERROR."
+  (let ((bad-loader (make-array 128 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (setf (aref bad-loader 1) 1 (aref bad-loader 6) #x00)
+    (signals atari800-cl.hostdev:xex-format-error
+      (atari800-cl.hostdev:make-xex-atr
+       (%make-synthetic-xex :segments (list (cons #x600 '(#x60))))
+       :xexboot-bytes bad-loader))))
+
+(test load-xex-mounts-a-synthesized-atr-from-a-file
+  "LOAD-XEX reads an XEX/OBX file from disk, synthesizes its ATR in
+memory, and mounts it into the bridge at the requested unit -- returning
+the same ATR-IMAGE MOUNTED-DISK then reports."
+  (let* ((bridge (atari800-cl.hostdev:make-host-bridge))
+         (path (format nil "/tmp/atari800-cl-loadxex-test-~D.xex" (current-process-id)))
+         (xex (%make-synthetic-xex :segments (list (cons #x600 '(#xA9 #x2A #x60))))))
+    (write-binary-file path xex)
+    (unwind-protect
+         (let ((img (atari800-cl.hostdev:load-xex bridge 1 path)))
+           (is-true (atari800-cl.hostdev:atr-image-p img))
+           (is (eq img (atari800-cl.hostdev:mounted-disk bridge 1))))
+      (ignore-errors (delete-file path)))))

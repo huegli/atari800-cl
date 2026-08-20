@@ -31,6 +31,7 @@
                              (:file "audio")
                              (:file "irq")
                              (:file "hostdev")
+                             (:file "xex")
                              (:file "renderer")
                              (:file "machine")
                              (:file "transport")

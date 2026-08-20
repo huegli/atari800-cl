@@ -502,7 +502,13 @@
            #:+dcb-dbuflo+ #:+dcb-dbufhi+ #:+dcb-dtimlo+
            #:+dcb-dbytlo+ #:+dcb-dbythi+ #:+dcb-daux1+  #:+dcb-daux2+
            #:+atr-magic+ #:+atr-header-size+
-           #:+atr-boot-sector-size+ #:+atr-boot-sector-count+))
+           #:+atr-boot-sector-size+ #:+atr-boot-sector-count+
+           ;; XEX/OBX loading (src/xex.lisp; ROADMAP.md Phase 16, stage 16d)
+           #:make-xex-atr
+           #:load-xex
+           #:xex-format-error
+           #:xex-format-error-reason
+           #:+xex-sector-size+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.renderer — Per-scanline NTSC pixel renderer
