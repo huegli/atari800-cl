@@ -3,6 +3,51 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 14 -- `fetch-harte.sh` for the SingleStepTests vectors
+
+The Harte harness was only as useful as its data was easy to get, which
+until now was a README/CLAUDE.md paragraph telling you to `git clone`
+a ~1 GB repository.
+
+`scripts/fetch-harte.sh` fetches individual `<hex>.json` files straight
+from `raw.githubusercontent.com/SingleStepTests/65x02` instead -- no
+`.git` history overhead, and it degrades gracefully to a partial set if
+interrupted, which the harness already tolerates. Files already present
+are skipped, so a repeated or resumed run only pulls what's missing.
+Default destination is gitignored `.cache/harte/`; `--dir PATH`
+overrides it. On success the script prints `export
+ATARI800_CL_HARTE_TESTS=...` on its last line of stdout (everything
+else goes to stderr), so `eval "$(./scripts/fetch-harte.sh ...)"`
+fetches and exports in one step.
+
+`--subset [N]` fetches a curated, priority-ordered list of up to 8
+opcodes (~30 MB instead of ~1 GB): chosen for addressing-mode diversity
+(indirect, indirect-indexed, absolute-indexed, read-modify-write) and
+every illegal-opcode family this project's Harte triage has ever named,
+led by the three opcodes ($9C SHY, $6B ARR, $20 JSR) whose vectors
+actually found real CPU bugs during ROADMAP Phase 12 -- so `--subset N`
+for small N keeps the highest-value regression coverage first. Nothing
+in `tests/` changed: the harness already tests whichever `<hex>.json`
+files it finds.
+
+One implementation note: the first draft fetched files in parallel via
+`xargs -P 8` calling an `export -f`'d shell function through `bash -c`.
+That combination turned out to be fragile in this project's sandbox --
+the exported function bodies leaked onto stdout instead of propagating
+through the environment, silently corrupting output (a stray `.json`
+file with no opcode prefix, one of the two requested files missing
+entirely). Replaced with a plain sequential loop: slower on a full
+256-file fetch, but portable and easy to reason about, which matters
+more for a script that runs once per developer machine.
+
+Verified end-to-end, not just that the script runs: a fetched 4-file
+subset (`9c 6b 20 8b`) round-tripped through both
+`./scripts/test-sbcl.sh` (green, clean skip census) and
+`ATARI800_CL_STRICT=1 ./scripts/test-sbcl.sh` -- which, pointed at that
+subset, went 100% pass / 0 skip / exit 0. That is the first time a
+strict run has gone fully green in this project's history, Harte
+included, without a full upstream checkout.
+
 ## ROADMAP Phase 13 -- POKEY keyboard IRQ: the OS editor now sees keystrokes
 
 The machine booted to BASIC's `Ready` but could not be typed at: AESP's

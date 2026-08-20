@@ -148,8 +148,30 @@
 > nonzero branch, gated by a bit no bench workload ever sets, so it is
 > provably zero-cost in every measured workload by construction: a live
 > `bench-ab.sh` attempt was abandoned when the host's load average hit
-> 74 from unrelated activity. Phase 14 (`fetch-harte.sh`) is next per
-> the recommended order, alongside 15/23.
+> 74 from unrelated activity.
+>
+> **Phase 14 done (2026-08-20)**: `scripts/fetch-harte.sh` fetches
+> individual `<hex>.json` files straight from
+> `raw.githubusercontent.com/SingleStepTests/65x02` rather than `git
+> clone`ing the ~1 GB repository, into gitignored `.cache/harte/` by
+> default; already-present files are skipped, so an interrupted or
+> repeated run resumes rather than re-fetching. `--subset [N]` fetches
+> a curated, priority-ordered list of up to 8 opcodes (~30 MB) chosen
+> for addressing-mode diversity plus every illegal-opcode family this
+> project's Harte triage has named -- including the three opcodes
+> ($9C, $6B, $20) whose vectors found real bugs in Phase 12, listed
+> first so a smaller N keeps the highest-value coverage. Verified
+> end-to-end: a fetched 4-file subset round-tripped through both
+> `./scripts/test-sbcl.sh` (green, skip census clean) and
+> `ATARI800_CL_STRICT=1 ./scripts/test-sbcl.sh` (100% pass, 0 skip --
+> the first time a strict run has gone fully green in this project's
+> history, Harte included, on a machine with no full checkout). One
+> deviation from the initial one-line xargs-based parallel-fetch
+> attempt: `export -f` + `xargs -P` + `bash -c` proved fragile in this
+> sandbox (functions leaking into stdout instead of the environment),
+> so the script fetches sequentially instead -- simpler and more
+> portable, at the cost of wall-clock time on a full 256-file fetch.
+> Phase 15/23 (hygiene) are next per the recommended order.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -249,7 +271,7 @@ and say so in the commit message.
 | 11    | A/V recording tooling (`record.sh` -> mp4)    | 4, 10      | no       | done   |
 | 12    | Tom Harte ProcessorTests harness             | --          | no       | done   |
 | 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | done   |
-| 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | open   |
+| 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | done   |
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | open   |
 | 16    | SIO receive path + virtual disk (ATR)        | 13, 22     | no       | open   |
 | 17    | Harte bus-trace comparison                   | 12         | no       | open   |

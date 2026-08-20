@@ -196,14 +196,33 @@ The **Tom Harte / SingleStepTests vectors** (`tests/test-harte.lisp`) are the
 CPU accuracy ratchet: per-opcode JSON cases with full before/after CPU +
 memory state and a cycle-by-cycle bus trace. The data is ~1 GB and is not
 vendored; the harness skips unless `$ATARI800_CL_HARTE_TESTS` points at a
-checkout's `6502/v1` directory:
+directory containing `<hex>.json` files (the SingleStepTests/65x02 repo's
+`6502/v1` layout). `./scripts/fetch-harte.sh` (ROADMAP.md Phase 14) is the
+one-command way to get them -- it fetches individual files straight from
+`raw.githubusercontent.com` rather than `git clone`ing the ~1 GB repository
+(whose `.git` history is bigger still), skips files already present so a
+repeat or interrupted run resumes, and prints the `export
+ATARI800_CL_HARTE_TESTS=...` line on success:
 
 ```sh
-git clone https://github.com/SingleStepTests/65x02
-export ATARI800_CL_HARTE_TESTS=$PWD/65x02/6502/v1
-./scripts/test-sbcl.sh                    # 500 cases/opcode (~128k cases)
+eval "$(./scripts/fetch-harte.sh --subset)"   # curated 8-file gate, ~30 MB
+./scripts/test-sbcl.sh                        # 500 cases/opcode (~128k cases)
+
+eval "$(./scripts/fetch-harte.sh)"            # all 256 opcode files, ~1 GB
 ATARI800_CL_HARTE_FULL=1 ./scripts/test-sbcl.sh   # all 10,000 (~2.56M cases)
 ```
+
+`--subset` picks opcodes covering addressing-mode diversity (indirect,
+indirect-indexed, absolute-indexed, read-modify-write) and every illegal-
+opcode family this project's Harte triage has ever named -- including the
+three opcodes ($9C, $6B, $20) whose vectors found real CPU bugs during
+Phase 12 -- so a fast pre-commit gate still gets the highest-value
+regression coverage; `--subset N` takes the first N of that priority-
+ordered list (capped at 8), and `--dir PATH` overrides the default
+`.cache/harte/` (gitignored, like `roms/`). A manual `git clone` still
+works if you want the full repository (e.g. to browse it) --
+`ATARI800_CL_HARTE_TESTS` just needs to end up pointing at a `6502/v1`-
+shaped directory either way.
 
 A partial checkout works -- whichever `<hex>.json` files exist get tested.
 **A failure here is presumed a real emulator bug**: fix it in `src/`, add a
