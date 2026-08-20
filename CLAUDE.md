@@ -41,118 +41,16 @@ Preferred noninteractive runners:
 ./scripts/test-lispworks.sh
 ```
 
-These scripts are designed for both normal shells and restricted sandbox
-execution environments. They deliberately avoid relying on `.sbclrc`,
-LispWorks init-file side effects, or Quicklisp writing to
-`~/quicklisp/local-projects/system-index.txt`. Instead they:
-
-- register this repository and the installed Quicklisp software tree directly
-  with ASDF via `asdf:initialize-source-registry`;
-- redirect ASDF/FASL output into `.cache/fasls/` inside the repository via
-  `asdf:initialize-output-translations`, because some sandboxes forbid writes
-  to `~/.cache/common-lisp`;
-- run `atari800-cl/tests::run-tests` (a thin wrapper around `fiveam:run!`
-  plus a skip census, see below) directly for the shell exit status, because
-  `asdf:test-system` can return successfully even when FiveAM reports failed
-  checks;
-- run the LispWorks test body inside `mp:initialize-multiprocessing`, because
-  batch LispWorks images otherwise signal `Cannot create processes before
-  multiprocessing is initialized` when tests create threads; and
-- allow `QUICKLISP_SOFTWARE=/path/to/software` if the dependency tree is not
-  at the default `~/quicklisp/dists/quicklisp/software`.
-
-Sandbox caveat: some tool sandboxes deny listener creation with `EPERM` for
-both TCP loopback sockets and Unix-domain sockets, even under `/tmp` and inside
-the repository. The live AESP TCP server tests, CLI Unix socket server tests,
-and Unix socket roundtrip test probe this capability and skip themselves when
-listener bind is prohibited. On an unrestricted local shell these tests should
-run normally.
-
-**Strict mode and the skip census (ROADMAP.md Phase 21).** Every run prints
-a `Skip census:` block after FiveAM's own report -- one `SKIPPED: <test>
-(<reason>)` line per skipped check, or `(none)` -- so an asset-gated test
-that silently skipped can never hide inside a bare "N checks, 1 skip"
-count; `grep SKIPPED` a saved log to see exactly what did not run and why.
-Three tests are asset-gated this way: the Klaus functional test, the Tom
-Harte vectors, and the real-ROM boot tests. Set `ATARI800_CL_STRICT=1` (any
-non-empty value) to turn those skips into failures instead -- the gate to
-run on a machine that is supposed to have the assets (rule 8 above lists
-which ones are already present here) before calling a phase done:
-```sh
-ATARI800_CL_STRICT=1 ./scripts/test-sbcl.sh
-```
-Without the ROMs or vectors present, strict mode fails exactly those tests
-by design -- it is meant to be run only once you believe the assets are in
-place, not as the default CI posture.
-
-> **Exit-code gotcha:** `asdf:test-system` returns `T` even when tests
-> *fail*, so it is useless for shell/CI exit codes. Always key the exit
-> status off `fiveam:run!`, which returns `T` only when every check
-> passes. The commands below do this (exit 0 = all pass, 1 = failure).
-
-Legacy manual shell form for **SBCL** (`.sbclrc` loads Quicklisp before `--eval`; prefer `./scripts/test-sbcl.sh` for automation):
-```sh
-sbcl --non-interactive \
-     --eval '(ql:quickload :atari800-cl/tests)' \
-     --eval '(uiop:quit (if (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :atari800-cl-suite :atari800-cl/tests)) 0 1))'
-```
-
-Legacy manual shell form for **LispWorks** (the console image is `lw-console` in
-`$PATH`; prefer `./scripts/test-lispworks.sh` for automation). Two LispWorks-isms matter here:
-- Command-line `-eval` forms are *read* before the init file loads
-  Quicklisp, so load `setup.lisp` first and defer non-CL symbols
-  (`ql:`, `fiveam:`) with `read-from-string`.
-- **Multiprocessing is initialized asynchronously at startup.** If
-  `-eval` forms create threads before it's ready you get *"Cannot create
-  processes before multiprocessing is initialized"* -- and **every
-  threaded test (mailbox/run-loop, AESP/CLI servers, sockets) fails
-  intermittently.** Run the suite inside `mp:initialize-multiprocessing`
-  so threads are safe. (The REPL already runs under multiprocessing, so
-  an interactive `(asdf:test-system ...)` is fine -- this only bites batch
-  `-eval` runs.)
-```sh
-lw-console -eval '(mp:initialize-multiprocessing "ci" ()
-                    (lambda ()
-                      (load "~/quicklisp/setup.lisp")
-                      (funcall (read-from-string "ql:quickload") :atari800-cl/tests)
-                      (lw:quit :status
-                        (if (funcall (read-from-string "fiveam:run!")
-                                     (read-from-string "atari800-cl/tests::atari800-cl-suite"))
-                            0 1))))'
-```
-
-Run a single FiveAM test by name:
-```lisp
-(fiveam:run! 'atari800-cl/tests::reset-loads-pc-from-vector)
-```
-
-Run a single test suite (e.g. just the CPU opcode tests):
-```lisp
-(fiveam:run! 'atari800-cl/tests::cpu-opcode-suite)
-```
+See the `run-tests` skill for why these scripts exist, the sandbox EPERM
+listener caveat, `ATARI800_CL_STRICT` / skip-census asset-gated tests, the
+`asdf:test-system` exit-code gotcha, and legacy manual SBCL/LispWorks shell
+invocations for running a single test or suite.
 
 ## Benchmarking
 
-Frame-rate benchmark harness for measuring optimization deltas. Works
-without real ROM images (synthetic NOP/IRQ workloads built inline).
-
-```sh
-./scripts/bench-sbcl.sh
-./scripts/bench-lispworks.sh
-```
-
-Each prints one machine-readable line per workload:
-`BENCH <workload> frames=600 seconds=<s> fps=<fps> realtime-x=<fps/59.92>`.
-Five workloads: `nop` (NOP-sled baseline), `irq` (busy loop + POKEY
-timer 1 IRQs exercising the interrupt path), `display` (NOP sled with a
-24-line mode-2 display list fetched by ANTIC -- DMA-active steal
-accounting -- and the pixel renderer attached via the scanline callback),
-`audio` (NOP sled with POKEY audio synthesis attached and all four
-channels voiced, draining per frame -- every other workload runs with
-audio detached, so the pair of rows shows both that the no-audio path
-stays free and what synthesis costs), and `klaus` (the Klaus Dormann
-functional test as a CPU-heavy load; skips if the binary is absent).
-Tune via `atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
+Frame-rate benchmark harness for measuring optimization deltas
+(`./scripts/bench-sbcl.sh` / `./scripts/bench-lispworks.sh`). See the
+`benchmark` skill for workload details and tuning.
 
 **Rule: every optimization commit updates `PERFORMANCE_LOG.md` with
 before/after numbers from BOTH implementations.** Measure first, commit
@@ -190,68 +88,12 @@ Opcodes are defined via the `DEFOPCODE` macro which creates a named function (`O
 
 Tests use FiveAM. The root suite is `atari800-cl-suite` in `tests/test-suite.lisp`; each component file defines a child suite `:in` it: `compat-suite`, `memory-suite`, `cpu-suite`, `harte-suite`, `cpu-opcodes-suite`, `illegal-opcodes`, `mmu-suite`, `pia-suite`, `antic-suite`, `renderer-suite`, `gtia-suite`, `pokey-suite`, `machine-suite`, and `regression-suite`. Shared fixtures (`%MAKE-SYNTHETIC-OS-ROM`, `MAKE-TEST-MACHINE`, `WITH-CPU-STATE`, `%POKE`) live in `tests/test-helpers.lisp`. The test package `:import-from`s FiveAM symbols (not `:use`) to avoid name collisions between implementations.
 
-The **Klaus Dormann 6502 functional test** (`tests/test-cpu.lisp`) runs if `roms/6502_functional_test.bin` exists (or `$ATARI800_CL_FUNCTIONAL_TEST` points to it), otherwise it skips gracefully. Run `./scripts/fetch-test-roms.sh` to download the prebuilt binary (org=0000, load_data_direct=1) from https://github.com/Klaus2m5/6502_65C02_functional_tests into `roms/`; it no-ops if the file is already present. The run is slow (max-instructions ~200M) -- a couple of minutes on SBCL, longer on LispWorks.
-
-The **Tom Harte / SingleStepTests vectors** (`tests/test-harte.lisp`) are the
-CPU accuracy ratchet: per-opcode JSON cases with full before/after CPU +
-memory state and a cycle-by-cycle bus trace. The data is ~1 GB and is not
-vendored; the harness skips unless `$ATARI800_CL_HARTE_TESTS` points at a
-directory containing `<hex>.json` files (the SingleStepTests/65x02 repo's
-`6502/v1` layout). `./scripts/fetch-harte.sh` (ROADMAP.md Phase 14) is the
-one-command way to get them -- it fetches individual files straight from
-`raw.githubusercontent.com` rather than `git clone`ing the ~1 GB repository
-(whose `.git` history is bigger still), skips files already present so a
-repeat or interrupted run resumes, and prints the `export
-ATARI800_CL_HARTE_TESTS=...` line on success:
-
-```sh
-eval "$(./scripts/fetch-harte.sh --subset)"   # curated 8-file gate, ~30 MB
-./scripts/test-sbcl.sh                        # 500 cases/opcode (~128k cases)
-
-eval "$(./scripts/fetch-harte.sh)"            # all 256 opcode files, ~1 GB
-ATARI800_CL_HARTE_FULL=1 ./scripts/test-sbcl.sh   # all 10,000 (~2.56M cases)
-```
-
-`--subset` picks opcodes covering addressing-mode diversity (indirect,
-indirect-indexed, absolute-indexed, read-modify-write) and every illegal-
-opcode family this project's Harte triage has ever named -- including the
-three opcodes ($9C, $6B, $20) whose vectors found real CPU bugs during
-Phase 12 -- so a fast pre-commit gate still gets the highest-value
-regression coverage; `--subset N` takes the first N of that priority-
-ordered list (capped at 8), and `--dir PATH` overrides the default
-`.cache/harte/` (gitignored, like `roms/`). A manual `git clone` still
-works if you want the full repository (e.g. to browse it) --
-`ATARI800_CL_HARTE_TESTS` just needs to end up pointing at a `6502/v1`-
-shaped directory either way.
-
-A partial checkout works -- whichever `<hex>.json` files exist get tested.
-**A failure here is presumed a real emulator bug**: fix it in `src/`, add a
-focused regression test to `tests/test-regressions.lisp` naming the opcode
-and case id, and only then consider the (currently empty) skip list. The
-file header spells out the triage workflow.
-
-**Acid800** (`tests/test-machine.lisp`'s `ACID800-*` tests) is the external
-accuracy ratchet the CPU has always had via Harte but ANTIC never did: Avery
-Lee's suite (MIT licensed) runs 20 standalone hardware-behavior programs (7
-CPU + 13 ANTIC) against the real OS ROM and reads their Pass/FAIL text back
-from screen memory. `./scripts/fetch-acid800.sh` fetches them into gitignored
-`roms/acid800/` (no-op when already present):
-
-```sh
-./scripts/fetch-acid800.sh
-./scripts/test-sbcl.sh
-```
-
-7 tests are required to pass (part of the normal green suite); the other 13
-are individually documented, permanent skips in `+ACID800-KNOWN-ISSUES+`
-(`tests/test-machine.lisp`, mirroring `+HARTE-SKIP-OPCODES+`'s convention) --
-confirmed divergences from real hardware, most already tracked elsewhere
-(README.md's Known Limitations, `SCANLINE_ACCURACY_PLAN.md`'s stretch Phase
-4, `ROADMAP.md` Phase 20), a few (`cpu_bugs`'s NMI-hijacks-BRK gap, and four
-ANTIC tests whose root cause isn't yet isolated) newly confirmed by this
-harness. See `ROADMAP.md` Phase 24 and `CHANGES.md` for the full per-test
-triage. These skip regardless of `ATARI800_CL_STRICT` -- they are permanent,
-documented divergences, not missing assets.
+Three tests are asset-gated (need fetched data before they run): the Klaus
+Dormann 6502 functional test, the Tom Harte / SingleStepTests vectors, and
+Acid800. See the `fetch-test-vectors` skill for how to fetch and run them.
+**A Harte failure is presumed a real emulator bug**: fix it in `src/`, add
+a focused regression test to `tests/test-regressions.lisp` naming the
+opcode and case id, and only then consider the skip list.
 
 ## Development Plan
 
