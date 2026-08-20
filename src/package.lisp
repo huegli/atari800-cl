@@ -246,6 +246,7 @@
            #:bus-pokey-read-fn #:bus-pokey-write-fn
            #:bus-pia-read-fn   #:bus-pia-write-fn
            #:bus-antic-read-fn #:bus-antic-write-fn
+           #:bus-hostdev-read-fn #:bus-hostdev-write-fn
            ;; Region constants
            #:+selftest-base+   #:+selftest-end+
            #:+basic-rom-base+  #:+basic-rom-end+
@@ -452,6 +453,58 @@
            #:check-and-dispatch-irq))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.hostdev — Host disk bridge ($D1xx) + ATR disk images
+;;;
+;;; ROADMAP.md Phase 16 (revised): a memory-mapped peripheral standing in
+;;; for a parallel-bus disk controller, plus the ATR image format it
+;;; serves sectors from.  Depends only on the bus (for BUS-READ/BUS-WRITE
+;;; DCB transfers and the dispatch-closure slots) and compat (types).
+;;; Loads after the real chips and before the renderer/machine, matching
+;;; the .asd file order.
+
+(defpackage #:atari800-cl.hostdev
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.bus)
+  (:documentation "Atari 800 XL host disk bridge ($D1xx) and ATR disk images.")
+  (:export ;; Bridge device
+           #:host-bridge
+           #:make-host-bridge
+           #:host-bridge-p
+           #:host-bridge-drives
+           #:host-bridge-last-status
+           #:host-bridge-read
+           #:host-bridge-write
+           #:attach-hostdev
+           ;; Mounting
+           #:mount-disk
+           #:mount-disk-file
+           #:unmount-disk
+           #:mounted-disk
+           ;; ATR images
+           #:atr-image
+           #:atr-image-p
+           #:atr-image-data
+           #:atr-image-sector-size
+           #:atr-image-sector-count
+           #:atr-image-read-only
+           #:parse-atr-bytes
+           #:load-atr-file
+           #:atr-read-sector
+           #:atr-format-error
+           #:atr-format-error-reason
+           ;; Protocol constants
+           #:+signature+ #:+sig-offset+ #:+go-offset+
+           #:+max-drives+
+           #:+device-disk+
+           #:+cmd-status+ #:+cmd-read+ #:+cmd-write+ #:+cmd-write-verify+
+           #:+status-success+ #:+status-none-yet+
+           #:+status-timeout+ #:+status-nak+ #:+status-write-protect+
+           #:+dcb-ddevic+ #:+dcb-dunit+  #:+dcb-dcomnd+ #:+dcb-dstats+
+           #:+dcb-dbuflo+ #:+dcb-dbufhi+ #:+dcb-dtimlo+
+           #:+dcb-dbytlo+ #:+dcb-dbythi+ #:+dcb-daux1+  #:+dcb-daux2+
+           #:+atr-magic+ #:+atr-header-size+
+           #:+atr-boot-sector-size+ #:+atr-boot-sector-count+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.renderer — Per-scanline NTSC pixel renderer
 ;;;
 ;;; Depends on ANTIC (for display-list state) and GTIA (for color/sprite
@@ -480,7 +533,8 @@
   (:use #:cl #:atari800-cl.compat
         #:atari800-cl.cpu #:atari800-cl.bus #:atari800-cl.mmu
         #:atari800-cl.pia #:atari800-cl.antic #:atari800-cl.gtia
-        #:atari800-cl.pokey #:atari800-cl.audio #:atari800-cl.irq)
+        #:atari800-cl.pokey #:atari800-cl.audio #:atari800-cl.irq
+        #:atari800-cl.hostdev)
   (:documentation "Atari 800 XL top-level machine + frame scheduler.")
   (:export #:atari-machine
            #:make-atari-machine
@@ -488,6 +542,7 @@
            #:atari-machine-mmu  #:atari-machine-pia
            #:atari-machine-antic #:atari-machine-gtia
            #:atari-machine-pokey
+           #:atari-machine-hostdev
            #:atari-machine-frame-count
            #:atari-machine-running-p
            #:atari-machine-input

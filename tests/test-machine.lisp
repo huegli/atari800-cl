@@ -25,12 +25,14 @@
     (is-true (atari800-cl.machine:atari-machine-antic m))
     (is-true (atari800-cl.machine:atari-machine-gtia  m))
     (is-true (atari800-cl.machine:atari-machine-pokey m))
+    (is-true (atari800-cl.machine:atari-machine-hostdev m))
     ;; Bus closures for each chip must be installed (non-NIL).
     (let ((bus (atari800-cl.machine:atari-machine-bus m)))
       (is (functionp (atari800-cl.bus:bus-pia-read-fn   bus)))
       (is (functionp (atari800-cl.bus:bus-gtia-read-fn  bus)))
       (is (functionp (atari800-cl.bus:bus-pokey-read-fn bus)))
-      (is (functionp (atari800-cl.bus:bus-antic-read-fn bus))))
+      (is (functionp (atari800-cl.bus:bus-antic-read-fn bus)))
+      (is (functionp (atari800-cl.bus:bus-hostdev-read-fn bus))))
     ;; CPU bus hooks must point at functions, not NIL.
     (is (functionp (cpu-bus-read  (atari800-cl.machine:atari-machine-cpu m))))
     (is (functionp (cpu-bus-write (atari800-cl.machine:atari-machine-cpu m))))))
@@ -854,3 +856,53 @@ interrupt sequence at precisely the correct cycle.")
   "Acid800 ANTIC: WSYNC release timing -- the test this project's own
 end-of-line (not cycle-105) WSYNC model is most directly expected to
 fail, per README.md's Known Limitations.")
+
+;;; ---------------------------------------------------------------------------
+;;; Host disk bridge (ROADMAP.md Phase 16, revised) -- acceptance scaffold.
+;;;
+;;; The real acceptance criterion for the whole phase: boot minimal-xl's
+;;; own OS ROM with edventure.atr mounted on drive 1 (D1:) via the $D1xx
+;;; bridge (src/hostdev.lisp) and reach the game.  minimal-xl is this
+;;; project's own controlled OS (a submodule at minimal-xl/), built as a
+;;; 16 KiB flat $C000-$FFFF image exactly like the real Atari OS ROM but
+;;; with no PORTB banking and no BASIC ROM -- so it loads through the same
+;;; MACHINE-COLD-RESET :OS-PATH mechanism the real-ROM tests above use,
+;;; just without :BASIC-PATH.
+;;;
+;;; This test CANNOT pass yet: 16a/16b (this commit) give the emulator
+;;; side of the bridge, but minimal-xl's own SIOV doesn't know to probe
+;;; $D1FE for it until the submodule's stage 16c lands (a separate,
+;;; parallel effort -- see ROADMAP.md's "Phase 16 (revised)" section). So
+;;; this is double-gated: %SKIP-OR-FAIL for the ordinary missing-asset
+;;; case (this machine has the files, so that branch is dormant here, but
+;;; keeps the test honest under ATARI800_CL_STRICT on a machine that
+;;; doesn't), and an unconditional SKIP for the "16c isn't wired up yet"
+;;; case, which must stay green even under strict mode since it names a
+;;; missing CODE PATH rather than a missing asset.  Deliberately no real
+;;; boot logic lives past the unconditional skip -- FiveAM's SKIP records
+;;; a result and returns normally rather than aborting the test, so any
+;;; assertions placed after it would still run (and could fail) even
+;;; though the test is nominally skipped.  The wave-2 integration removes
+;;; the unconditional skip once the submodule pointer bump lands, and
+;;; writes the boot-and-assert body in its place.
+
+(defun %minimal-xl-path (name)
+  "Path to minimal-xl/NAME relative to the system source directory, or NIL
+when the file isn't there (e.g. the submodule was never checked out)."
+  (let ((dir (ignore-errors
+              (merge-pathnames (make-pathname :directory '(:relative "minimal-xl"))
+                                (asdf:system-source-directory "atari800-cl")))))
+    (and dir (probe-file (merge-pathnames name dir)))))
+
+(test hostdev-boots-minimal-xl-and-reaches-edventure
+  "Acceptance test for ROADMAP.md Phase 16 (revised): boot minimal-xl's OS
+ROM with edventure.atr mounted on drive 1 via the host disk bridge and
+confirm execution reaches the game.  See the section comment above for why
+this always skips today."
+  (let ((os  (%minimal-xl-path "minimal_os.rom"))
+        (atr (%minimal-xl-path "edventure.atr")))
+    (if (not (and os atr))
+        (%skip-or-fail "minimal-xl/minimal_os.rom or minimal-xl/edventure.atr ~
+                         not found under the minimal-xl/ submodule; skipping ~
+                         the host-bridge boot test.")
+        (skip "minimal-xl bridge probe (16c) not yet integrated"))))

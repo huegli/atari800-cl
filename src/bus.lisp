@@ -13,7 +13,8 @@
 ;;;;   $A000-$BFFF  BASIC ROM (PORTB bit 1 = 0) or RAM
 ;;;;   $C000-$CFFF  OS ROM low (PORTB bit 0 = 1) or RAM
 ;;;;   $D000-$D0FF  GTIA
-;;;;   $D100-$D1FF  Open bus (no chip; reads = $FF)
+;;;;   $D100-$D1FF  Host disk bridge (ROADMAP.md Phase 16) when attached,
+;;;;                else open bus (reads = $FF)
 ;;;;   $D200-$D2FF  POKEY
 ;;;;   $D300-$D3FF  PIA
 ;;;;   $D400-$D4FF  ANTIC
@@ -31,7 +32,9 @@
 ;;;; bus when it is attached: one for reads, one for writes.  The bus
 ;;;; only invokes those closures — it never references the chip-package
 ;;;; symbols directly.  That keeps src/bus.lisp compile-time-independent
-;;;; of the chip implementations.
+;;;; of the chip implementations.  The host disk bridge (ROADMAP.md Phase
+;;;; 16, revised; src/hostdev.lisp) at $D100-$D1FF follows the identical
+;;;; pattern even though it isn't one of the four real chips.
 
 (in-package #:atari800-cl.bus)
 
@@ -98,6 +101,11 @@ Slots:
   (pia-write-fn   nil :type (or null function))
   (antic-read-fn  nil :type (or null function))
   (antic-write-fn nil :type (or null function))
+  ;; Host disk bridge (ROADMAP.md Phase 16, revised) -- $D100-$D1FF.  Not a
+  ;; real Atari chip; NIL on every machine that never calls ATTACH-HOSTDEV,
+  ;; which leaves this page's behaviour exactly the open-bus default below.
+  (hostdev-read-fn  nil :type (or null function))
+  (hostdev-write-fn nil :type (or null function))
   ;; Chip object back-pointers.
   (gtia  nil)
   (pokey nil)
@@ -234,6 +242,7 @@ RAM under any currently-mapped ROM) lands in the 64K RAM array."
   (declare (type bus bus) (type u16 address))
   (let ((fn (case (logand address #xFF00)
               (#xD000 (bus-gtia-read-fn bus))
+              (#xD100 (bus-hostdev-read-fn bus))
               (#xD200 (bus-pokey-read-fn bus))
               (#xD300 (bus-pia-read-fn bus))
               (#xD400 (bus-antic-read-fn bus)))))
@@ -243,6 +252,7 @@ RAM under any currently-mapped ROM) lands in the 64K RAM array."
   (declare (type bus bus) (type u16 address) (type u8 value))
   (let ((fn (case (logand address #xFF00)
               (#xD000 (bus-gtia-write-fn bus))
+              (#xD100 (bus-hostdev-write-fn bus))
               (#xD200 (bus-pokey-write-fn bus))
               (#xD300 (bus-pia-write-fn bus))
               (#xD400 (bus-antic-write-fn bus)))))

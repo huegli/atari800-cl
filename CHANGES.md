@@ -3,6 +3,41 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 16a+16b (in progress) -- Host disk bridge + ATR images
+
+Stages 16a and 16b of the revised Phase 16 ("Host disk bridge: ATR/XEX/OBX
+via minimal-xl") only -- the phase itself is not done; 16c (minimal-xl's
+own SIOV bridge probe, a submodule change), 16d (XEX/OBX loading), and 16e
+(facade API + protocol verbs) are still open.
+
+`src/hostdev.lisp` adds a `$D1xx` host disk bridge: `$D1FE` answers a
+signature byte ($A8) when attached (open bus otherwise, exactly as
+before), and a write to `$D1FF` executes the SIO operation described by
+the standard DCB at `$0300`, transferring data through `BUS-READ`/
+`BUS-WRITE` rather than poking RAM directly, then latches the resulting
+status both into DSTATS and for the next `$D1FF` read. Up to 8 drive
+slots (DUNIT 1-8) support STATUS and READ against mounted ATR images;
+WRITE always answers the read-only status for now. `MAKE-ATARI-MACHINE`
+always builds and attaches one bridge, so `MOUNT-DISK`/`MOUNT-DISK-FILE`/
+`UNMOUNT-DISK` work against any machine's `ATARI-MACHINE-HOSTDEV`.
+
+`PARSE-ATR-BYTES`/`LOAD-ATR-FILE` parse the 16-byte ATR header (magic
+`$0296`, sector size, paragraph-counted image size) into an `ATR-IMAGE`,
+and `ATR-READ-SECTOR` maps a 1-based sector number to file bytes,
+honoring the format's boot-sector rule (sectors 1-3 are always 128 bytes
+even on a double-density image).
+
+The acceptance scaffold required by the roadmap landed in the same
+commit: `HOSTDEV-BOOTS-MINIMAL-XL-AND-REACHES-EDVENTURE` in
+`tests/test-machine.lisp` boots minimal-xl's own OS ROM with
+`edventure.atr` mounted on D1, but is unconditionally skipped -- it
+cannot pass until 16c teaches minimal-xl's SIOV to probe the bridge.
+`tests/test-hostdev.lisp` covers the bridge and ATR-image logic directly:
+signature read with/without a bridge, the `$D1FF` status latch, DCB
+dispatch for READ/STATUS against a synthetic in-memory ATR, the
+double-density boot-sector rule, every documented error status code, and
+the read-only WRITE rejection.
+
 ## ROADMAP Phase 24 -- Acid800 gate: an external ratchet for ANTIC
 
 The CPU has had an external accuracy ratchet since Phase 12 (the Tom

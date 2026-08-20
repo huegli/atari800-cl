@@ -83,6 +83,9 @@ Slots:
   ANTIC       — display-list / DMA engine.
   GTIA        — player/missile / collision latches.
   POKEY       — timers, IRQ, RNG, audio scaffolding.
+  HOSTDEV     — host disk bridge (ROADMAP.md Phase 16, revised) at $D1xx;
+                always present, so MOUNT-DISK et al. work on any machine,
+                but inert (open-bus $D1xx) until a disk is mounted into it.
   FRAME-COUNT — frames elapsed since the machine was constructed.
   RUNNING-P   — when true, MACHINE-RUN-LOOP free-runs frames; when false it
                 parks on the mailbox condvar (paused).
@@ -102,6 +105,7 @@ Slots:
   (antic nil)
   (gtia nil)
   (pokey nil)
+  (hostdev nil)
   (frame-count 0 :type fixnum)
   (running-p nil)
   (mailbox (make-command-mailbox))
@@ -119,21 +123,24 @@ Slots:
 Each chip is built, the bus gets its MMU and all four chip-attach
 closures installed, and the CPU's bus-read/bus-write hooks are pointed
 at the bus.  The result is a machine that is ready for MACHINE-COLD-RESET."
-  (let* ((cpu   (make-cpu))
-         (mmu   (make-mmu))
-         (bus   (make-bus :mmu mmu))
-         (pia   (make-pia))
-         (antic (make-antic))
-         (gtia  (make-gtia))
-         (pokey (make-pokey))
+  (let* ((cpu     (make-cpu))
+         (mmu     (make-mmu))
+         (bus     (make-bus :mmu mmu))
+         (pia     (make-pia))
+         (antic   (make-antic))
+         (gtia    (make-gtia))
+         (pokey   (make-pokey))
+         (hostdev (make-host-bridge))
          (machine (%make-atari-machine :cpu cpu :bus bus :mmu mmu
                                         :pia pia :antic antic
-                                        :gtia gtia :pokey pokey)))
+                                        :gtia gtia :pokey pokey
+                                        :hostdev hostdev)))
     ;; Wire chip dispatch into the bus.
-    (attach-pia   bus pia mmu)
-    (attach-antic bus antic cpu)
-    (attach-gtia  bus gtia)
-    (attach-pokey bus pokey cpu)
+    (attach-pia     bus pia mmu)
+    (attach-antic   bus antic cpu)
+    (attach-gtia    bus gtia)
+    (attach-pokey   bus pokey cpu)
+    (attach-hostdev bus hostdev)
     ;; Wire the CPU to the bus.
     (setf (cpu-bus-read  cpu) (lambda (addr) (bus-read  bus addr))
           (cpu-bus-write cpu) (lambda (addr val) (bus-write bus addr val)))
