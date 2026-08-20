@@ -15,6 +15,11 @@
 ;;;;                              SBCL/arm64 codegen bug on >=4 KiB offsets.
 ;;;;   %SKIP-OR-FAIL             — SKIP unless $ATARI800_CL_STRICT is set,
 ;;;;                              in which case FAIL (ROADMAP.md Phase 21).
+;;;;   BUS-RECORDER              — struct holding a bus access log; see
+;;;;                              INSTALL-BUS-RECORDER below.
+;;;;   INSTALL-BUS-RECORDER      — wrap a CPU's bus hooks to log every
+;;;;                              access in order (ROADMAP.md Phase 17 /
+;;;;                              SCANLINE_ACCURACY_PLAN.md Phase 5).
 
 (in-package #:atari800-cl/tests)
 
@@ -57,6 +62,79 @@ folding I into a constant STR immediate."
   "8 KiB of NOP filler so the bus reads return predictable bytes when
 PORTB is configured to expose BASIC."
   (make-array #x2000 :element-type '(unsigned-byte 8) :initial-element #xEA))
+
+;;; ---------------------------------------------------------------------------
+;;; BUS-RECORDER / INSTALL-BUS-RECORDER — cycle-by-cycle bus trace capture
+;;; (ROADMAP.md Phase 17, SCANLINE_ACCURACY_PLAN.md Phase 5)
+;;;
+;;; The Tom Harte / SingleStepTests vectors (tests/test-harte.lisp) carry a
+;;; full cycle-by-cycle bus trace per case, and SCANLINE_ACCURACY_PLAN.md's
+;;; Phase 5 (NMOS bus quirks: RMW double-write, indexed dummy reads) both
+;;; need a way to see every access a CPU makes, in order, while it runs.
+;;; This stub is written once here and shared by both.
+;;;
+;;; INSTALL-BUS-RECORDER wraps whatever CPU-BUS-READ / CPU-BUS-WRITE
+;;; closures are already installed on a CPU (e.g. by ATTACH-MEMORY-BUS or
+;;; a full machine's wiring) rather than replacing them outright: the
+;;; recorder's closures log the access, then delegate to the previously
+;;; installed ones, so the CPU keeps working exactly as before and gains
+;;; only an observation side effect. Call it AFTER wiring the CPU's real
+;;; bus, not before.
+
+(defstruct bus-recorder
+  "Records every bus access observed through a CPU wrapped by
+INSTALL-BUS-RECORDER, in access order. LOG is an adjustable vector of
+3-element lists (ADDRESS VALUE KIND), KIND being :READ or :WRITE. Use
+BUS-RECORDER-LOG to read the entries back and BUS-RECORDER-RESET to empty
+the log for reuse across more than one instruction."
+  (log (make-array 0 :adjustable t :fill-pointer 0) :type vector))
+
+(defun bus-recorder-reset (recorder)
+  "Empty RECORDER's log in place (fill-pointer back to 0) so the same
+recorder can be reused around another instruction without reinstalling it.
+Returns RECORDER."
+  (setf (fill-pointer (bus-recorder-log recorder)) 0)
+  recorder)
+
+(defun install-bus-recorder (cpu)
+  "Wrap CPU's current CPU-BUS-READ / CPU-BUS-WRITE closures with logging
+and return a fresh BUS-RECORDER.
+
+Every subsequent read appends (ADDRESS VALUE :READ) to the recorder's log
+and every write appends (ADDRESS VALUE :WRITE), in the exact order the CPU
+performs them -- the first entry of an instruction's log is always its
+opcode fetch. After logging, each wrapped closure delegates to the bus
+hooks that were installed on CPU at the time of this call, so an existing
+ATTACH-MEMORY-BUS (or full machine) wiring keeps working unchanged.
+
+Typical use, around one STEP-CPU call:
+
+  (let ((recorder (install-bus-recorder cpu)))
+    (step-cpu cpu)
+    (bus-recorder-log recorder))       ; => the access log
+
+To record more than one instruction into the same log, just keep calling
+STEP-CPU before reading BUS-RECORDER-LOG; to start a fresh instruction's
+log without re-wrapping the closures, call BUS-RECORDER-RESET instead of
+INSTALL-BUS-RECORDER again."
+  (let* ((recorder (make-bus-recorder))
+         (inner-read (cpu-bus-read cpu))
+         (inner-write (cpu-bus-write cpu)))
+    (unless (and inner-read inner-write)
+      (error "INSTALL-BUS-RECORDER requires CPU's bus hooks to already be ~
+              wired (call ATTACH-MEMORY-BUS or otherwise attach a bus first)."))
+    (setf (cpu-bus-read cpu)
+          (lambda (addr)
+            (let ((value (funcall (the function inner-read) addr)))
+              (vector-push-extend (list addr value :read)
+                                   (bus-recorder-log recorder))
+              value))
+          (cpu-bus-write cpu)
+          (lambda (addr value)
+            (vector-push-extend (list addr value :write)
+                                 (bus-recorder-log recorder))
+            (funcall (the function inner-write) addr value)))
+    recorder))
 
 ;;; ---------------------------------------------------------------------------
 ;;; %SKIP-OR-FAIL — the strict test gate (ROADMAP.md Phase 21)

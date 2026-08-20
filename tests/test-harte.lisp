@@ -27,6 +27,24 @@
 ;;;; minutes rather than hours.  `ATARI800_CL_HARTE_FULL=1` runs all 10,000.
 ;;;;
 ;;;; ---------------------------------------------------------------------------
+;;;; Trace comparison (ROADMAP.md Phase 17)
+;;;;
+;;;; Each case's "cycles" array is a full cycle-by-cycle bus trace --
+;;;; [address, value, "read"|"write"] per cycle.  By default the harness
+;;;; uses only its LENGTH, as the expected cycle count (checked alongside
+;;;; the end-state comparison).  Setting `ATARI800_CL_HARTE_TRACE` to a
+;;;; non-empty value additionally compares the trace itself,
+;;;; element-by-element, using the shared recording-bus stub
+;;;; (INSTALL-BUS-RECORDER, tests/test-helpers.lisp).
+;;;;
+;;;; This is deliberately gated OFF by default: SCANLINE_ACCURACY_PLAN.md
+;;;; Phase 5 items 1-2 (the NMOS RMW double-write and indexed dummy reads)
+;;;; are not modelled yet, so a gated run is EXPECTED to fail today --
+;;;; that failure is the specification for implementing those quirks, not
+;;;; a bug in the harness.  Once they land, flip the gate on (or remove it)
+;;;; and delete this paragraph.
+;;;;
+;;;; ---------------------------------------------------------------------------
 ;;;; Triage workflow — READ THIS BEFORE ADDING A SKIP
 ;;;;
 ;;;; A failure here is presumed a REAL emulator bug, not a bad vector.  The
@@ -84,6 +102,15 @@ silence a failing check.")
     (if (and full (member full '("1" "t" "T" "yes" "true") :test #'string=))
         most-positive-fixnum
         *harte-default-cases*)))
+
+(defun %harte-trace-p ()
+  "True when $ATARI800_CL_HARTE_TRACE requests the cycle-by-cycle bus
+trace comparison in addition to the default end-state + cycle-count check
+(ROADMAP.md Phase 17). Gated off by default because it is expected to fail
+until SCANLINE_ACCURACY_PLAN.md Phase 5's RMW double-write and indexed
+dummy-read quirks are modelled."
+  (let ((env (uiop:getenv "ATARI800_CL_HARTE_TRACE")))
+    (and env (plusp (length env)) t)))
 
 (defun %harte-opcode-from-path (path)
   "Opcode number encoded in a vector file's name (\"7d.json\" -> #x7D), or NIL."
@@ -145,8 +172,55 @@ silence a failing check.")
               problems)))
     (nreverse problems)))
 
-(defun %harte-run-case (case-object)
-  "Run one case.  Returns NIL on success, else a description of the failure."
+(defun %harte-kind-keyword (string)
+  "Map a vector cycle's \"read\"/\"write\" tag to :READ / :WRITE, matching
+what INSTALL-BUS-RECORDER logs."
+  (cond ((string= string "read") :read)
+        ((string= string "write") :write)
+        (t (error "Unknown Harte cycle kind ~S" string))))
+
+(defun %harte-format-access (entry)
+  "Format a recorded (ADDRESS VALUE KIND) list for a mismatch message."
+  (if entry
+      (format nil "[$~4,'0X $~2,'0X ~(~A~)]"
+              (first entry) (second entry) (third entry))
+      "(none)"))
+
+(defun %harte-format-expected (want)
+  "Format one element of a vector's \"cycles\" array (an [addr value kind]
+sub-array) for a mismatch message."
+  (if want
+      (format nil "[$~4,'0X $~2,'0X ~A]" (aref want 0) (aref want 1) (aref want 2))
+      "(none)"))
+
+(defun %harte-trace-mismatch (log expected-cycles)
+  "Compare LOG (a BUS-RECORDER's log vector: (address value kind) per
+access, in order) against EXPECTED-CYCLES (the vector case's raw `cycles`
+JSON array: one #(address value \"read\"|\"write\") per cycle),
+element-by-element.  Returns NIL on a full match, else a string naming the
+first mismatching cycle index with both sides -- deliberately allocation-
+light on the matching path (numeric/EQ compares only; formatting happens
+only once a mismatch is found)."
+  (let ((log-len (length log))
+        (want-len (length expected-cycles)))
+    (dotimes (i (max log-len want-len))
+      (let ((got (when (< i log-len) (aref log i)))
+            (want (when (< i want-len) (aref expected-cycles i))))
+        (unless (and got want
+                     (= (first got) (aref want 0))
+                     (= (second got) (aref want 1))
+                     (eq (third got) (%harte-kind-keyword (aref want 2))))
+          (return-from %harte-trace-mismatch
+            (format nil "cycle ~D: got ~A want ~A"
+                    i (%harte-format-access got) (%harte-format-expected want))))))
+    nil))
+
+(defun %harte-run-case (case-object &optional trace)
+  "Run one case.  Returns NIL on success, else a description of the
+failure.  When TRACE is true, additionally installs a recording bus
+(INSTALL-BUS-RECORDER) around the instruction and compares its log against
+the case's `cycles` array element-by-element (ROADMAP.md Phase 17); this
+is skipped by default because %HARTE-TRACE-P gates it off."
   (let* ((cpu (make-cpu))
          (mem (make-memory))
          (initial (%harte-state case-object "initial"))
@@ -156,20 +230,25 @@ silence a failing check.")
          (cycles-used 0))
     (attach-memory-bus cpu mem)
     (%harte-load-state cpu mem initial)
-    (handler-case
-        (setf cycles-used (step-cpu cpu))
-      ;; KIL/JAM: the emulator refuses to continue, which is the modelled
-      ;; equivalent of hardware wedging until reset.  Post-state is not
-      ;; comparable, so a signalled condition IS the expected outcome.
-      (illegal-opcode () (setf halted t)))
-    (cond
-      (halted nil)
-      (t
-       (let ((problems (%harte-compare cpu mem final cycles-used
-                                       expected-cycles)))
-         (when problems
-           (format nil "~A: ~{~A~^; ~}"
-                   (gethash "name" case-object) problems)))))))
+    (let ((recorder (when trace (install-bus-recorder cpu))))
+      (handler-case
+          (setf cycles-used (step-cpu cpu))
+        ;; KIL/JAM: the emulator refuses to continue, which is the modelled
+        ;; equivalent of hardware wedging until reset.  Post-state is not
+        ;; comparable, so a signalled condition IS the expected outcome.
+        (illegal-opcode () (setf halted t)))
+      (cond
+        (halted nil)
+        (t
+         (let ((problems (%harte-compare cpu mem final cycles-used
+                                         expected-cycles)))
+           (when recorder
+             (let ((mismatch (%harte-trace-mismatch (bus-recorder-log recorder)
+                                                     (gethash "cycles" case-object))))
+               (when mismatch (setf problems (nconc problems (list mismatch))))))
+           (when problems
+             (format nil "~A: ~{~A~^; ~}"
+                     (gethash "name" case-object) problems))))))))
 
 (defun %harte-map-cases (path limit function)
   "Call FUNCTION on up to LIMIT parsed cases from PATH.  Returns the count.
@@ -197,13 +276,15 @@ default depth, parses 500 objects instead of 10,000."
                   (incf count)))
           finally (return count))))
 
-(defun %harte-run-opcode (path limit)
-  "Run up to LIMIT cases from PATH.  Returns (values run-count failures)."
+(defun %harte-run-opcode (path limit &optional trace)
+  "Run up to LIMIT cases from PATH.  Returns (values run-count failures).
+TRACE, when true, is passed through to %HARTE-RUN-CASE to additionally
+compare each case's cycle-by-cycle bus trace."
   (let ((failures '()))
     (values (%harte-map-cases
              path limit
              (lambda (case-object)
-               (let ((problem (%harte-run-case case-object)))
+               (let ((problem (%harte-run-case case-object trace)))
                  (when problem (push problem failures)))))
             (nreverse failures))))
 
@@ -220,6 +301,7 @@ registers, memory and cycle count after a single STEP-CPU."
                the variable at its 6502/v1 directory to enable them.")
         (let ((files (%harte-vector-files dir))
               (limit (%harte-case-limit))
+              (trace (%harte-trace-p))
               (total-cases 0)
               (total-failures 0))
           (if (null files)
@@ -229,7 +311,7 @@ registers, memory and cycle count after a single STEP-CPU."
                   (destructuring-bind (opcode . path) entry
                     (unless (member opcode +harte-skip-opcodes+)
                       (multiple-value-bind (run failures)
-                          (%harte-run-opcode path limit)
+                          (%harte-run-opcode path limit trace)
                         (incf total-cases run)
                         (incf total-failures (length failures))
                         ;; One check per opcode keeps the check count sane

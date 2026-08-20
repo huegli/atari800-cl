@@ -53,6 +53,53 @@
       (is (> (cpu-cycles cpu) before)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; INSTALL-BUS-RECORDER self-test (tests/test-helpers.lisp, ROADMAP.md
+;;; Phase 17). This exercises the recording-bus stub on its own, independent
+;;; of the Harte vectors it was built to serve: a known instruction (STA
+;;; $10, zero-page) must log exactly the three accesses NMOS hardware makes
+;;; for that addressing mode -- opcode fetch, operand fetch, store -- in
+;;; order, with the right address/value/kind on each.
+
+(test recording-bus-logs-known-instruction
+  "INSTALL-BUS-RECORDER, wrapped around a single STA $10 (zero-page, opcode
+$85), must log the three accesses in order: opcode fetch (read), operand
+fetch (read), then the store itself (write) -- with the right address and
+value on each."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (reset-cpu cpu mem)                ; wires the bus hooks
+    (setf (cpu-pc cpu) #x0600
+          (cpu-a  cpu) #x42)
+    (mem-write mem #x0600 #x85)        ; STA $10
+    (mem-write mem #x0601 #x10)
+    (let ((recorder (install-bus-recorder cpu)))
+      (step-cpu cpu)
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 3 (length log)))
+        (is (equal (list #x0600 #x85 :read)  (aref log 0)))
+        (is (equal (list #x0601 #x10 :read)  (aref log 1)))
+        (is (equal (list #x0010 #x42 :write) (aref log 2)))))))
+
+(test recording-bus-reset-clears-log
+  "BUS-RECORDER-RESET empties a recorder's log in place so it can be
+reused around a second instruction without reinstalling it."
+  (let ((cpu (make-cpu))
+        (mem (make-memory)))
+    (reset-cpu cpu mem)
+    (setf (cpu-pc cpu) #x0600
+          (cpu-a  cpu) #x99)
+    (mem-write mem #x0600 #x85)        ; STA $10
+    (mem-write mem #x0601 #x10)
+    (mem-write mem #x0602 #xEA)        ; NOP
+    (let ((recorder (install-bus-recorder cpu)))
+      (step-cpu cpu)                   ; STA $10: 3 accesses
+      (is (= 3 (length (bus-recorder-log recorder))))
+      (bus-recorder-reset recorder)
+      (is (= 0 (length (bus-recorder-log recorder))))
+      (step-cpu cpu)                   ; NOP: 2 accesses (opcode fetch + 1)
+      (is (equal (list #x0602 #xEA :read) (aref (bus-recorder-log recorder) 0))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Klaus Dormann's 6502 functional test
 ;;;
 ;;; This is a comprehensive test suite written in 6502 assembly that
