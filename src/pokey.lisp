@@ -108,12 +108,17 @@
 
 ;;; IRQEN / IRQST bit masks.  Bit assignment per the XL OS's own interrupt
 ;;; dispatch table (TIRQ in Atari_XL_OS_Rev.2.asm): timer 4 is bit 2, and
-;;; bits 3-4 are the two serial-output interrupts.
+;;; bits 3-4 are the two serial-output interrupts.  +IRQ-OTHER-KEY+ and
+;;; +IRQ-BREAK-KEY+ (ROADMAP.md Phase 13) are the same table's entries 1
+;;; and 0 -- CONFIRMED by reading TIRQ directly (`.byte $80 ;0 - BREAK key
+;;; IRQ` / `.byte $40 ;1 - keyboard IRQ`), not just taken from the plan.
 (defconstant +irq-timer1+ #x01)
 (defconstant +irq-timer2+ #x02)
 (defconstant +irq-timer4+ #x04)
 (defconstant +irq-serial-out-done+   #x08)  ; SEROC — transmission complete
 (defconstant +irq-serial-out-needed+ #x10)  ; SEROR — output data needed
+(defconstant +irq-other-key+  #x40)  ; a (non-BREAK) key was pressed
+(defconstant +irq-break-key+  #x80)  ; BREAK was pressed
 
 ;;; PENDING bits (ROADMAP.md Phase 22).  A single fixnum consolidating
 ;;; every "is there per-advance work beyond the plain timer chain"
@@ -128,10 +133,26 @@
 ;;; bit is touched.
 (defconstant +pokey-pending-serial-tx+ #x01)  ; SERIAL-OUT-CYCLES > 0
 (defconstant +pokey-pending-audio+     #x02)  ; an AUDIO-UNIT is attached
-;;; Bits 2 (#x04) and 3 (#x08) are reserved for ROADMAP.md Phase 13
-;;; (keyboard IRQ: a latched key pending) and Phase 16a (SIO receive: a
-;;; byte shifting in) respectively, so those phases extend this mask
-;;; instead of adding their own independent per-advance test.
+(defconstant +pokey-pending-key+       #x04)  ; an INPUT-STATE is attached
+;;; Bit 3 (#x08) is reserved for ROADMAP.md Phase 16a (SIO receive: a byte
+;;; shifting in), so that phase extends this mask instead of adding its
+;;; own independent per-advance test.
+;;;
+;;; +POKEY-PENDING-KEY+ deliberately mirrors +POKEY-PENDING-AUDIO+'s
+;;; shape rather than the plan's literal "a latched key pending" wording:
+;;; INPUT-SET-KEY / INPUT-SET-BREAK run on socket reader threads, and the
+;;; only OTHER writer of PENDING is the emulator thread, so a bit that
+;;; those setters wrote into directly would be a lock-free read-modify-
+;;; write race against the emulator thread's own clears of bits 0/1 (a
+;;; classic lost-update: whichever write lands last erases the other's
+;;; effect). Making the bit mean "INPUT is attached" keeps PENDING
+;;; single-writer (ATTACH-POKEY-INPUT, emulator thread only, exactly like
+;;; ATTACH-AUDIO's bit) and race-free; the actual per-keystroke event data
+;;; lives in INPUT-STATE's own lock (INPUT-CONSUME-KEY-IRQ /
+;;; -BREAK-IRQ), drained every advance while the bit is set. Benchmarked
+;;; cost is unaffected either way: no bench workload attaches input, so
+;;; the bit -- and the lock it gates -- is never touched during a
+;;; measured run; see PERFORMANCE_LOG.md's Phase 13 note.
 
 ;;; SKCTL serial mode.  Bits 4-6 select the serial mode; every transmit
 ;;; mode has bit 5 set (the OS's ESS does ORA #$20 for SIO SEND, plus #$08
@@ -622,6 +643,32 @@ own divided-clock expiry does nothing but reload the sub-counter."
           (setf (aref (pokey-timer-counts pokey) ch) new)
           nil))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Keyboard / BREAK IRQ servicing (ROADMAP.md Phase 13)
+;;;
+;;; INPUT-SET-KEY / INPUT-SET-BREAK (src/input.lisp) run on socket reader
+;;; threads and arm one-shot flags inside INPUT-STATE's own lock; this
+;;; drains them from the emulator thread and raises the matching IRQ(s).
+;;; Called every advance while POKEY-INPUT is attached (PENDING's key bit
+;;; just gates that, per the comment on +POKEY-PENDING-KEY+ above) --
+;;; taking INPUT-STATE's lock here is safe because that only happens in
+;;; real interactive use, nowhere near the benchmarked hot path (no bench
+;;; workload attaches input).
+
+(defun %pokey-service-key-irqs (pokey cpu)
+  "Drain INPUT's armed key/BREAK flags and raise the matching POKEY
+IRQ(s).  Returns T if either was actually raised (i.e. enabled in
+IRQEN)."
+  (declare (type pokey pokey))
+  (let ((input (pokey-input pokey))
+        (irq nil))
+    (when input
+      (when (atari800-cl.input:input-consume-key-irq input)
+        (when (%raise-irq pokey cpu +irq-other-key+) (setf irq t)))
+      (when (atari800-cl.input:input-consume-break-irq input)
+        (when (%raise-irq pokey cpu +irq-break-key+) (setf irq t))))
+    irq))
+
 (declaim (ftype (function (pokey (or null cpu) fixnum) boolean) pokey-advance)
          (ftype (function (pokey (or null cpu)) boolean) pokey-tick))
 
@@ -672,6 +719,9 @@ set."
           (progn
             (when (logtest pending +pokey-pending-serial-tx+)
               (when (%serial-out-advance pokey cpu 1)
+                (setf irq-raised t)))
+            (when (logtest pending +pokey-pending-key+)
+              (when (%pokey-service-key-irqs pokey cpu)
                 (setf irq-raised t)))
             (if (logtest pending +pokey-pending-audio+)
                 (let ((audio (pokey-audio pokey)))
@@ -749,6 +799,12 @@ the audio check alone lived in this position."
             ;; POKEY-TICKs.
             (when (logtest pending +pokey-pending-serial-tx+)
               (when (%serial-out-advance pokey cpu n)
+                (setf irq-raised t)))
+            ;; A key/BREAK IRQ needs no cycle-count reasoning (it isn't
+            ;; timed against N the way the transmitter is), so servicing
+            ;; it once per chunk-loop entry, same as POKEY-TICK, is exact.
+            (when (logtest pending +pokey-pending-key+)
+              (when (%pokey-service-key-irqs pokey cpu)
                 (setf irq-raised t)))
             (if (logtest pending +pokey-pending-audio+)
                 (let ((audio (pokey-audio pokey)))
@@ -860,10 +916,12 @@ Side effects:
         (pokey-poly9-state  pokey) #x01FF
         (pokey-rng-lag      pokey) 0
         ;; SERIAL-OUT-CYCLES just went to 0 above, so its PENDING bit must
-        ;; go with it; AUDIO is an emulator-level attachment independent
-        ;; of chip reset (see ATTACH-AUDIO in src/audio.lisp) and survives.
+        ;; go with it; AUDIO and INPUT are emulator-level attachments
+        ;; independent of chip reset (see ATTACH-AUDIO in src/audio.lisp
+        ;; and ATTACH-POKEY-INPUT above) and survive.
         (pokey-pending      pokey) (logand (pokey-pending pokey)
-                                           +pokey-pending-audio+))
+                                           (logior +pokey-pending-audio+
+                                                   +pokey-pending-key+)))
   ;; IRQEN is now 0, so this de-asserts any IRQ POKEY was holding.
   (%sync-irq-line pokey)
   pokey)
@@ -880,7 +938,16 @@ supplied, POKEY stores the back-pointer so timer IRQs route correctly."
 
 (defun attach-pokey-input (pokey input)
   "Attach a host INPUT-STATE to POKEY so POT0..3, KBCODE, and SKSTAT reads
-reflect live input.  Pass NIL to detach.  Returns POKEY."
+reflect live input, and so key/BREAK presses raise POKEY's keyboard IRQs
+(ROADMAP.md Phase 13).  Pass NIL to detach.  Returns POKEY."
   (declare (type pokey pokey))
-  (setf (pokey-input pokey) input)
+  (setf (pokey-input pokey) input
+        ;; Maintain POKEY's PENDING bitmask (ROADMAP.md Phase 22), exactly
+        ;; as ATTACH-AUDIO does for its bit -- see the PENDING bits
+        ;; comment above for why this bit means "input attached" rather
+        ;; than mirroring INPUT-STATE's own per-keystroke flags directly.
+        (pokey-pending pokey)
+        (if input
+            (logior   (pokey-pending pokey) +pokey-pending-key+)
+            (logandc2 (pokey-pending pokey) +pokey-pending-key+)))
   pokey)

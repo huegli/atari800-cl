@@ -534,3 +534,63 @@ without them the OS spins forever waiting for XMTDON."
           (is-true (getf (atari800-cl.machine:machine-portb-state m)
                          :basic-rom-mapped)
                    "BASIC ROM must be mapped once the prompt is up")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Typed input reaches BASIC through POKEY's keyboard IRQ (ROADMAP.md
+;;; Phase 13) -- the real acceptance criterion: it exercises the keyboard
+;;; IRQ, the OS editor, and BASIC's evaluator in one pass.
+
+(defparameter *print-2-plus-2-keycodes*
+  '(#x4A #x68 #x4D #x63 #x6D          ; P R I N T
+    #x21                              ; space
+    #x1E                              ; 2
+    #x06                              ; +
+    #x1E                              ; 2
+    #x0C)                             ; RETURN
+  "POKEY key codes for typing \"PRINT 2+2\" then RETURN, read directly
+from the real OS's own TCKD table (Atari_XL_OS_Rev.2.asm: \"Entry n is
+the ATASCII equivalent of key code n\") rather than assumed -- letters
+use their $40-$7F entries (SHIFT bit set), since those are the ones that
+decode to uppercase ATASCII; the digits, space, +, and RETURN entries
+are shift-free.  Verified empirically against the real ROM: this exact
+sequence echoes \"PRINT 2+2\" to the screen and BASIC evaluates it to
+\"4\" on the next line.")
+
+(test real-os-boots-and-types-print-2-plus-2
+  "Typed input reaches BASIC: boot to READY, drive the key codes for
+\"PRINT 2+2\" + RETURN through an attached INPUT-STATE the same way a
+real keypress would (a press that arms POKEY's keyboard IRQ, a matching
+release), run enough frames for BASIC to evaluate the statement, then
+assert the digit 4 shows up in screen memory."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (%skip-or-fail "OS/BASIC ROM images not found; skipping the type-in-BASIC test.")
+        (let ((in (atari800-cl.input:make-input-state))
+              (ready nil))
+          (atari800-cl.machine:attach-input m in)
+          ;; Reach READY first (same budget as
+          ;; REAL-OS-ROM-BOOTS-THROUGH-TO-BASIC-PROMPT above).
+          (loop repeat 1500
+                until ready
+                do (atari800-cl.machine:machine-run-frame m)
+                   (when (zerop (mod (atari800-cl.machine:atari-machine-frame-count m)
+                                     50))
+                     (setf ready
+                           (loop for row below 24
+                                   thereis (search "READY"
+                                                   (string-upcase
+                                                    (%screen-row-text m row)))))))
+          (is-true ready "must reach the READY prompt before typing can be tested")
+          ;; Press, let the keyboard IRQ + editor see it, release, settle.
+          (dolist (code *print-2-plus-2-keycodes*)
+            (atari800-cl.input:input-set-key in code t)
+            (dotimes (i 3) (atari800-cl.machine:machine-run-frame m))
+            (atari800-cl.input:input-set-key in code nil)
+            (dotimes (i 2) (atari800-cl.machine:machine-run-frame m)))
+          ;; Give BASIC time to evaluate PRINT 2+2 and redraw the screen.
+          (dotimes (i 30) (atari800-cl.machine:machine-run-frame m))
+          (is-true (loop for row below 24
+                           thereis (find #\4 (%screen-row-text m row)))
+                   "'4' must appear in screen memory after typing PRINT ~
+                    2+2 and RETURN (row 2: ~S, row 3: ~S)"
+                   (%screen-row-text m 2) (%screen-row-text m 3))))))

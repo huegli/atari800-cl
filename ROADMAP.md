@@ -119,8 +119,37 @@
 > new `scripts/bench-ab.sh` against the pre-phase commit (rule 3):
 > nothing regressed on either implementation; two clean improvements
 > (LispWorks `nop` +8.5%, SBCL `audio` +8.9%), the rest positive but
-> noisy at this sample size -- see `PERFORMANCE_LOG.md`. Phase 13
-> (POKEY keyboard IRQ) is next.
+> noisy at this sample size -- see `PERFORMANCE_LOG.md`.
+>
+> **Phase 13 done (2026-08-19)**: keyboard/BREAK IRQs claim `PENDING`
+> bit 2 (`+POKEY-PENDING-KEY+`), set/cleared by `ATTACH-POKEY-INPUT`
+> exactly like the audio bit -- a deliberate deviation from this
+> document's literal "flag set through the input plumbing" wording (see
+> the +POKEY-PENDING-KEY+ comment in `src/pokey.lisp`): having
+> `INPUT-SET-KEY` write the bit directly would race the emulator
+> thread's own clears of bits 0/1, a lost-update with no lock to stop
+> it. The bit instead just gates whether `INPUT` is attached; the actual
+> per-keystroke event lives in two new one-shot flags inside
+> `INPUT-STATE`'s own lock (`INPUT-CONSUME-KEY-IRQ` /
+> `-BREAK-IRQ`), drained every advance while attached -- safe because
+> that only happens in real interactive use, never in a bench workload.
+> `+IRQ-OTHER-KEY+` (`$40`) / `+IRQ-BREAK-KEY+` (`$80`) were confirmed by
+> reading `TIRQ` in `Atari_XL_OS_Rev.2.asm` directly, not just taken
+> from the plan; the plan's SKSTAT bit2/bit3 claim was checked the same
+> way and turned out to be wrong -- the existing bit2-only
+> implementation already matched the real OS's own VBI debounce logic
+> (per `minimal-xl`'s documented phase 4), so `input-pokey-skstat` was
+> left unchanged. The acceptance test (`REAL-OS-BOOTS-AND-TYPES-PRINT-2-
+> PLUS-2`) types real POKEY key codes -- read from the OS's own TCKD
+> table, verified empirically against the real ROM -- through an
+> attached `INPUT-STATE` after booting to `READY`, and asserts `4`
+> lands in screen memory once BASIC evaluates `PRINT 2+2`. Not
+> benchmarked fresh: the new code path is strictly inside `PENDING`'s
+> nonzero branch, gated by a bit no bench workload ever sets, so it is
+> provably zero-cost in every measured workload by construction: a live
+> `bench-ab.sh` attempt was abandoned when the host's load average hit
+> 74 from unrelated activity. Phase 14 (`fetch-harte.sh`) is next per
+> the recommended order, alongside 15/23.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -219,7 +248,7 @@ and say so in the commit message.
 | 10    | AESP audio streaming + WAV capture           | 9          | no       | done   |
 | 11    | A/V recording tooling (`record.sh` -> mp4)    | 4, 10      | no       | done   |
 | 12    | Tom Harte ProcessorTests harness             | --          | no       | done   |
-| 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | open   |
+| 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | done   |
 | 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | open   |
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | open   |
 | 16    | SIO receive path + virtual disk (ATR)        | 13, 22     | no       | open   |

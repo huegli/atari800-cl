@@ -629,3 +629,86 @@ SKSTAT (15) reads come from live input; RANDOM/IRQST are unaffected."
     (is (= #xFB (atari800-cl.pokey:pokey-read pok #xD20F)) "SKSTAT bit2 clear")
     ;; IRQST (offset 14) is not an input register; still the POKEY latch.
     (is (= #xFF (atari800-cl.pokey:pokey-read pok #xD20E)) "IRQST untouched")))
+
+;;; ---------------------------------------------------------------------------
+;;; Keyboard / BREAK IRQ (ROADMAP.md Phase 13)
+
+(test pokey-attach-input-sets-pending-key-bit
+  "ATTACH-POKEY-INPUT sets/clears PENDING's key bit exactly like
+ATTACH-AUDIO does for its own bit; RESET-POKEY preserves it while input
+stays attached (an emulator-level attachment, not a chip register --
+see the +POKEY-PENDING-KEY+ comment in src/pokey.lisp)."
+  (let ((pok (atari800-cl.pokey:make-pokey))
+        (in  (make-input-state)))
+    (is (zerop (logand (atari800-cl.pokey:pokey-pending pok)
+                       atari800-cl.pokey:+pokey-pending-key+))
+        "no input attached -> key bit clear")
+    (atari800-cl.pokey:attach-pokey-input pok in)
+    (is (plusp (logand (atari800-cl.pokey:pokey-pending pok)
+                       atari800-cl.pokey:+pokey-pending-key+))
+        "input attached -> key bit set")
+    (atari800-cl.pokey:reset-pokey pok)
+    (is (plusp (logand (atari800-cl.pokey:pokey-pending pok)
+                       atari800-cl.pokey:+pokey-pending-key+))
+        "RESET-POKEY preserves the key bit while input stays attached")
+    (atari800-cl.pokey:attach-pokey-input pok nil)
+    (is (zerop (logand (atari800-cl.pokey:pokey-pending pok)
+                       atari800-cl.pokey:+pokey-pending-key+))
+        "detaching clears the key bit")))
+
+(test pokey-key-press-raises-irq-when-enabled
+  "A key latched via INPUT-SET-KEY raises POKEY's keyboard IRQ (IRQEN bit
+6 / +IRQ-OTHER-KEY+) on the next advance, clearing IRQST and asserting
+the CPU's pending-IRQ line."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture)
+    (let ((in (make-input-state)))
+      (atari800-cl.pokey:attach-pokey-input pok in)
+      (atari800-cl.bus:bus-write bus #xD20E atari800-cl.pokey:+irq-other-key+)
+      (input-set-key in #x4A)                ; 'P', arms the key IRQ
+      (is-false (cpu-pending-irq cpu) "not yet serviced")
+      (is-true (atari800-cl.pokey:pokey-advance pok cpu 1)
+               "the servicing advance reports an IRQ was raised")
+      (is-true (cpu-pending-irq cpu) "CPU pending-IRQ line asserted")
+      (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok)
+                         atari800-cl.pokey:+irq-other-key+))
+          "IRQST bit 6 pending (active-low)"))))
+
+(test pokey-key-press-does-not-raise-irq-when-disabled
+  "The same key press with IRQEN bit 6 clear leaves IRQST and the CPU
+line untouched -- the flag is still drained, just not turned into an
+interrupt, matching %RAISE-IRQ's normal semantics for a disabled source."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture)
+    (declare (ignore bus))
+    (let ((in (make-input-state)))
+      (atari800-cl.pokey:attach-pokey-input pok in)
+      (input-set-key in #x4A)
+      (is-false (atari800-cl.pokey:pokey-advance pok cpu 1)
+                "no IRQ raised: bit 6 is disabled")
+      (is-false (cpu-pending-irq cpu))
+      (is (= #xFF (atari800-cl.pokey:pokey-irqst pok)) "IRQST untouched"))))
+
+(test pokey-break-press-raises-irq-when-enabled
+  "BREAK, signalled via INPUT-SET-BREAK, raises POKEY's BREAK IRQ (IRQEN
+bit 7 / +IRQ-BREAK-KEY+) independently of the ordinary keyboard IRQ, and
+does not touch KBCODE."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture)
+    (let ((in (make-input-state)))
+      (atari800-cl.pokey:attach-pokey-input pok in)
+      (atari800-cl.bus:bus-write bus #xD20E atari800-cl.pokey:+irq-break-key+)
+      (input-set-break in)
+      (is-true (atari800-cl.pokey:pokey-advance pok cpu 1))
+      (is-true (cpu-pending-irq cpu))
+      (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok)
+                         atari800-cl.pokey:+irq-break-key+)))
+      (is (zerop (input-pokey-kbcode in)) "BREAK does not touch KBCODE"))))
+
+(test pokey-tick-also-services-key-irqs
+  "POKEY-TICK's per-cycle path services key/BREAK IRQs the same as
+POKEY-ADVANCE (both share %POKEY-SERVICE-KEY-IRQS)."
+  (multiple-value-bind (pok cpu bus) (%make-pokey-fixture)
+    (let ((in (make-input-state)))
+      (atari800-cl.pokey:attach-pokey-input pok in)
+      (atari800-cl.bus:bus-write bus #xD20E atari800-cl.pokey:+irq-other-key+)
+      (input-set-key in #x4A)
+      (is-true (atari800-cl.pokey:pokey-tick pok cpu))
+      (is-true (cpu-pending-irq cpu)))))

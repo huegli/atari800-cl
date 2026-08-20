@@ -20,6 +20,14 @@
 ;;;;   KBCODE ($D209, POKEY) — last key scan code.
 ;;;;   SKSTAT ($D20F, POKEY) — bit2 is the "last key still pressed" line,
 ;;;;     ACTIVE-LOW; idle = $FF.
+;;;;
+;;;; Keyboard / BREAK IRQ arming (ROADMAP.md Phase 13): a key press or a
+;;;; BREAK press each arm a one-shot flag here, read-and-cleared by POKEY
+;;;; on its next advance (INPUT-CONSUME-KEY-IRQ / INPUT-CONSUME-BREAK-IRQ)
+;;;; to raise IRQEN bit 6 / bit 7.  BREAK is a dedicated physical switch on
+;;;; real hardware, not part of the 64-key scan matrix, so it gets its own
+;;;; setter (INPUT-SET-BREAK) and does not touch KBCODE or the SKSTAT
+;;;; key-down line at all.
 
 (in-package #:atari800-cl.input)
 
@@ -40,15 +48,21 @@ Slots (all integers are register-ready bytes in their native encoding):
   TRIG        — 4-element array; TRIG0..3 (active-low, 0 = fire pressed).
   CONSOL      — START/SELECT/OPTION byte (active-low, bits 0/1/2).
   POT         — 4-element array; POT0..3 paddle positions (0..228).
-  KBCODE      — last keyboard scan code.
-  KEY-PRESSED — T while a key is held (drives the SKSTAT line)."
+  KBCODE            — last keyboard scan code.
+  KEY-PRESSED       — T while a key is held (drives the SKSTAT line).
+  KEY-IRQ-PENDING   — one-shot: a key press arrived since POKEY last
+                      consumed it (INPUT-CONSUME-KEY-IRQ).
+  BREAK-IRQ-PENDING — one-shot: BREAK was pressed since POKEY last
+                      consumed it (INPUT-CONSUME-BREAK-IRQ)."
   (lock (make-lock "input-state"))
   (joy    (make-array 2 :element-type 'u8 :initial-element #x0F))
   (trig   (make-array 4 :element-type 'u8 :initial-element 1))
   (consol #x07 :type u8)
   (pot    (make-array 4 :element-type 'u8 :initial-element 228))
   (kbcode 0   :type u8)
-  (key-pressed nil))
+  (key-pressed nil)
+  (key-irq-pending nil)
+  (break-irq-pending nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Setters — called from socket reader threads.
@@ -85,11 +99,29 @@ Slots (all integers are register-ready bytes in their native encoding):
   input)
 
 (defun input-set-key (input kbcode &optional (pressed t))
-  "Latch KBCODE as the last key and set the held/released state."
+  "Latch KBCODE as the last key and set the held/released state.  A press
+(PRESSED true) also arms the keyboard IRQ POKEY services on its next
+advance (see INPUT-CONSUME-KEY-IRQ); a release does not, matching real
+hardware, where only a scan-matrix transition into key-down raises the
+interrupt."
   (declare (type input-state input))
   (with-lock ((input-state-lock input))
     (setf (input-state-kbcode input) (ldb (byte 8 0) kbcode)
-          (input-state-key-pressed input) pressed))
+          (input-state-key-pressed input) pressed)
+    (when pressed
+      (setf (input-state-key-irq-pending input) t)))
+  input)
+
+(defun input-set-break (input &optional (pressed t))
+  "Signal the BREAK key.  A press (PRESSED true) arms POKEY's BREAK IRQ
+\(see INPUT-CONSUME-BREAK-IRQ); a release does nothing.  BREAK is a
+dedicated physical switch on real hardware, not part of the 64-key scan
+matrix, so unlike INPUT-SET-KEY this does not touch KBCODE or the
+SKSTAT key-down line."
+  (declare (type input-state input))
+  (with-lock ((input-state-lock input))
+    (when pressed
+      (setf (input-state-break-irq-pending input) t)))
   input)
 
 ;;; ---------------------------------------------------------------------------
@@ -133,3 +165,21 @@ Slots (all integers are register-ready bytes in their native encoding):
     (if (input-state-key-pressed input)
         #xFB                            ; bit2 = 0 -> key down
         #xFF)))
+
+(defun input-consume-key-irq (input)
+  "Read-and-clear the keyboard-IRQ-armed flag.  T if a key press was
+latched (via INPUT-SET-KEY) since the last call; POKEY calls this once
+per advance while input is attached and raises its keyboard IRQ on T."
+  (declare (type input-state input))
+  (with-lock ((input-state-lock input))
+    (prog1 (input-state-key-irq-pending input)
+      (setf (input-state-key-irq-pending input) nil))))
+
+(defun input-consume-break-irq (input)
+  "Read-and-clear the BREAK-IRQ-armed flag.  T if BREAK was pressed (via
+INPUT-SET-BREAK) since the last call; POKEY calls this once per advance
+while input is attached and raises its BREAK IRQ on T."
+  (declare (type input-state input))
+  (with-lock ((input-state-lock input))
+    (prog1 (input-state-break-irq-pending input)
+      (setf (input-state-break-irq-pending input) nil))))

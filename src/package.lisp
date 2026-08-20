@@ -102,13 +102,17 @@
            #:input-set-console
            #:input-set-paddle
            #:input-set-key
+           #:input-set-break
            ;; Getters (called from the emulator thread by PIA/GTIA/POKEY)
            #:input-pia-porta
            #:input-gtia-trig
            #:input-gtia-consol
            #:input-pokey-pot
            #:input-pokey-kbcode
-           #:input-pokey-skstat))
+           #:input-pokey-skstat
+           ;; Keyboard/BREAK IRQ arming (consumed by POKEY; ROADMAP.md Phase 13)
+           #:input-consume-key-irq
+           #:input-consume-break-irq))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.memory — 64K address space
@@ -389,6 +393,7 @@
            #:attach-pokey
            #:attach-pokey-input
            #:+irq-timer1+ #:+irq-timer2+ #:+irq-timer4+
+           #:+irq-other-key+ #:+irq-break-key+
            ;; Serial output transmitter (SEROUT + SEROR/SEROC interrupts)
            #:pokey-serial-out-shift #:pokey-serial-out-holding
            #:pokey-serial-out-cycles
@@ -398,6 +403,7 @@
            ;; PENDING bitmask (ROADMAP.md Phase 22)
            #:pokey-pending
            #:+pokey-pending-serial-tx+ #:+pokey-pending-audio+
+           #:+pokey-pending-key+
            ;; Audio hooks (installed by src/audio.lisp's ATTACH-AUDIO)
            #:pokey-audio
            #:pokey-audio-advance-fn #:pokey-audio-underflow-fn

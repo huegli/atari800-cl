@@ -96,6 +96,34 @@
     (is (= #x3F (input-pokey-kbcode in)) "KBCODE keeps last code")))
 
 ;;; ---------------------------------------------------------------------------
+;;; Keyboard / BREAK IRQ arming (ROADMAP.md Phase 13)
+
+(test input-set-key-press-arms-key-irq-release-does-not
+  "INPUT-SET-KEY arms the keyboard-IRQ flag on a press; a release does
+not, matching real hardware (only a scan-matrix transition into key-down
+raises the interrupt)."
+  (let ((in (make-input-state)))
+    (is-false (input-consume-key-irq in) "nothing armed on a fresh state")
+    (input-set-key in #x4A nil)          ; released -- must NOT arm
+    (is-false (input-consume-key-irq in) "a release does not arm the IRQ")
+    (input-set-key in #x4A t)            ; pressed
+    (is-true (input-consume-key-irq in) "a press arms the IRQ")
+    (is-false (input-consume-key-irq in) "consuming clears the flag")))
+
+(test input-set-break-press-arms-break-irq-and-nothing-else
+  "INPUT-SET-BREAK arms the BREAK-IRQ flag independently of the ordinary
+keyboard flag, and touches neither KBCODE nor SKSTAT."
+  (let ((in (make-input-state)))
+    (input-set-break in)
+    (is-true (input-consume-break-irq in) "a press arms the BREAK IRQ")
+    (is-false (input-consume-break-irq in) "consuming clears the flag")
+    (is-false (input-consume-key-irq in) "the ordinary key flag is untouched")
+    (is (= 0 (input-pokey-kbcode in)) "KBCODE untouched")
+    (is (= #xFF (input-pokey-skstat in)) "SKSTAT untouched")
+    (input-set-break in nil)             ; released -- must NOT arm
+    (is-false (input-consume-break-irq in) "a release does not arm the IRQ")))
+
+;;; ---------------------------------------------------------------------------
 ;;; Concurrency smoke test
 
 (test input-concurrent-writers-do-not-crash

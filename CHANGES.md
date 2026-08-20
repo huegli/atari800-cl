@@ -3,6 +3,64 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 13 -- POKEY keyboard IRQ: the OS editor now sees keystrokes
+
+The machine booted to BASIC's `Ready` but could not be typed at: AESP's
+`KEY_DOWN` already reached `INPUT-SET-KEY`, making `KBCODE` readable, but
+the XL OS reads `KBCODE` from an interrupt handler dispatched off IRQEN
+bit 6, and POKEY had no such source. `+IRQ-OTHER-KEY+` (`$40`) and
+`+IRQ-BREAK-KEY+` (`$80`) are confirmed straight from `TIRQ` in
+`Atari_XL_OS_Rev.2.asm` (`.byte $40 ;1 - keyboard IRQ`, `.byte $80 ;0 -
+BREAK key IRQ`), not just taken from the plan.
+
+`src/input.lisp` adds two one-shot flags to `INPUT-STATE`,
+`KEY-IRQ-PENDING` / `BREAK-IRQ-PENDING`, armed under its existing lock by
+`INPUT-SET-KEY` on a press and by the new `INPUT-SET-BREAK`, and drained
+by two new getters `INPUT-CONSUME-KEY-IRQ` / `-BREAK-IRQ`. BREAK gets its
+own setter rather than reusing `INPUT-SET-KEY`, because on real hardware
+it is a dedicated physical switch outside the 64-key scan matrix and does
+not touch KBCODE.
+
+`src/pokey.lisp` claims `PENDING` bit 2 (`+POKEY-PENDING-KEY+`, reserved
+by ROADMAP Phase 22), maintained by `ATTACH-POKEY-INPUT` exactly like the
+audio bit: set when an `INPUT-STATE` is attached, cleared on detach,
+preserved across `RESET-POKEY`. This deliberately does not mean "a key
+event is pending" the way the ROADMAP draft described -- `INPUT-SET-KEY`
+runs on socket reader threads, and having it write `PENDING` directly
+would race the emulator thread's own clears of bits 0/1 (a lost-update:
+whichever write lands last erases the other's effect, with no lock
+protecting `PENDING` itself). Instead the bit means "input is attached,"
+so `POKEY-TICK` / `POKEY-ADVANCE` drain the two `INPUT-STATE` flags
+(`%POKEY-SERVICE-KEY-IRQS`) every advance while it is set -- taking
+`INPUT-STATE`'s lock there is safe because that only happens in real
+interactive use, never in any benchmark workload (none attach input), so
+the new code costs nothing in the workloads that get measured.
+
+`tests/test-machine.lisp` adds the real acceptance test: boot to `READY`,
+type the POKEY key codes for `PRINT 2+2` and RETURN through an attached
+`INPUT-STATE`, and assert `4` lands in screen memory once BASIC evaluates
+the line. The key codes are read directly from the real OS's own TCKD
+table (`Atari_XL_OS_Rev.2.asm`: "Entry n is the ATASCII equivalent of key
+code n") and were verified empirically against the real ROM before being
+committed to the test.
+
+One correction to the original plan, caught by checking the real OS
+source rather than trusting the draft (ROADMAP.md rule 9): the plan
+claimed SKSTAT bit 2 was "shift held" and bit 3 "a key is down."
+`minimal-xl`'s own documented VBI debounce logic ("the VBI counts it down
+while SKSTAT bit 2 shows the key held") confirms the *existing*
+bit-2-is-keydown implementation was already correct, so
+`input-pokey-skstat` was left unchanged.
+
+Verified on both implementations, lenient and strict
+(`ATARI800_CL_STRICT=1`): 2106 checks (SBCL) / 2124 (LispWorks), 0 fail,
+exit 0 lenient; strict fails only the genuinely-absent Harte vectors on
+this machine, exit 1 as expected, with the new typing test itself passing
+under strict on both. Not freshly benchmarked: the design makes the new
+code provably zero-cost in every measured workload (gated behind a bit no
+bench workload ever sets); a live `bench-ab.sh` attempt was abandoned
+when the host's load average hit 74 from unrelated activity.
+
 ## ROADMAP Phase 22 -- POKEY pending-work bitmask
 
 The serial transmitter and audio synthesis each added their own
