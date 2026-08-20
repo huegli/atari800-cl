@@ -8,6 +8,16 @@ BOTH implementations (SBCL and LispWorks), recorded via
 `realtime-x` = measured fps / 59.92 (NTSC realtime speedup; >1 means
 faster than a real Atari 800 XL).
 
+**The table below is historical and frozen (ROADMAP.md Phase 21
+amendment, rule 3).** Absolute fps rows taken in separate sessions are
+not comparable -- session drift defeated straight before/after
+comparison twice (see the Phase 9 and Phase 12 sections below) -- so as
+of `scripts/bench-ab.sh` this table stops growing. Every hot-path
+change from here on gets its own dated section below, with a
+paired-delta table from an INTERLEAVED run against the immediately
+preceding commit (`scripts/bench-ab.sh <ref>`), the CLEAN/MIXED
+separation verdict per workload, and a short note.
+
 | date       | commit   | implementation | workload | fps     | realtime-x | notes                            |
 |------------|----------|----------------|----------|---------|------------|----------------------------------|
 | 2026-06-27 | b48d458  | sbcl           | nop      | 2025.69 | 33.807     | baseline (Phase 0 harness)       |
@@ -98,6 +108,52 @@ faster than a real Atari 800 XL).
 | 2026-08-02 | 8255be7   | lispworks     | irq      | 1442.76 | 24.078     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
+
+## ROADMAP Phase 22 -- POKEY pending-work bitmask
+
+The serial transmitter and audio synthesis each added their own "one
+slot read plus branch" test to POKEY-TICK / POKEY-ADVANCE (see the
+POKEY serial output and Phase 9 sections below: -1.2% to -4.8%, and
+-4.2% on `nop`, respectively), and Phases 13/16a were each going to add
+one more of the same shape. `src/pokey.lisp` consolidates all of them
+into one PENDING fixnum, tested once per call; only when it is nonzero
+does the function pay the per-feature checks, each now a LOGTEST against
+the already-loaded local instead of an independent slot read.
+
+Measured with `scripts/bench-ab.sh 0a2724a` (the pre-phase commit),
+interleaved B-A-B-A runs against the working tree:
+
+### sbcl (5 pairs)
+
+| workload | baseline fps (B) | working tree fps (A) | delta | separation |
+|----------|-------------------|------------------------|-------|------------|
+| nop        | 3123.97 | 3178.42 | +1.7% | MIXED (noise) |
+| irq        | 3537.02 | 3580.34 | +1.2% | MIXED (noise) |
+| display    | 1766.99 | 1793.31 | +1.5% | MIXED (noise) |
+| audio      | 1541.66 | 1679.28 | +8.9% | CLEAN |
+| klaus+PASS | 2784.76 | 2802.73 | +0.6% | MIXED (noise) |
+
+### lispworks (3 pairs)
+
+| workload | baseline fps (B) | working tree fps (A) | delta | separation |
+|----------|-------------------|------------------------|-------|------------|
+| nop        |  840.76 |  912.12 | +8.5% | CLEAN |
+| irq        | 1366.32 | 1426.54 | +4.4% | MIXED (noise) |
+| display    |  296.11 |  316.02 | +6.7% | MIXED (noise) |
+| audio      |  279.98 |  287.54 | +2.7% | MIXED (noise) |
+| klaus+PASS |  871.11 |  900.83 | +3.4% | MIXED (noise) |
+
+Every delta is positive or noise; nothing regressed on either
+implementation. Two clean signals: LispWorks' `nop` (+8.5%, the maximum
+possible PENDING-check density, matching the workload that showed the
+clearest cost when the serial and audio checks were first added
+separately) and SBCL's `audio` (+8.9% -- with the PENDING bit always
+set for that workload, this is the cold path getting cheaper: one
+LOGTEST against an already-loaded fixnum instead of two independent
+slot reads for `pokey-audio` and `pokey-serial-out-cycles`). The
+remaining workloads move in the same direction but did not separate
+cleanly at this sample size -- consistent with a small, real
+improvement inside run-to-run noise, not a regression to chase further.
 
 ## ROADMAP Phase 12 -- CPU fixes are performance-neutral
 

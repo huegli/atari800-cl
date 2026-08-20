@@ -115,6 +115,24 @@
 (defconstant +irq-serial-out-done+   #x08)  ; SEROC — transmission complete
 (defconstant +irq-serial-out-needed+ #x10)  ; SEROR — output data needed
 
+;;; PENDING bits (ROADMAP.md Phase 22).  A single fixnum consolidating
+;;; every "is there per-advance work beyond the plain timer chain"
+;;; condition POKEY tracks, so POKEY-TICK / POKEY-ADVANCE pay exactly one
+;;; slot read to decide whether anything needs attention, instead of one
+;;; independent slot read per feature (which is what the serial
+;;; transmitter and audio synthesis each cost on their own, per
+;;; PERFORMANCE_LOG.md).  Bits are set/cleared at the transition points
+;;; that change the underlying condition -- never polled directly on the
+;;; hot path -- so the invariant "bit N set iff condition N holds" must be
+;;; maintained at every one of those sites; see the comments where each
+;;; bit is touched.
+(defconstant +pokey-pending-serial-tx+ #x01)  ; SERIAL-OUT-CYCLES > 0
+(defconstant +pokey-pending-audio+     #x02)  ; an AUDIO-UNIT is attached
+;;; Bits 2 (#x04) and 3 (#x08) are reserved for ROADMAP.md Phase 13
+;;; (keyboard IRQ: a latched key pending) and Phase 16a (SIO receive: a
+;;; byte shifting in) respectively, so those phases extend this mask
+;;; instead of adding their own independent per-advance test.
+
 ;;; SKCTL serial mode.  Bits 4-6 select the serial mode; every transmit
 ;;; mode has bit 5 set (the OS's ESS does ORA #$20 for SIO SEND, plus #$08
 ;;; for the cassette's FSK output).  We only distinguish "transmitting or
@@ -176,6 +194,14 @@ Slots:
                                 timers.  POKEY-ADVANCE only accumulates
                                 this; %SYNC-RNG catches the LFSRs up when
                                 the RANDOM register is actually read.
+  PENDING                     — bitmask of per-advance work beyond the
+                                plain timer chain (ROADMAP.md Phase 22):
+                                +POKEY-PENDING-SERIAL-TX+ while a byte is
+                                shifting, +POKEY-PENDING-AUDIO+ while an
+                                AUDIO-UNIT is attached.  POKEY-TICK /
+                                POKEY-ADVANCE test this ONCE per call
+                                instead of reading SERIAL-OUT-CYCLES and
+                                AUDIO independently.
   AUDIO                       — optional audio unit (an opaque object to
                                 this package; see src/audio.lisp, which
                                 loads later and installs itself with
@@ -218,6 +244,7 @@ Slots:
   (poly17-state #x1FFFF :type fixnum)
   (poly9-state  #x01FF  :type fixnum)
   (rng-lag      0       :type fixnum)
+  (pending 0 :type fixnum)
   (audio nil)
   (audio-advance-fn   nil :type (or null function))
   (audio-underflow-fn nil :type (or null function))
@@ -488,7 +515,12 @@ no interrupts."
     (t
      (setf (pokey-serial-out-shift pokey)   value
            (pokey-serial-out-holding pokey) nil
-           (pokey-serial-out-cycles pokey)  (%serial-byte-cycles pokey))
+           (pokey-serial-out-cycles pokey)  (%serial-byte-cycles pokey)
+           ;; SERIAL-OUT-CYCLES just went positive: set the PENDING bit
+           ;; POKEY-TICK / POKEY-ADVANCE test instead of reading it
+           ;; directly (see the PENDING bits comment above).
+           (pokey-pending pokey) (logior (pokey-pending pokey)
+                                         +pokey-pending-serial-tx+))
      (%raise-irq pokey cpu +irq-serial-out-needed+))))
 
 (defun %serial-out-advance (pokey cpu n)
@@ -520,7 +552,12 @@ a byte is ~940 cycles) case of several bytes completing in one call."
              (setf irq t)))
           (t
            (setf (pokey-serial-out-shift pokey)  nil
-                 (pokey-serial-out-cycles pokey) 0)
+                 (pokey-serial-out-cycles pokey) 0
+                 ;; The transmitter just went idle: clear the PENDING bit
+                 ;; so the next POKEY-TICK / POKEY-ADVANCE stops charging
+                 ;; this check.
+                 (pokey-pending pokey) (logandc2 (pokey-pending pokey)
+                                                 +pokey-pending-serial-tx+))
            (when (%raise-irq pokey cpu +irq-serial-out-done+)
              (setf irq t))
            (return)))))
@@ -602,14 +639,20 @@ POKEY-ADVANCE instead — one call per instruction — leaving this the
 per-cycle reference path used by tests and by any caller stepping a
 cycle at a time.  Both paths share %EXPIRE-CHANNEL and are pinned
 equivalent by pokey-tick-vs-advance-equivalence in
-tests/test-pokey.lisp."
+tests/test-pokey.lisp.
+
+PENDING (ROADMAP.md Phase 22) is read ONCE into a local: when it is
+zero (the common case — no serial transmission in flight, no audio
+attached) the timer chain runs with no further slot reads at all; only
+when it is nonzero does this pay the per-feature checks (each one now a
+cheap LOGTEST against the already-loaded local rather than an
+independent slot read), and only the features whose bit is actually
+set."
   (declare (type pokey pokey))
   (incf (pokey-rng-lag pokey))
   (let ((irq-raised nil)
-        (audio (pokey-audio pokey)))
-    (when (plusp (pokey-serial-out-cycles pokey))
-      (when (%serial-out-advance pokey cpu 1)
-        (setf irq-raised t)))
+        (pending (pokey-pending pokey)))
+    (declare (type fixnum pending))
     ;; The audio test happens ONCE, here, and each branch then runs a
     ;; loop with no audio bookkeeping in it: passing a literal NIL to the
     ;; inlined %EXPIRE-CHANNEL folds its audio branch away entirely, so
@@ -624,15 +667,21 @@ tests/test-pokey.lisp."
                     (when (zerop (decf (aref (pokey-sub-counters pokey) ch)))
                       (when (%expire-channel pokey cpu ch ,audio-form)
                         (setf irq-raised t))))))
-      (cond
-        (audio
-         ;; This cycle elapses BEFORE any expiry it triggers is processed,
-         ;; so the sample(s) it produces reflect the output bits as they
-         ;; stood during the cycle.
-         (funcall (the function (pokey-audio-advance-fn pokey)) audio 1)
-         (tick-body audio))
-        (t
-         (tick-body nil))))
+      (if (zerop pending)
+          (tick-body nil)
+          (progn
+            (when (logtest pending +pokey-pending-serial-tx+)
+              (when (%serial-out-advance pokey cpu 1)
+                (setf irq-raised t)))
+            (if (logtest pending +pokey-pending-audio+)
+                (let ((audio (pokey-audio pokey)))
+                  ;; This cycle elapses BEFORE any expiry it triggers is
+                  ;; processed, so the sample(s) it produces reflect the
+                  ;; output bits as they stood during the cycle.
+                  (funcall (the function (pokey-audio-advance-fn pokey))
+                           audio 1)
+                  (tick-body audio))
+                (tick-body nil)))))
     irq-raised))
 
 (defun pokey-advance (pokey cpu n)
@@ -654,30 +703,26 @@ Bit-identical to N successive POKEY-TICK calls; the equivalence is
 pinned by pokey-tick-vs-advance-equivalence in tests/test-pokey.lisp.
 The payoff is for multi-cycle N (the scanline scheduler's per-line
 advances); for single cycles prefer POKEY-TICK, whose flat loop is
-cheaper than this function's chunk bookkeeping."
+cheaper than this function's chunk bookkeeping.
+
+PENDING (ROADMAP.md Phase 22) is read ONCE into a local, as in
+POKEY-TICK: this is the hottest POKEY entry point (the scanline
+scheduler calls it once per instruction), and when PENDING is zero the
+chunk loop runs with no further slot reads at all -- an inner-loop test
+measurably cost the nop workload ~7% on both implementations back when
+the audio check alone lived in this position."
   (declare (type pokey pokey) (type fixnum n))
   (incf (pokey-rng-lag pokey) n)
   (let ((subs (pokey-sub-counters pokey))
-        (audio (pokey-audio pokey))
+        (pending (pokey-pending pokey))
         (irq-raised nil))
-    ;; The serial transmitter is a plain cycle countdown, so the whole
-    ;; chunk can be charged against it in one step.  Nothing observes the
-    ;; ordering against this call's timer expiries — no CPU runs
-    ;; mid-advance to change a register between them — so this stays
-    ;; equivalent to N successive POKEY-TICKs.
-    (when (plusp (pokey-serial-out-cycles pokey))
-      (when (%serial-out-advance pokey cpu n)
-        (setf irq-raised t)))
-    ;; As in POKEY-TICK: test for audio ONCE and run a loop with no audio
-    ;; bookkeeping inside it, so a detached machine executes the same
-    ;; per-chunk code it did before synthesis existed.  This is the
-    ;; hottest POKEY entry point (the scanline scheduler calls it once
-    ;; per instruction), and an inner-loop test measurably cost the
-    ;; nop workload ~7% on both implementations.
+    (declare (type fixnum pending))
     (macrolet ((advance-loop (&body audio-hook)
                  ;; Deliberately unhygienic: AUDIO-HOOK is spliced where
                  ;; CHUNK is in scope, and the body drives IRQ-RAISED and
-                 ;; N from the enclosing LET.
+                 ;; N from the enclosing LET; when non-empty it also
+                 ;; refers to AUDIO, which callers below bind before
+                 ;; splicing a non-empty hook.
                  `(loop while (plusp n)
                         do (let ((chunk (min n
                                              (aref subs 0) (aref subs 1)
@@ -693,16 +738,28 @@ cheaper than this function's chunk bookkeeping."
                                                              'audio
                                                              nil))
                                    (setf irq-raised t))))))))
-      (cond
-        (audio
-         ;; The chunk's cycles elapse before the expiries they trigger,
-         ;; matching POKEY-TICK's ordering exactly (the output bits are
-         ;; constant across a chunk, since only an expiry changes them).
-         (advance-loop
-          (funcall (the function (pokey-audio-advance-fn pokey))
-                   audio chunk)))
-        (t
-         (advance-loop))))
+      (if (zerop pending)
+          (advance-loop)
+          (progn
+            ;; The serial transmitter is a plain cycle countdown, so the
+            ;; whole chunk can be charged against it in one step. Nothing
+            ;; observes the ordering against this call's timer expiries
+            ;; -- no CPU runs mid-advance to change a register between
+            ;; them -- so this stays equivalent to N successive
+            ;; POKEY-TICKs.
+            (when (logtest pending +pokey-pending-serial-tx+)
+              (when (%serial-out-advance pokey cpu n)
+                (setf irq-raised t)))
+            (if (logtest pending +pokey-pending-audio+)
+                (let ((audio (pokey-audio pokey)))
+                  ;; The chunk's cycles elapse before the expiries they
+                  ;; trigger, matching POKEY-TICK's ordering exactly (the
+                  ;; output bits are constant across a chunk, since only
+                  ;; an expiry changes them).
+                  (advance-loop
+                   (funcall (the function (pokey-audio-advance-fn pokey))
+                            audio chunk)))
+                (advance-loop)))))
     irq-raised))
 
 ;;; ---------------------------------------------------------------------------
@@ -801,7 +858,12 @@ Side effects:
         (pokey-serial-out-cycles  pokey) 0
         (pokey-poly17-state pokey) #x1FFFF
         (pokey-poly9-state  pokey) #x01FF
-        (pokey-rng-lag      pokey) 0)
+        (pokey-rng-lag      pokey) 0
+        ;; SERIAL-OUT-CYCLES just went to 0 above, so its PENDING bit must
+        ;; go with it; AUDIO is an emulator-level attachment independent
+        ;; of chip reset (see ATTACH-AUDIO in src/audio.lisp) and survives.
+        (pokey-pending      pokey) (logand (pokey-pending pokey)
+                                           +pokey-pending-audio+))
   ;; IRQEN is now 0, so this de-asserts any IRQ POKEY was holding.
   (%sync-irq-line pokey)
   pokey)

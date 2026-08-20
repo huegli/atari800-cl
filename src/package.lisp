@@ -395,6 +395,9 @@
            #:+irq-serial-out-done+ #:+irq-serial-out-needed+
            #:+skctl-transmit-mode+
            #:+serial-frame-bits+ #:+serial-half-bits-per-byte+
+           ;; PENDING bitmask (ROADMAP.md Phase 22)
+           #:pokey-pending
+           #:+pokey-pending-serial-tx+ #:+pokey-pending-audio+
            ;; Audio hooks (installed by src/audio.lisp's ATTACH-AUDIO)
            #:pokey-audio
            #:pokey-audio-advance-fn #:pokey-audio-underflow-fn

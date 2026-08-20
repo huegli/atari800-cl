@@ -106,7 +106,21 @@
 > and both boot tests for real and fail only on the genuinely-absent Harte
 > vectors, on both implementations. `RUN-TESTS` (`tests/test-suite.lisp`,
 > now what both test scripts call) also prints a grep-able skip census
-> after every run. Phase 22 (POKEY pending-work bitmask) is next.
+> after every run.
+>
+> **Phase 22 done (2026-08-14)**: `src/pokey.lisp` gains a `PENDING`
+> fixnum consolidating the serial-transmitter and audio-attached checks
+> (previously two independent slot reads on every `POKEY-TICK` /
+> `POKEY-ADVANCE` call) into one slot read plus cheap `LOGTEST`s; bits 2
+> and 3 are reserved for Phase 13's key-pending and Phase 16a's
+> serial-rx. `POKEY-TICK-VS-ADVANCE-EQUIVALENCE` now runs the scripted
+> 50,000-cycle comparison under all four bit combinations (neither,
+> audio, serial, both), not just the all-zero case. Measured with the
+> new `scripts/bench-ab.sh` against the pre-phase commit (rule 3):
+> nothing regressed on either implementation; two clean improvements
+> (LispWorks `nop` +8.5%, SBCL `audio` +8.9%), the rest positive but
+> noisy at this sample size -- see `PERFORMANCE_LOG.md`. Phase 13
+> (POKEY keyboard IRQ) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -214,7 +228,7 @@ and say so in the commit message.
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
 | 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
 | 21    | Strict test gate + skip census               | --          | no       | done   |
-| 22    | POKEY pending-work bitmask                   | --          | yes      | open   |
+| 22    | POKEY pending-work bitmask                   | --          | yes      | done   |
 | 23    | CONFIRM retirement pass                      | --          | no       | open   |
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | open   |
 

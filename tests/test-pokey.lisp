@@ -383,15 +383,29 @@ exactly CYCLE cycles have elapsed.  Sorted by cycle.")
   "Fixed chunk-size sequence (cycled) for the batched POKEY in the
 equivalence test.  A literal vector, not RANDOM, so runs are deterministic.")
 
-(test pokey-tick-vs-advance-equivalence
-  "Drives two POKEYs through 50,000 cycles and a scripted sequence of
-register writes: one via single-cycle POKEY-TICK, one via POKEY-ADVANCE
-in fixed odd-sized chunks.  After every chunk, the complete observable
-state — IRQST, all timer counts, all sub-counters, RANDOM, the chunk's
-IRQ-raised result, and the CPU's pending-IRQ line — must agree.  This is
-the test that licenses the event-skipping implementation."
+(defun %run-pokey-equivalence (&key attach-audio-p serial-p)
+  "Run the scripted 50,000-cycle POKEY-TICK-vs-POKEY-ADVANCE comparison
+(register-write schedule *POKEY-EQUIVALENCE-SCRIPT*, chunk sizes
+*POKEY-EQUIVALENCE-CHUNKS*), optionally with an AUDIO-UNIT attached to
+both fixtures (ATTACH-AUDIO-P) and/or a serial transmission started on
+both before cycle 0 (SERIAL-P).  These cover ROADMAP.md Phase 22's
+PENDING bitmask: with neither flag every bit stays zero for the whole
+run (the original test); the other combinations put the serial-tx bit,
+the audio bit, or both live for at least part of the window and — since
+the started byte finishes on its own and nothing re-attaches audio —
+also exercise each bit clearing again mid-run, not just staying set.
+Returns NIL on a clean run, else (CYCLE FIELD) naming the first
+divergence, exactly as the field it's given to for a failure message."
   (multiple-value-bind (pok-a cpu-a bus-a) (%make-pokey-fixture :audctl #x40)
     (multiple-value-bind (pok-b cpu-b bus-b) (%make-pokey-fixture :audctl #x40)
+      (when attach-audio-p
+        (atari800-cl.audio:attach-audio pok-a (atari800-cl.audio:make-audio-unit))
+        (atari800-cl.audio:attach-audio pok-b (atari800-cl.audio:make-audio-unit)))
+      (when serial-p
+        (atari800-cl.bus:bus-write bus-a #xD20F #x23)   ; SKCTL: send mode
+        (atari800-cl.bus:bus-write bus-b #xD20F #x23)
+        (atari800-cl.bus:bus-write bus-a #xD20D #x41)   ; SEROUT: start a byte
+        (atari800-cl.bus:bus-write bus-b #xD20D #x41))
       (let ((script (copy-list *pokey-equivalence-script*))
             (chunks *pokey-equivalence-chunks*)
             (seed-i 0)
@@ -444,9 +458,31 @@ the test that licenses the event-skipping implementation."
                                 (let ((irq-b (atari800-cl.pokey:pokey-advance pok-b cpu-b c)))
                                   (incf pos c)
                                   (compare pos irq-a irq-b)))))))
+        divergence))))
+
+(test pokey-tick-vs-advance-equivalence
+  "%RUN-POKEY-EQUIVALENCE under all four PENDING-bitmask combinations
+(ROADMAP.md Phase 22): neither, audio only, serial only, and both.  Each
+run drives two POKEYs through the scripted 50,000-cycle sequence — one
+via single-cycle POKEY-TICK, one via POKEY-ADVANCE in fixed odd-sized
+chunks — and after every chunk the complete observable state (IRQST, all
+timer counts, all sub-counters, RANDOM, the chunk's IRQ-raised result,
+and the CPU's pending-IRQ line) must agree.  This is the test that
+licenses the event-skipping implementation, extended across every state
+the consolidated PENDING mask can be in so the bitmask cannot silently
+diverge POKEY-TICK from POKEY-ADVANCE for a combination neither path's
+author happened to try by hand."
+  (dolist (mode '((:attach-audio-p nil :serial-p nil)
+                  (:attach-audio-p t   :serial-p nil)
+                  (:attach-audio-p nil :serial-p t)
+                  (:attach-audio-p t   :serial-p t)))
+    (destructuring-bind (&key attach-audio-p serial-p) mode
+      (let ((divergence (%run-pokey-equivalence :attach-audio-p attach-audio-p
+                                                 :serial-p serial-p)))
         (is (null divergence)
-            "POKEY state diverged between tick and batched advance at ~
-             cycle ~S in field ~S" (first divergence) (second divergence))))))
+            "POKEY state diverged between tick and batched advance ~
+             (attach-audio-p=~A serial-p=~A) at cycle ~S in field ~S"
+            attach-audio-p serial-p (first divergence) (second divergence))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Read of IRQST through the bus

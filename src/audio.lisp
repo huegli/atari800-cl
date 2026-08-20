@@ -299,5 +299,12 @@ closure wiring the bus uses for the chips.  Returns AUDIO."
     (setf (audio-unit-pokey audio) pokey))
   (setf (pokey-audio pokey) audio
         (pokey-audio-advance-fn pokey)   (and audio #'audio-advance)
-        (pokey-audio-underflow-fn pokey) (and audio #'audio-channel-underflow))
+        (pokey-audio-underflow-fn pokey) (and audio #'audio-channel-underflow)
+        ;; Maintain POKEY's PENDING bitmask (ROADMAP.md Phase 22): POKEY-
+        ;; TICK / POKEY-ADVANCE test this instead of reading POKEY-AUDIO
+        ;; directly on every call.
+        (pokey-pending pokey)
+        (if audio
+            (logior   (pokey-pending pokey) +pokey-pending-audio+)
+            (logandc2 (pokey-pending pokey) +pokey-pending-audio+)))
   audio)

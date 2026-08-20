@@ -3,6 +3,42 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 22 -- POKEY pending-work bitmask
+
+The serial transmitter and audio synthesis each added their own
+per-advance branch test to `POKEY-TICK` / `POKEY-ADVANCE` (a separate
+slot read for `SERIAL-OUT-CYCLES`, another for `AUDIO`), each measured
+and accepted individually, and Phases 13 (keyboard IRQ) and 16a (SIO
+receive) were each about to add a third and fourth of the same shape.
+
+`src/pokey.lisp` adds a `PENDING` fixnum: bit 0 tracks the transmitter
+(set when a byte starts shifting in `%SEROUT-WRITE`, cleared when the
+shift register empties with nothing queued in `%SERIAL-OUT-ADVANCE`),
+bit 1 tracks whether an `AUDIO-UNIT` is attached (maintained by
+`ATTACH-AUDIO` in `src/audio.lisp`), and bits 2-3 are reserved for
+Phases 13 and 16a. `POKEY-TICK` / `POKEY-ADVANCE` read `PENDING` once;
+when it is zero the timer chain runs with no further slot reads at all,
+and when nonzero each feature's check is a `LOGTEST` against the
+already-loaded local rather than an independent read. `RESET-POKEY`
+clears bits 0/2/3 but preserves bit 1 (audio attachment is an
+emulator-level facade, not a chip register, and survives a chip reset).
+
+`POKEY-TICK-VS-ADVANCE-EQUIVALENCE` (`tests/test-pokey.lisp`) now runs
+its scripted 50,000-cycle comparison under all four `PENDING` states
+(neither bit, audio only, serial only, both), not just the all-zero
+case the original test covered, via a new `%RUN-POKEY-EQUIVALENCE`
+helper -- the serial run starts one byte before cycle 0 and lets it
+finish mid-run, exercising the bit clearing again as well as setting.
+
+Measured with the new `scripts/bench-ab.sh` (an interleaved-run A/B
+harness, promoted from prose in `PERFORMANCE_LOG.md` to a command)
+against the pre-phase commit: nothing regressed on either
+implementation. Two clean improvements -- LispWorks `nop` +8.5% (the
+maximum possible `PENDING`-check density) and SBCL `audio` +8.9% (the
+cold path getting cheaper: one `LOGTEST` instead of two independent
+slot reads) -- the rest positive but not clean at this sample size. See
+`PERFORMANCE_LOG.md` for the full tables.
+
 ## AESP video push: fix FRAME_RAW to match the Attic protocol spec
 
 The AESP video-port push had drifted from the Attic project's
