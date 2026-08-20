@@ -338,7 +338,7 @@ and say so in the commit message.
 | 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | done   |
 | 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | done   |
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | done   |
-| 16    | SIO receive path + virtual disk (ATR)        | 13, 22     | no       | open   |
+| 16    | Host disk bridge + virtual disk (revised)    | 21         | no       | open   |
 | 17    | Harte bus-trace comparison                   | 12         | no       | open   |
 | 18    | LispWorks profiling pass                     | --          | yes      | open   |
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
@@ -347,20 +347,23 @@ and say so in the commit message.
 | 22    | POKEY pending-work bitmask                   | --          | yes      | done   |
 | 23    | CONFIRM retirement pass                      | --          | no       | done   |
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | done   |
+| 25    | SIO receive path + serial-wire disk          | 13, 16, 22 | no       | deferred |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
 of the original tranche only because it produces no video-visible
 payoff.
 
-Of the 13-20 tranche, only 16 depends on another new phase (13 gives
-it the interrupt plumbing and a way to drive DOS once it boots). 17 is
+Of the 13-20 tranche, only the original 16 depended on another new
+phase (13's interrupt plumbing, for the serial-receive plan now
+deferred to 25); the revised 16 (host disk bridge) needs only Phase
+21's strict gate for its boot test. 17 is
 what turns SCANLINE_ACCURACY_PLAN.md's stretch Phase 5 from guesswork
 into a checkable target, so run it before attempting those quirks.
 
 The 21-24 amendments adjust the recommended order: 21 first (it makes
 the real-ROM tests un-skippable on this machine before the phases that
-lean on them), 22 before 13 and 16a (their per-advance POKEY hooks
+lean on them), 22 before 13 and 25a (their per-advance POKEY hooks
 join the bitmask instead of adding two more branch tests to the hot
 path -- the Phases 1-12 pattern was one such test per feature, each
 individually measured and shrugged at), 24 before 17 (Acid800's ANTIC
@@ -929,50 +932,100 @@ Commit: "Documentation drift sweep".
 
 ---
 
-## Phase 16 -- SIO receive path + virtual disk (ATR)
+## Phase 16 (revised) -- Host disk bridge: ATR/XEX/OBX via minimal-xl
 
-The next substantial feature, and the one that changes what the
-emulator is for: with a device that answers, the machine boots DOS and
-runs real software instead of hand-assembled demos. The OS already
-sends a complete command frame and times out waiting for a reply -- the
-missing half is everything after that.
+> Revised 2026-08-20. The original Phase 16 (POKEY serial receive +
+> byte-level SIO device dispatch) moved to Phase 25, deferred: the
+> project's stated scope is the CPU, ANTIC and GTIA, with POKEY/PIA
+> only as far as sound and keyboard -- SIO fidelity is explicitly not
+> a goal. Status entries and cross-references written before this
+> date refer to that plan as "Phase 16" / "16a"; Phase 22's PENDING
+> bit 3 stays reserved for what is now 25a.
+
+Same goal as before -- the machine loads real software from disk
+images instead of hand-assembled demos -- but reached without
+emulating the serial wire. The `minimal-xl/` submodule is an OS we
+control: it already has polled read-only SIO through `SIOV`/`DSKINV`
+(its phase 11), the standard disk boot (phase 12), and
+`tools/xexboot.asm` + `tools/xex2atr.py`, which pack any XEX/OBX into
+a bootable ATR (phase 13) -- verified end-to-end with edventure under
+atari800. Instead of building POKEY's receive side so the OS can talk
+to a virtual drive byte-by-byte, give the emulator a memory-mapped
+**host bridge** and teach minimal-xl's `SIOV` to use it when present.
+
+Put the bridge in the `$D1xx` page -- the XL's Parallel Bus Interface
+range, which real hardware used for exactly this class of device
+(parallel-bus disks like the Black Box; Altirra models its hook
+devices the same way). So this is a plausible peripheral, not an
+emulator trap: no CPU patching, no escape opcodes, just one more
+device registering read/write closures into the bus like the four
+chips do.
 
 Stage it; do not attempt one commit. And write the acceptance test
-FIRST: the DOS-menu boot test lands in `tests/test-machine.lisp`'s
-real-ROM group -- strict-gated (Phase 21) and skipping -- in the same
-commit as 16a, so the phase is done when that test stops skipping and
-passes, not when the sub-items feel complete. (Lesson from Phases
-1-12: the PIA and serial-transmitter showstoppers survived twelve
-green phases because no phase gated on booting the real ROMs.)
+FIRST: the boot test lands in `tests/test-machine.lisp` --
+strict-gated (Phase 21) and skipping -- in the same commit as 16a, so
+the phase is done when that test stops skipping and passes, not when
+the sub-items feel complete. (Lesson from Phases 1-12: the PIA and
+serial-transmitter showstoppers survived twelve green phases because
+no phase gated on booting the real ROMs.)
 
-**16a -- serial receive.** POKEY's input side: SERIN, the
-serial-input-ready IRQ (IRQEN bit 5), and the SKSTAT framing/overrun
-bits. Mirror the transmitter's structure in `src/pokey.lisp` (a
-cycle countdown clocked from the same channel-4 period) so the two
-halves stay symmetrical.
+**16a -- bridge device.** `src/hostdev.lisp` (insert in the `.asd`
+after the chips, before `machine`): a signature register at `$D1FE`
+that reads back a magic byte so the OS can detect the bridge (absent
+bridge reads as the usual open-bus value), and a "go" register at
+`$D1FF`. On a go write, read the standard DCB from `$0300`
+(DDEVIC/DUNIT/DCOMND/DSTATS/DBUFLO-HI/DBYT/DAUX1-2), perform the
+operation against the mounted image, copy data through the bus
+closures, and set the DCB status byte -- zero cycles of serial
+traffic, zero new POKEY hot-path work. Wire it in
+`make-atari-machine`. Testable in isolation: poke a DCB, write the go
+register, assert the buffer.
 
-**16b -- device dispatch.** A `src/sio.lisp` device layer that watches
-the transmitted command frame (device id, command, aux1/2, checksum),
-and replies with ACK / COMPLETE / data frames on the receive side, with
-the inter-frame delays the OS expects. Devices register by id, so the
-disk is one implementation rather than the only one.
+**16b -- ATR disk images.** Unchanged from the original plan: parse
+the 16-byte ATR header (magic `$0296`, sector size, image size), map
+sector numbers to file offsets (remembering the first three sectors
+are 128 bytes even on double-density images), and serve READ (`$52`)
+and STATUS (`$53`) first; WRITE (`$50`/`$57`) after, behind an
+explicit read-only default.
 
-**16c -- ATR disk images.** Parse the 16-byte ATR header (magic
-`$0296`, sector size, image size), map sector numbers to file offsets
-(remembering the first three sectors are 128 bytes even on
-double-density images), and serve READ (`$52`) and STATUS (`$53`)
-first; WRITE (`$50`/`$57`) after, behind an explicit read-only default.
+**16c -- minimal-xl bridge probe.** A submodule phase (its phase 15):
+at the top of `SIOV`, probe the `$D1FE` signature; if the bridge
+answers, write the go register and return its status; otherwise fall
+through to the existing polled serial path, so the ROM stays fully
+functional on real hardware and stock atari800. Commit in the
+submodule with its own `make test` smoke run, then bump the submodule
+pointer here.
 
-**16d -- API + protocol.** `a800:mount-disk` / `unmount-disk` on the
-facade, an AESP control message to mount from a client, and a `mount`
-verb on the CLI socket.
+**16d -- XEX/OBX loading.** Port `tools/xex2atr.py` to Lisp (small:
+prepend the assembled `xexboot.bin` boot sectors, patch the
+last-data-sector word at offsets 9/10, pad to 128-byte sectors).
+`a800:load-xex` synthesizes a bootable ATR *in memory* and mounts it;
+XEX and OBX (same format, MADS's extension) then cost zero new 6502
+code, and INIT-per-segment semantics come from xexboot rather than
+being reimplemented. Commit the assembled `xexboot.bin` under
+`fixtures/` with a provenance note (it is this project's own code,
+rebuilt via the submodule's Makefile -- the `roms/` gitignore rule is
+about copyrighted images). The existing direct-injection loader in
+`scripts/xex-loader.lisp` stays for the test harness; the ATR route
+is the user-facing path because it exercises the real boot protocol.
 
-Acceptance: with a DOS 2.5 ATR mounted, a cold boot reaches the DOS
-menu, and `scripts/record.sh` can film it. Add a boot test in the
-`tests/test-machine.lisp` real-ROM group, skipping when no ATR is
-present.
+**16e -- API + protocol.** `a800:mount-disk` / `unmount-disk` /
+`load-xex` on the facade, an AESP control message to mount from a
+client, and `mount` / `loadxex` verbs on the CLI socket.
 
-Commits: one per stage, message "SIO: <stage>".
+Acceptance: with `minimal_os.rom` (built from the submodule; the test
+skips -- strict-fails -- when the ROM is absent) and the edventure ATR
+mounted, a cold boot reaches the game's entry point; and `load-xex`
+on `edventure.obx` gets there with no ATR at all. `scripts/record.sh`
+can film it. This replaces the original DOS 2.5 menu gate on purpose:
+DOS boots via the standard protocol but leans on real-OS internals
+minimal-xl does not provide -- the real-OS DOS boot returns as Phase
+25's acceptance. Note the bridge sidesteps `SIOV`'s own read-only /
+128-byte-sector limits (the host does the transfer), but software
+that bypasses `SIOV` to do raw serial I/O is out of scope until 25.
+
+Commits: one per stage, message "Host bridge: <stage>" (the submodule
+commit follows minimal-xl's own conventions).
 
 ---
 
@@ -1086,15 +1139,16 @@ Commit: "Strict test gate: env-gated skips fail under ATARI800_CL_STRICT".
 ## Phase 22 -- POKEY pending-work bitmask  [hot path -> benchmark]
 
 Serial output cost -1.2% to -4.8% depending on workload, the audio
-slot cost -4.2% on `nop`, and Phases 13 and 16a each plan to add
-another "one slot read plus branch" to `pokey-advance`. Four
-independent per-advance branch tests where one will do. Consolidate
-BEFORE 13 and 16a land, so their flags join the mask for free instead
-of repeating the measure-and-shrug cycle.
+slot cost -4.2% on `nop`, and Phases 13 and 25a (serial receive,
+originally numbered 16a) each plan to add another "one slot read plus
+branch" to `pokey-advance`. Four independent per-advance branch tests
+where one will do. Consolidate BEFORE 13 and 25a land, so their flags
+join the mask for free instead of repeating the measure-and-shrug
+cycle.
 
 1. One fixnum slot `pokey-pending` on the `pokey` struct: bit 0 =
    serial transmitter active, bit 1 = audio attached, bits 2-3
-   reserved for key-pending (Phase 13) and serial receive (Phase 16a).
+   reserved for key-pending (Phase 13) and serial receive (Phase 25a).
    The fast path in `pokey-advance` / `pokey-tick` tests `(zerop
    pending)` ONCE per call; nonzero branches to a NOT-inlined cold
    function that dispatches on the set bits. The audio advance moves
@@ -1112,7 +1166,7 @@ of repeating the measure-and-shrug cycle.
 4. Measure with `./scripts/bench-ab.sh` (rule 3) against the
    pre-phase commit; expect to recover part of the ~4% `nop` cost.
    Log the paired-delta table either way -- a null result is still a
-   result, and it caps the cost of Phases 13 and 16a at zero new
+   result, and it caps the cost of Phases 13 and 25a at zero new
    hot-path branches.
 
 Commit: "POKEY: consolidate per-advance hooks into one pending-work bitmask".
@@ -1178,6 +1232,58 @@ already-strongest evidence.
    README.md's limitations.
 
 Commit: "Add the Acid800 harness: CPU and ANTIC subsets under the real OS".
+
+---
+
+## Phase 25 -- SIO receive path + serial-wire disk (deferred)
+
+> This is the original Phase 16 plan, deferred on 2026-08-20 when the
+> revised Phase 16 (host disk bridge) replaced it: SIO fidelity is not
+> a primary project goal, and the bridge delivers disk loading without
+> the serial wire. It remains the right plan if byte-level SIO ever
+> matters (real-OS DOS boot, software doing raw serial I/O, cassette).
+> Phase 22 reserved POKEY PENDING bit 3 for 25a's serial receive.
+> Nothing in Phase 16 precludes this: the bridge and the serial path
+> coexist, since minimal-xl falls back to polled serial SIO when the
+> bridge is absent and the real OS never probes the bridge at all.
+
+With a device that answers on the wire, the machine boots DOS under
+the real OS ROM. The OS already sends a complete command frame and
+times out waiting for a reply -- the missing half is everything after
+that.
+
+Stage it; do not attempt one commit. And write the acceptance test
+FIRST: the DOS-menu boot test lands in `tests/test-machine.lisp`'s
+real-ROM group -- strict-gated (Phase 21) and skipping -- in the same
+commit as 25a, so the phase is done when that test stops skipping and
+passes, not when the sub-items feel complete. (Lesson from Phases
+1-12: the PIA and serial-transmitter showstoppers survived twelve
+green phases because no phase gated on booting the real ROMs.)
+
+**25a -- serial receive.** POKEY's input side: SERIN, the
+serial-input-ready IRQ (IRQEN bit 5), and the SKSTAT framing/overrun
+bits. Mirror the transmitter's structure in `src/pokey.lisp` (a
+cycle countdown clocked from the same channel-4 period) so the two
+halves stay symmetrical. The per-advance hook joins the Phase 22
+PENDING bitmask as bit 3.
+
+**25b -- device dispatch.** A `src/sio.lisp` device layer that watches
+the transmitted command frame (device id, command, aux1/2, checksum),
+and replies with ACK / COMPLETE / data frames on the receive side, with
+the inter-frame delays the OS expects. Devices register by id, so the
+disk is one implementation rather than the only one -- and Phase 16b's
+ATR image layer is reused as-is behind it.
+
+**25c -- API.** The Phase 16e mount API already exists by now; this
+stage only routes a mounted image to the serial device layer as well,
+so the same `a800:mount-disk` serves both the bridge and the wire.
+
+Acceptance: with a DOS 2.5 ATR mounted and the real OS ROM, a cold
+boot reaches the DOS menu, and `scripts/record.sh` can film it. Add a
+boot test in the `tests/test-machine.lisp` real-ROM group, skipping
+when no ATR is present.
+
+Commits: one per stage, message "SIO: <stage>".
 
 ---
 
