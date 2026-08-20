@@ -171,7 +171,27 @@
 > sandbox (functions leaking into stdout instead of the environment),
 > so the script fetches sequentially instead -- simpler and more
 > portable, at the cost of wall-clock time on a full 256-file fetch.
-> Phase 15/23 (hygiene) are next per the recommended order.
+>
+> **Phase 15 done (2026-08-20)**: `CLAUDE.md`'s "not modelled" list and
+> Development Plan paragraph were both stale -- "keyboard scanning" and
+> "the serial/SIO bus" as blanket unmodelled claims (Phase 13 modelled
+> keyboard/BREAK IRQs; serial output has been modelled since before this
+> tranche, only receive is still absent), and "Prompt 12's Unix-socket
+> IPC layer was later removed" without ever mentioning the much larger
+> AESP/CLI stack that replaced it and is now core to the project. Fixed
+> both, and found two more drift items while re-verifying README.md's
+> "Known limitations" against the code per the plan's own instruction:
+> `README.md`'s feature list undersold host input (didn't mention IRQ
+> delivery), and its unmodelled-features line still listed "paddles"
+> alongside light pen even though paddles have been fully modelled since
+> the AESP/CLI stage work. Also closed a CHANGES.md gap (the ANTIC modes
+> 4/5 renderer fix, landed alongside the AESP video protocol fix, had no
+> entry of its own) and swept for the plan's named renamed symbols
+> (`flag-set?`, `run-cpu` with a memory arg,
+> `+color-clocks-per-scanline+`) -- no live drift found; every hit was
+> either the plan's own text or a historical record of the rename.
+> `MISC_IMPROVEMENTS_PLAN.md` item 9 marked done. Phase 23 (CONFIRM
+> retirement) is next.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -272,7 +292,7 @@ and say so in the commit message.
 | 12    | Tom Harte ProcessorTests harness             | --          | no       | done   |
 | 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | done   |
 | 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | done   |
-| 15    | Documentation drift sweep (misc item 9)      | --          | no       | open   |
+| 15    | Documentation drift sweep (misc item 9)      | --          | no       | done   |
 | 16    | SIO receive path + virtual disk (ATR)        | 13, 22     | no       | open   |
 | 17    | Harte bus-trace comparison                   | 12         | no       | open   |
 | 18    | LispWorks profiling pass                     | --          | yes      | open   |

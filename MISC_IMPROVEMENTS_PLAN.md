@@ -10,9 +10,22 @@
 > Phase 12 (`tests/test-harte.lisp`; three CPU bugs found and fixed,
 > skip list empty). That makes item 11 OBSOLETE by its own terms -- the
 > Harte vectors check every opcode's cycle count, so the hand-written
-> table it proposed would only duplicate them. Items 9 and 10 remain
-> open, and both are scheduled: ROADMAP.md Phase 15 (item 9) and
-> Phase 20 (item 10).
+> table it proposed would only duplicate them. **Item 9 done
+> (2026-08-20) via ROADMAP.md Phase 15**: the Unix-socket-IPC and
+> keyboard-scanning claims in `CLAUDE.md` were rewritten (the AESP/CLI
+> stack that replaced Prompt 12's removed IPC layer is now described;
+> Phase 13's keyboard/BREAK IRQ delivery is no longer listed as
+> unmodelled), `README.md`'s Known Limitations bullets were re-verified
+> against the code (found and fixed one more drift: "paddles" was
+> listed alongside light pen as unmodelled, but paddles have been fully
+> modelled since the AESP/CLI stage work -- `input-set-paddle` /
+> `input-pokey-pot`), a CHANGES.md gap was closed (the ANTIC modes 4/5
+> renderer fix had no entry), and a sweep for the plan's named renamed
+> symbols (`flag-set?`, `run-cpu` with a memory arg,
+> `+color-clocks-per-scanline+`) found no live drift -- every hit was
+> either this plan's own text or a historical CHANGES.md/ROADMAP.md
+> record of the rename itself. Item 10 remains open, scheduled as
+> ROADMAP.md Phase 20.
 
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent

@@ -61,7 +61,10 @@ What's implemented:
   `scripts/capture-audio.py` saves WAVs.  Synthesis is attached only
   while someone is listening.
 - **Host input** -- a thread-safe input-state feeds live joystick,
-  console-key, paddle, and keyboard values into PIA/GTIA/POKEY reads.
+  console-key, paddle, and keyboard values into PIA/GTIA/POKEY reads,
+  and a key or BREAK press raises POKEY's keyboard/BREAK IRQs (IRQEN
+  bits 6/7) -- typed input reaches the OS editor and BASIC, not just
+  the polled KBCODE register.
 - **Protocol servers** -- AESP (binary, 3 TCP ports) and a CLI (text,
   Unix socket) let an external GUI/CLI/web client drive the emulator.
   See [Protocol servers](#protocol-servers-aesp--cli).

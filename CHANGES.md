@@ -172,6 +172,24 @@ emulator's frames.
 Verified on this machine: 2080 pass, 1 skip (Tom Harte, no checkout
 here), 0 fail, both SBCL and LispWorks.
 
+## Renderer: fix ANTIC modes 4/5 (four-color character modes)
+
+Found while getting AtticGUI running against edvent02.asm (same commit as
+the AESP video push above, but a separate bug): modes 4/5 rendered as
+flat single-color text like modes 6/7, when real hardware reads each
+glyph byte as four 2-bit pixel pairs -- `00/01/10/11` map to
+`BAK/PF0/PF1/PF2`, or `PF3` instead of `PF2` when the character code's
+bit 7 is set.
+
+`src/renderer.lisp` adds `%render-multicolor-char-mode` for modes 4/5,
+plus a `%char-row-bits` fix: mode 5/7 are double-height (16 scanlines per
+mode line) but the character ROM only has 8 rows per glyph, so each ROM
+row must be stretched across 2 scanlines (`row = scan-y/2`) instead of
+repeating via `scan-y mod 8` -- the old code drew every text line twice.
+Two new `renderer-suite` regression tests pin both fixes; the multicolor
+mode-5 fix was confirmed against a reference screenshot of edvent02's
+actual expected output.
+
 ## ROADMAP Phase 21 -- Strict test gate + skip census
 
 Three tests skip gracefully when an asset they need is absent (the Klaus

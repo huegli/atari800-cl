@@ -16,7 +16,7 @@ The emulated machine is functionally complete at the chip-state level:
 - **Machine scheduler** -- `MACHINE-RUN-FRAME` runs one NTSC frame (29,868 clocks = 262 scanlines x 114 CPU cycles) scanline-by-scanline: `ANTIC-BEGIN-SCANLINE` fires the line's events and reports stolen cycles, the CPU executes against the line's remaining budget with POKEY advanced instruction-by-instruction, and `ANTIC-END-SCANLINE` closes the line.
 - **Pixel renderer** -- per-scanline 384x240 24-bit RGB framebuffer rendering (background + playfield modes 2-F + player/missile compositing with PRIOR arbitration), driven by the machine's per-scanline callback and pushed to clients over AESP video frames; `scripts/capture-screenshot.py` grabs PNG/PPM screenshots.
 
-What is *not* modelled: POKEY's two high-pass filters (AUDCTL bits 1-2) and two-tone serial mode, the serial/SIO bus, keyboard scanning, paddles/light-pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
+What is *not* modelled: POKEY's two high-pass filters (AUDCTL bits 1-2) and two-tone serial mode, the SIO bus's receive side (no bits leave the chip and nothing answers a command frame, so every device transfer times out -- keyboard and BREAK IRQs, and the serial-output IRQs a transfer's send half needs, are both modelled), light pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
 
 ## Build & Test Commands
 
@@ -232,7 +232,7 @@ file header spells out the triage workflow.
 
 ## Development Plan
 
-`AI-Docs/AI-Prompts.md` contains the step-by-step build plan (Prompts 1-14) that produced the emulator; all of it is complete. (Prompt 12's optional Unix-socket IPC layer was later removed -- see `CHANGES.md`.) The prompt file and `AI-Docs/atari800-plan.md` are historical records; consult them for context, but the code and `CHANGES.md` are the source of truth for current state.
+`AI-Docs/AI-Prompts.md` contains the step-by-step build plan (Prompts 1-14) that produced the emulator; all of it is complete. Prompt 12's original Unix-socket IPC layer (`src/ipc.lisp`) was later removed -- but a much larger, unrelated socket layer replaced it afterward and is now core to the project: **AESP** (`src/aesp.lisp`, binary, 3 TCP ports for control/video/audio) and the **CLI** (`src/cli-socket.lisp`, text, Unix socket), sharing socket transport plumbing in `src/transport.lisp`, built in the stages documented in `AI-Docs/AESP-CLI-Implementation-Stages.md`. This is what `scripts/record.sh` and the `capture-*.py` tools drive. The prompt file and `AI-Docs/atari800-plan.md` are historical records; consult them for context, but the code and `CHANGES.md` are the source of truth for current state.
 
 ## Key Conventions
 
