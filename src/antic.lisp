@@ -90,6 +90,14 @@
   (defconstant +reg-nmien+   #x0E)
   (defconstant +reg-nmires+  #x0F)
 
+  ;; Offsets $06 and $08 have no backing register on real ANTIC (the chip
+  ;; only decodes 4 offset bits, mirrored every 16 bytes across $D400-
+  ;; $D4FF): a read there returns a floating-bus $FF rather than any
+  ;; latched value.  CONFIRMED (ROADMAP.md Phase 24) against Acid800's
+  ;; antic_default test, which asserts exactly $D406 reads $FF.
+  (defconstant +reg-unused-6+ #x06)
+  (defconstant +reg-unused-8+ #x08)
+
   ;; NMI status bits — also the masks used in NMIEN.
   (defconstant +nmi-dli+    #x80)
   (defconstant +nmi-vbi+    #x40)
@@ -605,13 +613,16 @@ paths cannot diverge."
 (defun antic-read (antic address)
   "Read an ANTIC register.  Special cases:
   $D40B (VCOUNT) — returns SCANLINE >> 1 (ANTIC's vertical-line counter)
-  $D40F (NMIST)  — returns the NMI status latch"
+  $D40F (NMIST)  — returns the NMI status latch
+  $D406, $D408   — unbacked offsets; float to $FF (see the constants'
+                   docstring)"
   (declare (type antic antic) (type (unsigned-byte 16) address))
   (let ((offset (ldb (byte 5 0) address)))
     (case offset
       ;; (byte 8 1) grabs bits 1-8 of the 9-bit counter: SCANLINE >> 1.
       (#.+reg-vcount+ (ldb (byte 8 1) (antic-scanline antic)))
       (#.+reg-nmires+ (antic-nmist antic))
+      ((#.+reg-unused-6+ #.+reg-unused-8+) #xFF)
       (t (aref (antic-registers antic) offset)))))
 
 (defun antic-write (antic address value)

@@ -36,6 +36,9 @@ roms/*.ROM
 roms/*.bin
 !roms/.gitkeep
 
+# Acid800 test suite (fetch-acid800.sh) — third-party binaries, not vendored
+roms/acid800/
+
 # Local quickproject / sly state
 .sbclrc.local
 

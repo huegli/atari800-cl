@@ -643,13 +643,38 @@ atari800-cl/
   hardware's cycle 105, so *where* within a line an event lands is not
   modelled (`SCANLINE_ACCURACY_PLAN.md` Phases 0-3 are done; intra-line
   event positions are the stretch Phase 4).  Tricks that depend on
-  cycle position within a scanline are out of scope today.
+  cycle position within a scanline are out of scope today.  Confirmed
+  against real hardware behavior by the Acid800 test suite
+  (`ROADMAP.md` Phase 24): `antic_wsync`, `antic_dmapattern`, and
+  `antic_dlitiming` fail for exactly this reason.
+- **ANTIC's display list re-latches every VBI**, not only at JVB like
+  real hardware (whose DLISTL/H are a one-shot latch consumed once per
+  frame).  A display list intentionally longer than 240 visible
+  scanlines, expecting to keep running until the program resets it at
+  its own pace, wraps incorrectly here (`ROADMAP.md` Phase 24's
+  `antic_dlistwrap` failure; the fix is scoped as Phase 20).
+- **A concurrent NMI cannot hijack a BRK's vector.**  On real hardware,
+  an NMI arriving during specific cycles of a BRK instruction's own
+  interrupt sequence overrides its vector, sending execution to $FFFA
+  instead of $FFFE.  This project's CPU core executes each instruction
+  atomically (pending-NMI is checked only between instructions), so it
+  cannot currently model this (`ROADMAP.md` Phase 24's `cpu_bugs`
+  failure) -- an architectural gap, not a quick fix.
 - **Unstable opcodes** (XAA, AHX, SHX, SHY, TAS, LAX #imm) pick one of
   several hardware behaviours.  The page-cross address corruption of the
   store family and the `$EE` magic constant of XAA / LAX #imm are both
   modelled, matching the SingleStepTests vectors and mainstream
   emulators -- but real chips vary with supply voltage and temperature,
-  so no software should depend on them.
+  so no software should depend on them.  Confirmed: the Acid800 suite's
+  own LAX #imm test data implies a plain AND with no `$EE` fudge at all
+  (`ROADMAP.md` Phase 24's `cpu_illegal` failure) -- a second real chip
+  disagreeing with the vectors, not a bug in either.
+- **A handful of Acid800 ANTIC checks fail for reasons not yet
+  isolated** (`antic_vcount`, `antic_pmdma`'s single-line-resolution
+  case, `antic_charcontrol`'s collision-based character check, and
+  `antic_hiresbug`'s hi-res collision quirk) -- confirmed failing, but
+  not yet traced to a specific cause.  See `ROADMAP.md` Phase 24 and
+  `CHANGES.md` for what each test actually reports.
 - **No light pen and no SIO bus.**  Joystick, console keys, paddles and
   key codes come from an attached host input state (`attach-input`); with
   none attached the registers read their idle stubs -- PORTA $FF (no

@@ -3,6 +3,93 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 24 -- Acid800 gate: an external ratchet for ANTIC
+
+The CPU has had an external accuracy ratchet since Phase 12 (the Tom
+Harte vectors); ANTIC, GTIA, and POKEY never did -- their tests only
+ever asserted this emulator's own model back at itself. Avery Lee's
+Acid800 test suite (MIT licensed, from virtualdub.org, the Altirra
+author's own site) is the cheapest external check available: 45
+standalone hardware-behavior programs, each printing Pass/FAIL to the
+screen and stopping.
+
+`scripts/fetch-acid800.sh` downloads the suite's 216 KB 7z archive and
+unpacks just the 7 `cpu_*` and 13 `antic_*` standalone `.xex` tests into
+gitignored `roms/acid800/` (no-op when already present, like
+`fetch-harte.sh`). `tests/test-machine.lisp` gained `%RUN-ACID800-
+STANDALONE-TEST`: boot the real OS to READY (Acid800's own README
+confirms this is a supported configuration), inject the named `.xex`
+via `scripts/xex-loader.lisp` (loaded dynamically -- it's a standalone
+script shared with `scripts/runner.lisp`, not part of the `atari800-cl/
+tests` system), jump the CPU to its entry point, and read "Pass"/"FAIL"
+back from screen memory. `%BOOT-TO-READY` and `%SCREEN-CONTAINS-P` were
+factored out of the two existing real-ROM tests that each had their own
+copy of this loop, so all three real-ROM-boot-dependent tests (and now
+20 more) share one implementation.
+
+**One real bug found and fixed**: ANTIC offsets $D406/$D408 have no
+backing register on real hardware (only 4 offset bits are decoded,
+mirrored every 16 bytes across $D400-$D4FF) and read as a floating-bus
+$FF; this emulator returned $00 (the register array's default fill
+value). `antic_default` now passes.
+
+**The other 12 failures are documented, permanent skips**
+(`+ACID800-KNOWN-ISSUES+`, mirroring `tests/test-harte.lisp`'s
+`+HARTE-SKIP-OPCODES+` convention -- a last resort, never silent,
+checked regardless of `ATARI800_CL_STRICT` since these are permanent
+divergences, not missing assets):
+
+- `antic_wsync`, `antic_dmapattern`, `antic_dlitiming` -- direct,
+  now-concrete confirmation of the already-documented WSYNC-releases-
+  at-line-boundary and DMA-steal-lumped-at-line-start simplifications
+  (`README.md` Known Limitations; `SCANLINE_ACCURACY_PLAN.md` stretch
+  Phase 4).
+- `antic_nmist`, `antic_addresswrap` -- time out rather than print a
+  result; both synchronize to VCOUNT then wait on timing this project's
+  scanline-granular model can't produce, the same family as the three
+  above.
+- `antic_dlistwrap` -- confirms the ANTIC display-list VBI re-latch gap
+  (real hardware only reloads DLISTL/H at JVB; this emulator re-latches
+  every VBI) that `ROADMAP.md` Phase 20 / `MISC_IMPROVEMENTS_PLAN.md`
+  item 10 already scheduled documenting, now with concrete failing-test
+  evidence.
+- `cpu_illegal` -- Acid800's own LAX #imm ($AB) test data, decoded by
+  hand from `cpu_illegal.s` (A=$33, operand=$55 -> expected A=$11),
+  implies a plain AND with no magic-constant fudge at all -- disagreeing
+  with the Tom Harte/SingleStepTests vectors' `$EE` constant that
+  ROADMAP Phase 12 deliberately adopted. Both are real, different NMOS
+  6502 chips; `src/illegal.lisp` already documents this as
+  chip-dependent, and Harte's 2.56M-case ratchet stays the tiebreaker.
+- `cpu_bugs` -- a newly-confirmed **architectural** gap, not hardware
+  variance: real hardware lets a concurrent NMI hijack a BRK
+  instruction's own vector (redirecting to $FFFA instead of $FFFE) if
+  the NMI arrives during specific cycles of BRK's interrupt sequence.
+  This project's CPU core executes every instruction atomically
+  (`STEP-CPU` checks `pending-nmi` only between instructions, never
+  mid-instruction), so it structurally cannot model this without
+  cycle-granular execution -- a future-phase candidate, not a quick fix.
+- `cpu_clisei` -- the suite's own self-diagnostic skip ("Serial output
+  complete IRQ not responding"), printed before this project's own
+  CPU/IRQ logic is what's under test; informational, not a project-side
+  failure.
+- `antic_vcount`, `antic_pmdma` (single-line-resolution P/M DMA),
+  `antic_charcontrol` (a collision-based character-mode check),
+  `antic_hiresbug` (a specific hi-res collision quirk) -- confirmed
+  failing, root cause not yet isolated. Candidates for a future session;
+  each entry in `+ACID800-KNOWN-ISSUES+` has the exact on-screen failure
+  message for whoever picks this up.
+
+`README.md`'s Known Limitations gained bullets for the newly-confirmed
+items (the DL re-latch gap, the NMI/BRK gap, the LAX #imm cross-check,
+and a pointer to the four not-yet-isolated ANTIC failures); the
+already-existing WSYNC/DMA-steal bullet now cites the three Acid800
+tests that confirm it concretely.
+
+Verified on both implementations, lenient and strict
+(`ATARI800_CL_STRICT=1`, with the Phase-14 Harte subset present): 2135
+checks, 2122 pass, 13 skip (all named and reasoned in the skip census),
+0 fail, exit 0.
+
 ## ROADMAP Phase 23 -- CONFIRM retirement pass (one real bug found)
 
 Three hardware values had stood behind a bare **CONFIRM** flag since

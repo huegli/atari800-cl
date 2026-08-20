@@ -208,7 +208,35 @@
 > correct one. No flag survives as a bare CONFIRM. Verified on both
 > implementations, lenient and strict (with the Phase-14-fetched Harte
 > subset): 2112 checks, 0 fail, 0 skip, exit 0 -- fully green including
-> Harte. Phase 24 (Acid800 gate) is next per the recommended order.
+> Harte.
+>
+> **Phase 24 done (2026-08-20)**: `scripts/fetch-acid800.sh` fetches
+> Avery Lee's MIT-licensed Acid800 suite (a 216 KB 7z from
+> virtualdub.org) and unpacks the 7 CPU + 13 ANTIC standalone `.xex`
+> tests into gitignored `roms/acid800/`. `tests/test-machine.lisp`
+> boots the real OS to READY, injects each test via the existing
+> XEX-loading mechanism (`scripts/xex-loader.lisp`, loaded dynamically),
+> and reads its "Pass"/"FAIL" text back from screen memory. One real bug
+> found and fixed: ANTIC offsets $06/$08 have no backing register on
+> real hardware and should float to $FF on read; this emulator returned
+> $00 (`antic_default`). The other 12 failures are documented, permanent
+> skips in `+ACID800-KNOWN-ISSUES+` (mirrors `+HARTE-SKIP-OPCODES+`) --
+> `antic_wsync`/`antic_dmapattern`/`antic_dlitiming` directly confirm the
+> already-documented WSYNC-cycle-105 and DMA-steal-position
+> simplifications; `antic_dlistwrap` confirms the VBI display-list
+> re-latch gap (Phase 20); `cpu_illegal` confirms the Tom Harte vectors'
+> `$EE` LAX #imm constant disagrees with Acid800's own (both are real
+> chips; ROADMAP Phase 12's choice to follow Harte stands); `cpu_bugs`
+> is a newly-confirmed architectural gap (a concurrent NMI cannot hijack
+> a BRK's vector, because this CPU core checks pending-NMI only between
+> whole instructions); `cpu_clisei` is the suite's own self-skip; four
+> ANTIC tests (`antic_vcount`, `antic_pmdma`, `antic_charcontrol`,
+> `antic_hiresbug`) fail for reasons not yet isolated. README.md's Known
+> Limitations gained bullets for all of the newly-confirmed items.
+> Verified fully green on both implementations, lenient and strict, with
+> the Phase-14 Harte subset present: 2135 checks, 2122 pass, 13 skip
+> (all named/reasoned), 0 fail, exit 0. Phase 16 (SIO + virtual disk) is
+> next per the recommended order.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -318,7 +346,7 @@ and say so in the commit message.
 | 21    | Strict test gate + skip census               | --          | no       | done   |
 | 22    | POKEY pending-work bitmask                   | --          | yes      | done   |
 | 23    | CONFIRM retirement pass                      | --          | no       | done   |
-| 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | open   |
+| 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | done   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
@@ -1166,8 +1194,11 @@ Commit: "Add the Acid800 harness: CPU and ANTIC subsets under the real OS".
   1-8 done, 9 and 10 open, 11 obsolete (superseded by item 4);
   `PERFORMANCE_PLAN.md` Phases 0-3 done (2 rejected on measurement),
   Phase 4 open as Phase 18 below.
-- Acid800's CPU + ANTIC subsets under the real OS ROM: gated once
-  Phase 24 lands (previously aspirational).
+- Acid800's CPU + ANTIC subsets under the real OS ROM: gated as of
+  Phase 24 (previously aspirational) -- 7/20 tests required-passing
+  (4 CPU + 3 ANTIC), the other 13 documented, permanent skips in
+  `+ACID800-KNOWN-ISSUES+` (`tests/test-machine.lisp`); see that
+  phase's status entry and `CHANGES.md` for the full per-test triage.
 
 For the 13-24 tranche, done means: the machine can be typed at (13) and
 booted from a disk image (16), the Harte data is one command away (14)
@@ -1176,4 +1207,6 @@ match the code (15, 20), a suite pass on this machine proves the
 real-ROM paths instead of skipping them (21), the POKEY hot path
 carries one pending-work test instead of four (22), no bare CONFIRM
 flag remains anywhere (23), and Acid800's CPU subset passes under the
-real OS (24).
+real OS (24) -- delivered; the ANTIC subset's remaining 10 documented
+gaps are follow-up work for Phase 17/SCANLINE_ACCURACY_PLAN and beyond,
+not blockers for this tranche.

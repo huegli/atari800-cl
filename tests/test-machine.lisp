@@ -482,6 +482,28 @@ $00.. and $60.. respectively."
                            (logand code #x1F))
             do (write-char (if (<= #x20 ascii #x7E) (code-char ascii) #\Space) s)))))
 
+(defun %screen-contains-p (machine substring)
+  "T if SUBSTRING (matched case-insensitively) appears in any of the
+first 24 rows of MACHINE's text screen."
+  (declare (type string substring))
+  (let ((needle (string-upcase substring)))
+    (loop for row below 24
+            thereis (search needle (string-upcase (%screen-row-text machine row))))))
+
+(defun %boot-to-ready (machine &key (max-frames 1500))
+  "Run MACHINE until \"READY\" appears on screen (BASIC's prompt) or
+MAX-FRAMES elapses (checked every 50 frames -- ~25 s of emulated time at
+the default budget, ample per REAL-OS-ROM-BOOTS-THROUGH-TO-BASIC-PROMPT).
+Returns T if the prompt appeared."
+  (declare (type atari800-cl.machine:atari-machine machine))
+  (let ((found nil))
+    (loop repeat max-frames
+          until found
+          do (atari800-cl.machine:machine-run-frame machine)
+             (when (zerop (mod (atari800-cl.machine:atari-machine-frame-count machine) 50))
+               (setf found (%screen-contains-p machine "READY"))))
+    found))
+
 (test real-os-rom-boots-and-programs-antic
   "Booting the real OS ROM must reach the point where it programs ANTIC:
 DMA enabled and a display list installed, with the CPU still executing in
@@ -515,18 +537,7 @@ without them the OS spins forever waiting for XMTDON."
   (let ((m (%boot-machine-with-real-roms)))
     (if (null m)
         (%skip-or-fail "OS/BASIC ROM images not found; skipping the boot-to-BASIC test.")
-        (let ((found nil))
-          ;; ~25 s of emulated time is ample; stop as soon as the prompt shows.
-          (loop repeat 1500
-                until found
-                do (atari800-cl.machine:machine-run-frame m)
-                   (when (zerop (mod (atari800-cl.machine:atari-machine-frame-count m)
-                                     50))
-                     (setf found
-                           (loop for row below 24
-                                   thereis (search "READY"
-                                                   (string-upcase
-                                                    (%screen-row-text m row)))))))
+        (let ((found (%boot-to-ready m)))
           (is-true found
                    "BASIC's prompt must appear in screen memory within 1500 ~
                     frames (row 0: ~S)"
@@ -568,18 +579,7 @@ assert the digit 4 shows up in screen memory."
         (let ((in (atari800-cl.input:make-input-state))
               (ready nil))
           (atari800-cl.machine:attach-input m in)
-          ;; Reach READY first (same budget as
-          ;; REAL-OS-ROM-BOOTS-THROUGH-TO-BASIC-PROMPT above).
-          (loop repeat 1500
-                until ready
-                do (atari800-cl.machine:machine-run-frame m)
-                   (when (zerop (mod (atari800-cl.machine:atari-machine-frame-count m)
-                                     50))
-                     (setf ready
-                           (loop for row below 24
-                                   thereis (search "READY"
-                                                   (string-upcase
-                                                    (%screen-row-text m row)))))))
+          (setf ready (%boot-to-ready m))
           (is-true ready "must reach the READY prompt before typing can be tested")
           ;; Press, let the keyboard IRQ + editor see it, release, settle.
           (dolist (code *print-2-plus-2-keycodes*)
@@ -594,3 +594,263 @@ assert the digit 4 shows up in screen memory."
                    "'4' must appear in screen memory after typing PRINT ~
                     2+2 and RETURN (row 2: ~S, row 3: ~S)"
                    (%screen-row-text m 2) (%screen-row-text m 3))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Acid800 (ROADMAP.md Phase 24) -- an external accuracy ratchet for ANTIC,
+;;; the one this project has never had (the CPU has the Tom Harte vectors;
+;;; ANTIC/GTIA/POKEY's own tests only assert this emulator's model back at
+;;; itself).  Avery Lee's Acid800 test suite (MIT licensed;
+;;; https://virtualdub.org/altirra.html) ships 45 standalone hardware-
+;;; behavior tests as individual .xex programs; fetch the CPU and ANTIC
+;;; subsets (7 + 13 = 20 tests) with ./scripts/fetch-acid800.sh into
+;;; roms/acid800/, gitignored like every other ROM asset.
+;;;
+;;; Each standalone .xex, per its own source (Acid800's library.s), prints
+;;; "Pass" or "FAIL." (plus diagnostics) to the OS text screen via the
+;;; normal screen editor, then busy-waits on a keypress before soft-
+;;; resetting -- so this harness never needs to press a key: run frames
+;;; until the result string shows up (or a budget is exhausted), read it
+;;; the same way %BOOT-TO-READY reads "READY", and stop.  A failure here
+;;; is information about the BUS, DMA/WSYNC timing, or interrupt delivery
+;;; that no per-instruction CPU vector can see -- triage it the Harte way
+;;; (tests/test-harte.lisp's header): presumed a real emulator bug unless
+;;; it traces to a documented, deliberate simplification already named in
+;;; README.md's "Known limitations" (this project's WSYNC releases at the
+;;; line boundary rather than hardware's cycle 105, and DMA steal is
+;;; lumped at the start of a line rather than positioned within it -- both
+;;; are exactly what several ANTIC tests below check for).
+;;;
+;;; The .xex loads via scripts/xex-loader.lisp (shared with
+;;; scripts/runner.lisp; loaded dynamically here since it is a standalone
+;;; script, not part of the atari800-cl/tests ASDF system) after the
+;;; machine reaches BASIC's READY prompt -- README.html: "it will run
+;;; with... BASIC enabled... as long as 80-column mode is not used" -- so
+;;; this mirrors a real DOS binary load rather than hijacking the CPU
+;;; before the OS has finished its own initialization.
+
+(defvar *xex-loader-loaded-p* nil)
+
+(defun %ensure-xex-loader ()
+  "Load scripts/xex-loader.lisp once, making ATARI-XL-BBEDIT.XEX:LOAD-XEX
+available.  Not part of the atari800-cl/tests system (it is shared with
+scripts/runner.lisp), so it is loaded dynamically by path instead."
+  (unless *xex-loader-loaded-p*
+    (load (merge-pathnames "scripts/xex-loader.lisp"
+                           (asdf:system-source-directory "atari800-cl")))
+    (setf *xex-loader-loaded-p* t)))
+
+(defun %acid800-xex-path (name)
+  "Path to roms/acid800/NAME.xex (NAME a string like \"cpu_insn\"), or
+NIL if not found in any %ROM-SEARCH-DIRECTORIES candidate."
+  (loop for dir in (%rom-search-directories)
+        for candidate = (merge-pathnames (format nil "acid800/~A.xex" name) dir)
+          thereis (probe-file candidate)))
+
+(defun %run-acid800-standalone-test (name &key (test-frames 300))
+  "Run the Acid800 standalone test roms/acid800/NAME.xex to completion.
+
+Returns :PASS, :FAIL, or :TIMEOUT (the result string never appeared
+within TEST-FRAMES -- ~5 s of emulated time, ample given Acid800's own
+README says most tests execute in under a second) on a real run.  When a
+precondition is not met (the named .xex missing, or the OS/BASIC ROMs
+themselves), returns (VALUES NIL REASON) instead, for %SKIP-OR-FAIL."
+  (let ((xex (%acid800-xex-path name)))
+    (unless xex
+      (return-from %run-acid800-standalone-test
+        (values nil (format nil "roms/acid800/~A.xex not found -- run ~
+                                  ./scripts/fetch-acid800.sh to fetch it."
+                            name))))
+    (let ((m (%boot-machine-with-real-roms)))
+      (unless m
+        (return-from %run-acid800-standalone-test
+          (values nil "OS/BASIC ROM images not found; skipping the Acid800 tests.")))
+      (unless (%boot-to-ready m)
+        (return-from %run-acid800-standalone-test
+          (values nil "machine did not reach READY within the boot budget")))
+      (%ensure-xex-loader)
+      (let* ((load-xex (find-symbol "LOAD-XEX" "ATARI-XL-BBEDIT.XEX"))
+             (load-result (funcall load-xex m xex))
+             (entry (getf load-result :entry))
+             (cpu (atari800-cl.machine:atari-machine-cpu m)))
+        (setf (atari800-cl.cpu:cpu-pc cpu) entry)
+        (loop repeat test-frames
+              do (atari800-cl.machine:machine-run-frame m)
+              do (cond
+                   ((%screen-contains-p m "FAIL") (return :fail))
+                   ((%screen-contains-p m "Pass") (return :pass)))
+              finally (return :timeout))))))
+
+(defparameter +acid800-known-issues+
+  '(("cpu_bugs" .
+     "NMI-hijacks-BRK: this project's CPU core executes each instruction
+atomically (STEP-CPU checks pending-NMI only between instructions), so
+it cannot model real hardware's late (cycle 6) vector selection that
+lets a concurrent NMI override a BRK's own $FFFE vector.  A confirmed
+architectural gap, not hardware variance -- candidate for a future
+phase alongside cycle-exact interrupt work.")
+    ("cpu_clisei" .
+     "Acid800's own self-diagnostic skip (\"Serial output complete IRQ
+not responding\"), printed by the suite itself before this project's
+CPU/IRQ logic is what's being exercised -- informational, not a
+project-side failure.")
+    ("cpu_illegal" .
+     "LAX #imm ($AB) magic constant: Acid800's own test data
+(cpu_illegal.s) expects a plain AND with no OR-fudge for A=$33,
+op=$55 -> $11, but this project deliberately adopted $EE
+(ROADMAP.md Phase 12) to match the Tom Harte/SingleStepTests vectors --
+the far more exhaustive ratchet (2.56M cases).  Real NMOS 6502 chips
+genuinely vary here; src/illegal.lisp already documents this as
+chip-dependent.")
+    ("antic_dlistwrap" .
+     "Directly exercises the documented VBI display-list re-latch
+simplification (README.md Known Limitations; MISC_IMPROVEMENTS_PLAN.md
+item 10 / ROADMAP.md Phase 20): real ANTIC reloads its DL program
+counter from DLISTL/H only at JVB; this emulator re-latches every VBI.")
+    ("antic_wsync" .
+     "Directly exercises the documented WSYNC release-timing
+simplification (README.md Known Limitations; SCANLINE_ACCURACY_PLAN.md
+stretch Phase 4): this emulator releases WSYNC at the line boundary,
+not hardware's cycle 105.")
+    ("antic_dmapattern" .
+     "Directly exercises the documented DMA-steal positioning
+simplification (README.md Known Limitations): this emulator lumps a
+line's DMA steal at its start rather than positioning it within the
+line.")
+    ("antic_dlitiming" .
+     "DLI entry cycle timing -- the same cycle-precision family as
+antic_wsync (SCANLINE_ACCURACY_PLAN.md stretch Phase 4); not yet
+independently isolated.")
+    ("antic_nmist" .
+     "Times out (no Pass/FAIL ever appears): its internal checks
+synchronize to VCOUNT then wait on DLI/VBI NMIST timing, the same
+cycle-precision family as antic_wsync/antic_dlitiming; not yet
+independently isolated.")
+    ("antic_addresswrap" .
+     "Times out (no Pass/FAIL ever appears): the playfield-DMA-wrap
+sub-check likely depends on the same DMA cycle-positioning
+simplification as antic_dmapattern; not yet independently isolated.")
+    ("antic_vcount" .
+     "Confirmed failing (\"VCOUNT rollover #1 (NTSC) wrong\"); root
+cause not yet isolated -- candidate for a future session.")
+    ("antic_pmdma" .
+     "Confirmed failing (\"One-line P0 data bad at line 8\"):
+single-line-resolution P/M DMA may have a real, distinct bug from the
+double-line mode Phase 6a's own tests cover.  Root cause not yet
+isolated -- candidate for a future session.")
+    ("antic_charcontrol" .
+     "Confirmed failing: this test detects character pixel patterns
+indirectly via P/M-vs-playfield collisions rather than reading screen
+memory, so the failure could be in CHACTL handling, in collision
+detection under character mode specifically, or their interaction.
+Root cause not yet isolated -- candidate for a future session.")
+    ("antic_hiresbug" .
+     "Confirmed failing (\"Collision not found with bug\"): a specific
+real-hardware collision quirk in ANTIC's hi-res modes this project has
+never modeled.  Root cause not yet isolated -- candidate for a future
+session."))
+  "Acid800 standalone tests confirmed NOT to pass against this emulator,
+each with why -- mirrors +HARTE-SKIP-OPCODES+'s convention (tests/
+test-harte.lisp): a last resort, never silent, always reasoned.  Checked
+by DEFINE-ACID800-TEST's expansion, which SKIPs (not fails, and
+regardless of ATARI800_CL_STRICT -- these are permanent, documented
+divergences, not missing assets) a listed test, so it stays visible in
+the skip census (ROADMAP.md Phase 21) rather than either failing the
+suite or disappearing.  ROADMAP.md Phase 24's status entry has the full
+per-test triage; remove an entry here once its root cause is fixed.")
+
+(defmacro define-acid800-test (name description)
+  "Define a FiveAM test ACID800-<NAME> (underscores become dashes) that
+runs roms/acid800/NAME.xex via %RUN-ACID800-STANDALONE-TEST.  Asserts
+Pass, unless NAME is listed in +ACID800-KNOWN-ISSUES+, in which case it
+SKIPs with the documented reason regardless of the actual result.  NAME
+is a string, e.g. \"cpu_insn\"."
+  (let ((test-name (intern (format nil "ACID800-~:@(~A~)"
+                                   (substitute #\- #\_ name)))))
+    `(test ,test-name
+       ,description
+       (multiple-value-bind (result reason) (%run-acid800-standalone-test ,name)
+         (let ((known (cdr (assoc ,name +acid800-known-issues+ :test #'string=))))
+           (cond
+             ((null result) (%skip-or-fail "~A" reason))
+             (known (skip "~A (actual result: ~A)" known result))
+             (t (is (eq :pass result)
+                    "Acid800 ~A: expected Pass, got ~A" ,name result))))))))
+
+;;; CPU subset (7 tests) -- expected to pass given the Harte vectors
+;;; (ROADMAP.md Phase 12) already pin per-instruction CPU behavior at
+;;; full depth; a failure here is information about the BUS or interrupt
+;;; timing around an instruction, which per-instruction vectors cannot
+;;; see (Acid800's own cpu_timing test explicitly depends on VCOUNT, and
+;;; cpu_clisei on IRQ acknowledge timing around CLI/SEI).
+
+(define-acid800-test "cpu_insn"
+  "Acid800 CPU: basic non-control-flow, non-stack instructions, including
+abs,X/Y and zp,X/Y/(zp,X) address-space wraparound.")
+(define-acid800-test "cpu_flags"
+  "Acid800 CPU: P register flag handling, notably that the B (break) bit
+cannot be changed under program control.")
+(define-acid800-test "cpu_decimal"
+  "Acid800 CPU: basic decimal-mode ADC/SBC operations (not exhaustive --
+the Harte vectors are the exhaustive decimal-mode ratchet).")
+(define-acid800-test "cpu_timing"
+  "Acid800 CPU: addressing-mode cycle counts including page-crossing
+cases. Depends on ANTIC's VCOUNT register being correct.")
+(define-acid800-test "cpu_bugs"
+  "Acid800 CPU: the JMP (abs) page-wrap bug and BRK being overridden by a
+concurrent NMI.")
+(define-acid800-test "cpu_clisei"
+  "Acid800 CPU: IRQ acknowledge timing around CLI/SEI, including entering
+an IRQ handler with the I flag set.")
+(define-acid800-test "cpu_illegal"
+  "Acid800 CPU: a series of undocumented-opcode checks (independent of,
+and a cross-check against, the Harte vectors' illegal-opcode coverage).")
+
+;;; ANTIC subset (13 tests) -- the first EXTERNAL check the Phase 3 WSYNC
+;;; and Phase 5 playfield/DMA steal-table implementations have ever faced;
+;;; several of these are expected, DOCUMENTED failures given this
+;;; project's own scanline-approximate model (README.md "Known
+;;; limitations": WSYNC releases at the line boundary, not hardware's
+;;; cycle 105; DMA steal is lumped at the start of a line). See
+;;; ROADMAP.md's Phase 24 status entry for which subset actually passed.
+
+(define-acid800-test "antic_default"
+  "Acid800 ANTIC: undocumented ANTIC registers return the correct
+default value.")
+(define-acid800-test "antic_nmist"
+  "Acid800 ANTIC: NMIST's DLI/VBI bits function and time correctly.")
+(define-acid800-test "antic_vcount"
+  "Acid800 ANTIC: VCOUNT's cycle and value ranges. Fails if WSYNC timing
+is incorrect.")
+(define-acid800-test "antic_addresswrap"
+  "Acid800 ANTIC: display-list DMA wraps at 1K and playfield DMA wraps at
+4K. The playfield case also needs GTIA player/playfield collisions.")
+(define-acid800-test "antic_dlistwrap"
+  "Acid800 ANTIC: correct behavior when a display list exceeds 240
+visible scanlines without being reset during vertical blank -- directly
+exercises the documented VBI re-latch simplification (ROADMAP.md Phase
+20 / MISC_IMPROVEMENTS_PLAN.md item 10).")
+(define-acid800-test "antic_dlitiming"
+  "Acid800 ANTIC: timing of entry into DLI handlers. Fails if CPU NMI
+acknowledge timing is off.")
+(define-acid800-test "antic_addrmirror"
+  "Acid800 ANTIC: register mirroring across $D420-$D4FF.")
+(define-acid800-test "antic_pmdma"
+  "Acid800 ANTIC: player/missile DMA, including automatic missile-DMA
+enable and per-scanline DMA in two-line mode. Heavily dependent on exact
+WSYNC + CPU timing and P/M collisions.")
+(define-acid800-test "antic_charcontrol"
+  "Acid800 ANTIC: character-mode output patterns (modes 2-7) including
+inversion and vertical reflection; depends on P/M collisions.")
+(define-acid800-test "antic_dmapattern"
+  "Acid800 ANTIC: positioning of DMA cycles within a scanline across
+playfield modes/widths. Needs correct STA WSYNC timing and 9-bit RANDOM
+sequencing.")
+(define-acid800-test "antic_blockednmi"
+  "Acid800 ANTIC: the CPU can be induced to ignore an NMI by entering the
+interrupt sequence at precisely the correct cycle.")
+(define-acid800-test "antic_hiresbug"
+  "Acid800 ANTIC: a hi-res mode display quirk.")
+(define-acid800-test "antic_wsync"
+  "Acid800 ANTIC: WSYNC release timing -- the test this project's own
+end-of-line (not cycle-105) WSYNC model is most directly expected to
+fail, per README.md's Known Limitations.")

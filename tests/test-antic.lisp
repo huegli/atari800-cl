@@ -437,6 +437,20 @@ scanline 8, that's cycle 0 of scanline 15."
     (%tick-scanlines antic nil bus 50)
     (is (= 25 (atari800-cl.bus:bus-read bus #xD40B)))))
 
+(test unbacked-register-offsets-float-to-ff
+  "$D406 and $D408 have no backing ANTIC register (only 4 offset bits are
+decoded, mirrored every 16 bytes) and read as $FF regardless of any
+earlier write -- CONFIRMED (ROADMAP.md Phase 24) against Acid800's
+antic_default test, which asserts exactly this for $D406."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dmactl 0)
+    (declare (ignore cpu))
+    (is (= #xFF (atari800-cl.bus:bus-read bus #xD406)))
+    (is (= #xFF (atari800-cl.bus:bus-read bus #xD408)))
+    (atari800-cl.bus:bus-write bus #xD406 #x42)
+    (is (= #xFF (atari800-cl.bus:bus-read bus #xD406))
+        "a write must not make the unbacked offset stick")))
+
 ;;; ---------------------------------------------------------------------------
 ;;; P/M graphics DMA (ROADMAP.md Phase 6a)
 ;;;

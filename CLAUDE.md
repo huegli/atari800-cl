@@ -230,6 +230,29 @@ focused regression test to `tests/test-regressions.lisp` naming the opcode
 and case id, and only then consider the (currently empty) skip list. The
 file header spells out the triage workflow.
 
+**Acid800** (`tests/test-machine.lisp`'s `ACID800-*` tests) is the external
+accuracy ratchet the CPU has always had via Harte but ANTIC never did: Avery
+Lee's suite (MIT licensed) runs 20 standalone hardware-behavior programs (7
+CPU + 13 ANTIC) against the real OS ROM and reads their Pass/FAIL text back
+from screen memory. `./scripts/fetch-acid800.sh` fetches them into gitignored
+`roms/acid800/` (no-op when already present):
+
+```sh
+./scripts/fetch-acid800.sh
+./scripts/test-sbcl.sh
+```
+
+7 tests are required to pass (part of the normal green suite); the other 13
+are individually documented, permanent skips in `+ACID800-KNOWN-ISSUES+`
+(`tests/test-machine.lisp`, mirroring `+HARTE-SKIP-OPCODES+`'s convention) --
+confirmed divergences from real hardware, most already tracked elsewhere
+(README.md's Known Limitations, `SCANLINE_ACCURACY_PLAN.md`'s stretch Phase
+4, `ROADMAP.md` Phase 20), a few (`cpu_bugs`'s NMI-hijacks-BRK gap, and four
+ANTIC tests whose root cause isn't yet isolated) newly confirmed by this
+harness. See `ROADMAP.md` Phase 24 and `CHANGES.md` for the full per-test
+triage. These skip regardless of `ATARI800_CL_STRICT` -- they are permanent,
+documented divergences, not missing assets.
+
 ## Development Plan
 
 `AI-Docs/AI-Prompts.md` contains the step-by-step build plan (Prompts 1-14) that produced the emulator; all of it is complete. Prompt 12's original Unix-socket IPC layer (`src/ipc.lisp`) was later removed -- but a much larger, unrelated socket layer replaced it afterward and is now core to the project: **AESP** (`src/aesp.lisp`, binary, 3 TCP ports for control/video/audio) and the **CLI** (`src/cli-socket.lisp`, text, Unix socket), sharing socket transport plumbing in `src/transport.lisp`, built in the stages documented in `AI-Docs/AESP-CLI-Implementation-Stages.md`. This is what `scripts/record.sh` and the `capture-*.py` tools drive. The prompt file and `AI-Docs/atari800-plan.md` are historical records; consult them for context, but the code and `CHANGES.md` are the source of truth for current state.
