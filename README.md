@@ -68,13 +68,27 @@ What's implemented:
 - **Protocol servers** -- AESP (binary, 3 TCP ports) and a CLI (text,
   Unix socket) let an external GUI/CLI/web client drive the emulator.
   See [Protocol servers](#protocol-servers-aesp--cli).
+- **Host disk bridge** -- a memory-mapped `$D1xx` peripheral
+  (`src/hostdev.lisp`) that loads real software from ATR disk images or
+  raw XEX/OBX binaries without emulating the serial wire: a signature
+  register at `$D1FE` and a "go" register at `$D1FF` that executes a
+  standard SIO DCB instantly against a mounted image. `src/xex.lisp`
+  synthesizes a bootable ATR from an XEX/OBX file entirely in memory.
+  `MOUNT-DISK`/`UNMOUNT-DISK`/`LOAD-XEX` (facade, AESP, and CLI) work
+  against any machine. This is an emulator-side peripheral a real Atari
+  OS ignores; software has to probe for it, which this project's own
+  `minimal-xl` OS submodule does -- see `ROADMAP.md` Phase 16.
 
 What's *not* yet implemented:
 
-- The serial line itself and the SIO bus (cassette, disk, printer).
-  POKEY raises the serial-output interrupts a transfer needs, but no
-  bits leave the chip and nothing is received, so every device times
-  out -- which is what lets a cold boot fall through to BASIC.
+- **The serial wire itself.** The host disk bridge above lets software
+  that probes for it (this project's own `minimal-xl` OS) load real
+  disk images without any serial traffic, but nothing emulates SIO's
+  byte-level wire protocol: POKEY raises the serial-output interrupts a
+  transfer needs, but no bits leave the chip and nothing is received on
+  it, so a real (non-bridge-aware) OS's SIO device transfers always time
+  out -- which is what lets the stock Atari OS's cold boot fall through
+  to BASIC with no disk attached. See `ROADMAP.md` Phase 25.
 - Light pen, cartridge mapper, and the right-cartridge slot.
 
 See `CHANGES.md` for a phase-by-phase summary of what each commit
@@ -526,7 +540,10 @@ pushes of the rendered 384x240 framebuffer as BGRA8888 (converted from
 the renderer's internal 24-bit RGB), and
 `AUDIO_SUBSCRIBE`->`AUDIO_CONFIG` (44 744 Hz, 8-bit, mono) followed by
 per-frame `AUDIO_PCM` pushes of 746-747 raw mono samples to audio-port
-clients; any other type -> `ERROR`.  The Nth `AUDIO_PCM` pairs with the
+clients; `MOUNT`/`LOAD_XEX` (`[unit][read-only][path]`)->`ACK` mount an
+`.atr` file or synthesize one from an XEX/OBX file onto the host disk
+bridge (`ROADMAP.md` Phase 16), and `UNMOUNT` (`[unit]`)->`ACK` clears a
+drive; any other type -> `ERROR`.  The Nth `AUDIO_PCM` pairs with the
 Nth `FRAME_RAW` -- both are pushed from the same post-frame hook, so
 A/V capture needs no timestamps.  Synthesis runs only while an audio
 client is connected.
@@ -535,7 +552,8 @@ client is connected.
 `OK:<data>` or `ERR:<msg>` replies.  MVP verbs: `ping`, `version`,
 `pause`, `resume`, `step [n]`, `reset [cold|warm]`, `status`,
 `read $ADDR N`, `write $ADDR HEX,HEX,...`, `fill $START $END $VALUE`,
-`registers [REG=$VAL ...]`, `quit`.  Anything else replies
+`registers [REG=$VAL ...]`, `mount UNIT PATH`, `unmount UNIT`,
+`loadxex PATH [UNIT]` (defaults to D1:), `quit`.  Anything else replies
 `ERR:Not implemented` or `ERR:unknown command`.
 
 ```sh
@@ -545,7 +563,7 @@ printf 'CMD:ping\n' | nc -U /tmp/atari800-cl-$(pgrep -n sbcl).sock
 ```
 
 Not yet implemented (both protocols): `BOOT_FILE`, `AUDIO_SYNC`, and
-the debugger/disk/BASIC/state/screenshot command families.
+the debugger/BASIC/state/screenshot command families.
 
 ## Project layout
 
@@ -675,12 +693,16 @@ atari800-cl/
   `antic_hiresbug`'s hi-res collision quirk) -- confirmed failing, but
   not yet traced to a specific cause.  See `ROADMAP.md` Phase 24 and
   `CHANGES.md` for what each test actually reports.
-- **No light pen and no SIO bus.**  Joystick, console keys, paddles and
-  key codes come from an attached host input state (`attach-input`); with
-  none attached the registers read their idle stubs -- PORTA $FF (no
-  buttons), POT0-7 $FF, KBCODE 0, TRIG0-3 released.  POKEY's serial
-  transmitter raises SEROR/SEROC but drives no line, so SIO transfers
-  always end in a device timeout.
+- **No light pen and no SIO wire protocol.**  Joystick, console keys,
+  paddles and key codes come from an attached host input state
+  (`attach-input`); with none attached the registers read their idle
+  stubs -- PORTA $FF (no buttons), POT0-7 $FF, KBCODE 0, TRIG0-3
+  released.  POKEY's serial transmitter raises SEROR/SEROC but drives no
+  line, so a real OS's SIO transfers always end in a device timeout --
+  the host disk bridge (`ROADMAP.md` Phase 16; see "What's implemented"
+  above) sidesteps this for software that knows to probe for it, rather
+  than emulating the wire; genuine byte-level SIO receive remains
+  unmodelled (`ROADMAP.md` Phase 25).
 - **No cartridge or right-cartridge support.**  $8000-$9FFF behaves
   as plain RAM with no mapper.
 

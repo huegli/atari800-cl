@@ -237,6 +237,37 @@
 > the Phase-14 Harte subset present: 2135 checks, 2122 pass, 13 skip
 > (all named/reasoned), 0 fail, exit 0. Phase 16 (SIO + virtual disk) is
 > next per the recommended order.
+>
+> **Phase 16 done (2026-08-20)**, the revised host-disk-bridge plan, in
+> four commits: "Host bridge: bridge device + ATR disk images (16a+16b)",
+> "Host bridge: XEX/OBX loading (16d)", "Host bridge: mount API +
+> protocol (16e)", and this integration pass (16c's minimal-xl side
+> landed independently in the submodule at commit `446eb6a`, "Phase 15 -
+> SIOV host-bridge fast path"; this repo's pointer bump is part of this
+> commit). `src/hostdev.lisp`'s `$D1xx` bridge (16a/16b, already done)
+> plus `src/xex.lisp`'s in-memory XEX/OBX-to-ATR synthesis (16d) plus the
+> facade/AESP/CLI mount surface (16e) all landed green individually; this
+> pass wired minimal-xl's own `SIOV` probe in and proved the whole chain
+> boots real software. `tests/test-machine.lisp`'s acceptance tests --
+> `HOSTDEV-BOOTS-MINIMAL-XL-AND-REACHES-EDVENTURE` (ATR mount) and
+> `HOSTDEV-LOAD-XEX-BOOTS-MINIMAL-XL-AND-REACHES-EDVENTURE` (`LOAD-XEX`,
+> no `.atr` file at all) -- both passed on the first real run: minimal-xl's
+> OS ROM cold-boots, its cold-start's unconditional disk-boot attempt
+> (`RST5`/`BTD`) finds the bridge signature at `$D1FE`, the DCB write to
+> `$D1FF` executes instantly, `xexboot.bin`'s loader streams edventure's
+> segments in through `DSKINV`, and the CPU ends up executing inside
+> edventure's own $8000-$BFE0 address range (read directly from
+> `edventure.obx`'s segment headers via `%OBX-SEGMENT-RANGE`, so the
+> check needs no `.lab` file) well within the frame budget. No emulator
+> bug needed fixing -- the bridge's DCB dispatch (16a) and ATR sector
+> mapping (16b) were exercised end to end exactly as written. Verified
+> fully green on both implementations: lenient 2362 pass / 14 skip
+> (Harte plus the 13 already-named Acid800 items) / 0 fail; strict (with
+> `minimal-xl/` assets present, `$ATARI800_CL_HARTE_TESTS` still unset)
+> 2362 pass / 13 skip / 1 fail, the pre-existing `HARTE-PROCESSOR-TESTS`
+> exception only. Phase 25 (SIO receive path + serial-wire disk) can
+> reuse this bridge's ATR/XEX plumbing as one implementation alongside a
+> real serial model, per that phase's own notes.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -338,7 +369,7 @@ and say so in the commit message.
 | 13    | POKEY keyboard IRQ (typing into BASIC)       | 22         | no       | done   |
 | 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | done   |
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | done   |
-| 16    | Host disk bridge + virtual disk (revised)    | 21         | no       | open   |
+| 16    | Host disk bridge + virtual disk (revised)    | 21         | no       | done   |
 | 17    | Harte bus-trace comparison                   | 12         | no       | open   |
 | 18    | LispWorks profiling pass                     | --          | yes      | open   |
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |

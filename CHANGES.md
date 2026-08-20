@@ -3,40 +3,66 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
-## ROADMAP Phase 16a+16b (in progress) -- Host disk bridge + ATR images
+## ROADMAP Phase 16 -- Host disk bridge: ATR/XEX/OBX via minimal-xl
 
-Stages 16a and 16b of the revised Phase 16 ("Host disk bridge: ATR/XEX/OBX
-via minimal-xl") only -- the phase itself is not done; 16c (minimal-xl's
-own SIOV bridge probe, a submodule change), 16d (XEX/OBX loading), and 16e
-(facade API + protocol verbs) are still open.
+The machine now loads real software from disk images without emulating
+the serial wire: a memory-mapped `$D1xx` host disk bridge, taught to
+minimal-xl's own OS (a submodule this project controls), stands in for a
+parallel-bus disk controller. Four commits: "Host bridge: bridge device
++ ATR disk images (16a+16b)", "Host bridge: XEX/OBX loading (16d)",
+"Host bridge: mount API + protocol (16e)", and the integration pass
+(16c, minimal-xl's own `SIOV` bridge probe, landed independently in the
+submodule at commit `446eb6a`, "Phase 15 - SIOV host-bridge fast path";
+this repo's commit bumps the submodule pointer and wires the acceptance
+tests through).
 
-`src/hostdev.lisp` adds a `$D1xx` host disk bridge: `$D1FE` answers a
-signature byte ($A8) when attached (open bus otherwise, exactly as
-before), and a write to `$D1FF` executes the SIO operation described by
-the standard DCB at `$0300`, transferring data through `BUS-READ`/
-`BUS-WRITE` rather than poking RAM directly, then latches the resulting
-status both into DSTATS and for the next `$D1FF` read. Up to 8 drive
-slots (DUNIT 1-8) support STATUS and READ against mounted ATR images;
-WRITE always answers the read-only status for now. `MAKE-ATARI-MACHINE`
-always builds and attaches one bridge, so `MOUNT-DISK`/`MOUNT-DISK-FILE`/
-`UNMOUNT-DISK` work against any machine's `ATARI-MACHINE-HOSTDEV`.
+`src/hostdev.lisp` adds the `$D1xx` bridge: `$D1FE` answers a signature
+byte ($A8) when attached (open bus otherwise, exactly as before), and a
+write to `$D1FF` executes the SIO operation described by the standard
+DCB at `$0300`, transferring data through `BUS-READ`/`BUS-WRITE` rather
+than poking RAM directly, then latches the resulting status both into
+DSTATS and for the next `$D1FF` read. Up to 8 drive slots (DUNIT 1-8)
+support STATUS and READ against mounted ATR images; WRITE always answers
+the read-only status for now. `MAKE-ATARI-MACHINE` always builds and
+attaches one bridge, so the mount functions work against any machine's
+`ATARI-MACHINE-HOSTDEV`. `PARSE-ATR-BYTES`/`LOAD-ATR-FILE` parse the
+16-byte ATR header (magic `$0296`, sector size, paragraph-counted image
+size) into an `ATR-IMAGE`, and `ATR-READ-SECTOR` maps a 1-based sector
+number to file bytes, honoring the format's boot-sector rule (sectors
+1-3 are always 128 bytes even on a double-density image).
 
-`PARSE-ATR-BYTES`/`LOAD-ATR-FILE` parse the 16-byte ATR header (magic
-`$0296`, sector size, paragraph-counted image size) into an `ATR-IMAGE`,
-and `ATR-READ-SECTOR` maps a 1-based sector number to file bytes,
-honoring the format's boot-sector rule (sectors 1-3 are always 128 bytes
-even on a double-density image).
+`src/xex.lisp` adds `MAKE-XEX-ATR`/`LOAD-XEX`, a Common Lisp port of
+minimal-xl's `tools/xex2atr.py`: prepend `fixtures/xexboot.bin`'s
+assembled boot-sector loader, patch its FSEC word (offsets 9/10) with
+the last data sector number, pad both to 128-byte sectors, wrap the
+result in an ATR header -- all in memory, no file ever written -- and
+hand it to `PARSE-ATR-BYTES`. Because `xexboot.asm` itself streams the
+file through `DSKINV` and replays DOS's own segment-load / INITAD / RUNAD
+semantics, this needs no 6502 segment-parsing logic of its own.
 
-The acceptance scaffold required by the roadmap landed in the same
-commit: `HOSTDEV-BOOTS-MINIMAL-XL-AND-REACHES-EDVENTURE` in
-`tests/test-machine.lisp` boots minimal-xl's own OS ROM with
-`edventure.atr` mounted on D1, but is unconditionally skipped -- it
-cannot pass until 16c teaches minimal-xl's SIOV to probe the bridge.
-`tests/test-hostdev.lisp` covers the bridge and ATR-image logic directly:
-signature read with/without a bridge, the `$D1FF` status latch, DCB
-dispatch for READ/STATUS against a synthetic in-memory ATR, the
-double-density boot-sector rule, every documented error status code, and
-the read-only WRITE rejection.
+The mount surface: `src/main.lisp`'s facade exports `MOUNT-DISK`/
+`UNMOUNT-DISK`/`LOAD-XEX` (the last mounts on D1 by default and does not
+reset the machine); `src/aesp.lisp` adds control messages `MOUNT` (0x08),
+`UNMOUNT` (0x09), and `LOAD_XEX` (0x0A); `src/cli-socket.lisp` adds
+`mount UNIT PATH`, `unmount UNIT`, and `loadxex PATH [UNIT]` verbs.
+
+Acceptance, in `tests/test-machine.lisp`:
+`HOSTDEV-BOOTS-MINIMAL-XL-AND-REACHES-EDVENTURE` (edventure.atr mounted
+on D1) and `HOSTDEV-LOAD-XEX-BOOTS-MINIMAL-XL-AND-REACHES-EDVENTURE`
+(`LOAD-XEX` straight from edventure.obx, no `.atr` file at all) both
+boot minimal-xl's OS ROM and confirm the CPU ends up executing inside
+edventure's own loaded address range -- read directly from
+`edventure.obx`'s own segment headers (`%OBX-SEGMENT-RANGE`), not a
+`.lab` file, so the check survives a rebuild at different addresses.
+Both passed on the first real run against the finished bridge: no
+emulator bug needed fixing. `tests/test-hostdev.lisp` covers the bridge,
+ATR, and XEX/OBX logic directly (signature read, the `$D1FF` status
+latch, DCB dispatch, the double-density boot-sector rule, every
+documented error status code, FSEC patching, and malformed-input
+rejection); `tests/test-aesp.lisp`/`tests/test-cli-socket.lisp` cover the
+protocol surface (mount/unmount round trip, a missing-file error that
+leaves the connection usable, `LOAD_XEX`/`loadxex` mounting a synthesized
+ATR).
 
 ## ROADMAP Phase 24 -- Acid800 gate: an external ratchet for ANTIC
 

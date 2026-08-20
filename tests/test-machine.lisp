@@ -858,33 +858,32 @@ end-of-line (not cycle-105) WSYNC model is most directly expected to
 fail, per README.md's Known Limitations.")
 
 ;;; ---------------------------------------------------------------------------
-;;; Host disk bridge (ROADMAP.md Phase 16, revised) -- acceptance scaffold.
+;;; Host disk bridge (ROADMAP.md Phase 16, revised) -- acceptance.
 ;;;
 ;;; The real acceptance criterion for the whole phase: boot minimal-xl's
-;;; own OS ROM with edventure.atr mounted on drive 1 (D1:) via the $D1xx
+;;; own OS ROM with edventure mounted on drive 1 (D1:) via the $D1xx
 ;;; bridge (src/hostdev.lisp) and reach the game.  minimal-xl is this
 ;;; project's own controlled OS (a submodule at minimal-xl/), built as a
 ;;; 16 KiB flat $C000-$FFFF image exactly like the real Atari OS ROM but
 ;;; with no PORTB banking and no BASIC ROM -- so it loads through the same
 ;;; MACHINE-COLD-RESET :OS-PATH mechanism the real-ROM tests above use,
-;;; just without :BASIC-PATH.
+;;; just without :BASIC-PATH.  minimal_os.asm's cold start (RST5/BTD)
+;;; attempts a disk boot unconditionally with no cartridge present -- no
+;;; keypress needed, unlike the real-OS BASIC tests above.
 ;;;
-;;; This test CANNOT pass yet: 16a/16b (this commit) give the emulator
-;;; side of the bridge, but minimal-xl's own SIOV doesn't know to probe
-;;; $D1FE for it until the submodule's stage 16c lands (a separate,
-;;; parallel effort -- see ROADMAP.md's "Phase 16 (revised)" section). So
-;;; this is double-gated: %SKIP-OR-FAIL for the ordinary missing-asset
-;;; case (this machine has the files, so that branch is dormant here, but
-;;; keeps the test honest under ATARI800_CL_STRICT on a machine that
-;;; doesn't), and an unconditional SKIP for the "16c isn't wired up yet"
-;;; case, which must stay green even under strict mode since it names a
-;;; missing CODE PATH rather than a missing asset.  Deliberately no real
-;;; boot logic lives past the unconditional skip -- FiveAM's SKIP records
-;;; a result and returns normally rather than aborting the test, so any
-;;; assertions placed after it would still run (and could fail) even
-;;; though the test is nominally skipped.  The wave-2 integration removes
-;;; the unconditional skip once the submodule pointer bump lands, and
-;;; writes the boot-and-assert body in its place.
+;;; "Reached the game" is checked without depending on minimal_os.lab or
+;;; edventure's own .lab file (both build artifacts of the minimal-xl
+;;; submodule that a checkout without `make` never produces): %OBX-
+;;; SEGMENT-RANGE reads edventure.obx's own DOS binary-load segment
+;;; headers directly (the same bytes tools/smoke_test.sh's Python
+;;; one-liner reads to find the entry point) and returns the address span
+;;; every segment occupies once loaded ($8000-$BFE0 for the edventure
+;;; build these tests were written against).  Once the CPU is executing
+;;; anywhere in that range, the OS/loader/boot-sector code (which lives in
+;;; ROM at $C000+ or the xexboot loader's own $0700-$07FF RAM page) is
+;;; long behind us and the game itself is running -- a signal that
+;;; survives an edventure rebuild at different addresses just as well as
+;;; one tied to a specific entry point would, and needs no .lab file.
 
 (defun %minimal-xl-path (name)
   "Path to minimal-xl/NAME relative to the system source directory, or NIL
@@ -894,15 +893,87 @@ when the file isn't there (e.g. the submodule was never checked out)."
                                 (asdf:system-source-directory "atari800-cl")))))
     (and dir (probe-file (merge-pathnames name dir)))))
 
+(defun %obx-segment-range (path)
+  "Scan an XEX/OBX file's DOS binary-load segments -- an optional leading
+$FFFF marker, then any number of [start(u16)][end(u16), inclusive][data]
+records -- and return (values LO HI) spanning every segment's address
+range.  This is the memory footprint the loaded program occupies once
+xexboot's loader (tools/xexboot.asm) finishes, derived straight from the
+file's own bytes rather than a companion .lab file."
+  (let* ((bytes (read-binary-file path))
+         (len (length bytes))
+         (i 0) (lo nil) (hi nil))
+    (when (and (>= len 2) (= (aref bytes 0) #xFF) (= (aref bytes 1) #xFF))
+      (setf i 2))
+    (loop while (<= (+ i 4) len)
+          do (let ((start (logior (aref bytes i) (ash (aref bytes (1+ i)) 8)))
+                    (end   (logior (aref bytes (+ i 2)) (ash (aref bytes (+ i 3)) 8))))
+               (setf lo (if lo (min lo start) start)
+                     hi (if hi (max hi end) end))
+               (incf i (+ 4 (1+ (- end start))))))
+    (values lo hi)))
+
+(defun %run-until-pc-in-range (machine lo hi &key (max-frames 300))
+  "Run MACHINE one frame at a time (pumping ANTIC/POKEY exactly like
+MACHINE-RUN-FRAME always does, so VBI-driven OS init isn't skipped the
+way single CPU-instruction stepping would skip it) until CPU-PC falls
+within [LO,HI] inclusive or MAX-FRAMES elapses (~5 s of emulated time at
+the default budget). Returns T on success; a halted CPU always fails the
+check, even if PC happens to sit in range at the moment it halted."
+  (declare (type atari800-cl.machine:atari-machine machine))
+  (let ((cpu (atari800-cl.machine:atari-machine-cpu machine)))
+    (loop repeat max-frames
+          do (atari800-cl.machine:machine-run-frame machine)
+          do (when (and (not (atari800-cl.cpu:cpu-halted cpu))
+                        (<= lo (atari800-cl.cpu:cpu-pc cpu) hi))
+               (return t))
+          finally (return nil))))
+
 (test hostdev-boots-minimal-xl-and-reaches-edventure
   "Acceptance test for ROADMAP.md Phase 16 (revised): boot minimal-xl's OS
 ROM with edventure.atr mounted on drive 1 via the host disk bridge and
-confirm execution reaches the game.  See the section comment above for why
-this always skips today."
+confirm execution reaches the game (PC lands inside the address range
+edventure.obx's own segment headers say it occupies)."
   (let ((os  (%minimal-xl-path "minimal_os.rom"))
-        (atr (%minimal-xl-path "edventure.atr")))
-    (if (not (and os atr))
-        (%skip-or-fail "minimal-xl/minimal_os.rom or minimal-xl/edventure.atr ~
-                         not found under the minimal-xl/ submodule; skipping ~
-                         the host-bridge boot test.")
-        (skip "minimal-xl bridge probe (16c) not yet integrated"))))
+        (atr (%minimal-xl-path "edventure.atr"))
+        (obx (%minimal-xl-path "edventure.obx")))
+    (if (not (and os atr obx))
+        (%skip-or-fail "minimal-xl/minimal_os.rom, edventure.atr, or ~
+                         edventure.obx not found under the minimal-xl/ ~
+                         submodule; skipping the host-bridge ATR boot test.")
+        (multiple-value-bind (lo hi) (%obx-segment-range obx)
+          (let ((m (atari800-cl.machine:make-atari-machine)))
+            (atari800-cl.hostdev:mount-disk-file
+             (atari800-cl.machine:atari-machine-hostdev m) 1 atr)
+            (atari800-cl.machine:machine-cold-reset m :os-path os)
+            (is-true (%run-until-pc-in-range m lo hi)
+                     "PC must land in edventure's loaded range ($~4,'0X-~
+                      $~4,'0X) within the boot budget (got $~4,'0X, ~
+                      halted=~A)"
+                     lo hi
+                     (atari800-cl.cpu:cpu-pc (atari800-cl.machine:atari-machine-cpu m))
+                     (atari800-cl.cpu:cpu-halted (atari800-cl.machine:atari-machine-cpu m))))))))
+
+(test hostdev-load-xex-boots-minimal-xl-and-reaches-edventure
+  "Acceptance test for ROADMAP.md Phase 16 (revised), the LOAD-XEX half:
+minimal-xl's OS ROM reaches the same game state loading straight from
+edventure.obx via ATARI800-CL.HOSTDEV:LOAD-XEX (a bootable ATR
+synthesized entirely in memory) -- with no .atr file involved at all."
+  (let ((os  (%minimal-xl-path "minimal_os.rom"))
+        (obx (%minimal-xl-path "edventure.obx")))
+    (if (not (and os obx))
+        (%skip-or-fail "minimal-xl/minimal_os.rom or edventure.obx not ~
+                         found under the minimal-xl/ submodule; skipping ~
+                         the host-bridge LOAD-XEX boot test.")
+        (multiple-value-bind (lo hi) (%obx-segment-range obx)
+          (let ((m (atari800-cl.machine:make-atari-machine)))
+            (atari800-cl.hostdev:load-xex
+             (atari800-cl.machine:atari-machine-hostdev m) 1 obx)
+            (atari800-cl.machine:machine-cold-reset m :os-path os)
+            (is-true (%run-until-pc-in-range m lo hi)
+                     "PC must land in edventure's loaded range ($~4,'0X-~
+                      $~4,'0X) within the boot budget (got $~4,'0X, ~
+                      halted=~A)"
+                     lo hi
+                     (atari800-cl.cpu:cpu-pc (atari800-cl.machine:atari-machine-cpu m))
+                     (atari800-cl.cpu:cpu-halted (atari800-cl.machine:atari-machine-cpu m))))))))
