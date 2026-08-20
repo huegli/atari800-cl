@@ -903,3 +903,46 @@ and there are exactly 151 documented opcodes."
         when h
           do (is-true (functionp h) "opcode #x~2,'0X must be a function" i))
   (is (= 151 (length (atari800-cl.cpu:documented-opcodes)))))
+
+;;; ---------------------------------------------------------------------------
+;;; NMOS RMW double-write quirk (SCANLINE_ACCURACY_PLAN.md Phase 5 item 1
+;;; / ROADMAP.md Phase 17): memory-form RMW instructions write the
+;;; UNMODIFIED byte first, then the modified one, in consecutive cycles.
+;;; Pinned with INSTALL-BUS-RECORDER so the exact bus trace is under test,
+;;; not just the end state.
+
+(test asl-zero-page-double-writes-unmodified-then-modified
+  "ASL $10 (RMW, zero page) writes the UNMODIFIED byte first, then the
+shifted one.  Bus trace: opcode fetch, operand fetch, real read, write
+$42 (unmodified), write $84 (modified)."
+  (with-cpu (cpu ram :program (list #x06 #x10))   ; ASL $10
+    (setf (aref ram #x10) #x42)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 5 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 5 (length log)))
+        (is (equal (list #x0010 #x42 :write) (aref log 3)))
+        (is (equal (list #x0010 #x84 :write) (aref log 4)))))))
+
+(test inc-absolute-double-writes-unmodified-then-modified
+  "INC $1234 writes the unmodified byte, then the incremented one."
+  (with-cpu (cpu ram :program (list #xEE #x34 #x12))   ; INC $1234
+    (setf (aref ram #x1234) #x7F)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 6 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 6 (length log)))
+        (is (equal (list #x1234 #x7F :write) (aref log 4)))
+        (is (equal (list #x1234 #x80 :write) (aref log 5)))))))
+
+(test dec-zero-page-x-double-writes-unmodified-then-modified
+  "DEC $10,X (RMW, zero-page indexed) also double-writes."
+  (with-cpu (cpu ram :program (list #xD6 #x10))   ; DEC $10,X
+    (setf (cpu-x cpu) #x05
+          (aref ram #x15) #x01)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 6 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 5 (length log)))
+        (is (equal (list #x0015 #x01 :write) (aref log 3)))
+        (is (equal (list #x0015 #x00 :write) (aref log 4)))))))

@@ -138,6 +138,11 @@ Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
 ;;;   zp,X     — 6
 ;;;   abs,Y    — 7
 ;;;   abs,X    — 7
+;;;
+;;; NMOS RMW hardware quirk: like the documented INC/DEC/ASL/LSR/ROL/ROR,
+;;; the write-back is really TWO bus writes -- the unmodified byte first,
+;;; then the modified one (SCANLINE_ACCURACY_PLAN.md Phase 5 item 1).
+;;; Cycle counts are unchanged.
 
 (macrolet ((crmw (mnemonic op mode base rmw-fn acc-fn)
              (let ((tag (intern (format nil "~A-~A" mnemonic
@@ -147,7 +152,8 @@ Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
                   (multiple-value-bind (addr) (,mode cpu)
                     (let* ((v (cpu-read-byte cpu addr))
                            (r (,rmw-fn v cpu)))
-                      (cpu-write-byte cpu addr r)
+                      (cpu-write-byte cpu addr v)   ; unmodified first
+                      (cpu-write-byte cpu addr r)   ; then modified
                       (,acc-fn cpu r)))
                   ,base))))
   ;; --- SLO  (ASL then ORA) ---

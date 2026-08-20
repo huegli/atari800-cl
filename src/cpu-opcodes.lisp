@@ -565,6 +565,13 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;; INC/DEC are read-modify-write (RMW) instructions: they read a memory
 ;;; byte, modify it, and write it back.  INX/INY/DEX/DEY operate on
 ;;; registers instead.
+;;;
+;;; NMOS RMW hardware quirk: the write-back is really TWO bus writes in
+;;; consecutive cycles -- the unmodified byte first, then the modified one
+;;; (SCANLINE_ACCURACY_PLAN.md Phase 5 item 1).  Software that points a
+;;; memory-form INC/DEC at a hardware register (DEC WSYNC, etc.) sees both
+;;; writes.  Cycle counts are unchanged; this replaces what already
+;;; happens within the existing write cycle with two bus ops instead of one.
 
 (macrolet ((memop (mnemonic delta op mode base)
              (let ((tag (intern (format nil "~A-~A" mnemonic
@@ -572,9 +579,10 @@ Used by the family macrolets to auto-generate descriptive function names."
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
                   (multiple-value-bind (addr) (,mode cpu)
-                    (let ((v (ldb (byte 8 0)
-                                  (+ (cpu-read-byte cpu addr) ,delta))))
-                      (cpu-write-byte cpu addr v)
+                    (let* ((old (cpu-read-byte cpu addr))
+                           (v (ldb (byte 8 0) (+ old ,delta))))
+                      (cpu-write-byte cpu addr old)  ; unmodified first (NMOS RMW quirk)
+                      (cpu-write-byte cpu addr v)     ; then modified
                       (update-zn cpu v))
                     ,base)))))
   ;; INC — Increment Memory
@@ -601,6 +609,12 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;;
 ;;; Accumulator variants operate directly on A.  Memory variants use the
 ;;; RMW macrolet: read from memory, apply the shift/rotate, write back.
+;;;
+;;; NMOS RMW hardware quirk: the write-back is really TWO bus writes in
+;;; consecutive cycles -- the unmodified byte first, then the modified one
+;;; (SCANLINE_ACCURACY_PLAN.md Phase 5 item 1).  Cycle counts are
+;;; unchanged; this replaces the single write within the existing write
+;;; cycle with two bus ops.
 
 (defopcode #x0A asl-a (cpu) (setf (cpu-a cpu) (do-asl (cpu-a cpu) cpu)) 2)
 (defopcode #x4A lsr-a (cpu) (setf (cpu-a cpu) (do-lsr (cpu-a cpu) cpu)) 2)
@@ -615,7 +629,8 @@ Used by the family macrolets to auto-generate descriptive function names."
                   (multiple-value-bind (addr) (,mode cpu)
                     (let* ((v (cpu-read-byte cpu addr))    ; read
                            (r (,op-fn v cpu)))             ; modify
-                      (cpu-write-byte cpu addr r))         ; write
+                      (cpu-write-byte cpu addr v)          ; write unmodified first
+                      (cpu-write-byte cpu addr r))         ; then modified
                     ,base)))))
   ;; ASL — Arithmetic Shift Left (memory)
   (rmw "ASL" #x06 addr-zero-page    5 do-asl)

@@ -419,3 +419,34 @@
       (step-cpu cpu2)
       (is (= (cpu-a cpu1) (cpu-a cpu2)))
       (is (= (cpu-flags cpu1) (cpu-flags cpu2))))))
+
+;;; ---------------------------------------------------------------------------
+;;; NMOS RMW double-write quirk on the compound RMWs
+;;; (SCANLINE_ACCURACY_PLAN.md Phase 5 item 1 / ROADMAP.md Phase 17):
+;;; pinned with INSTALL-BUS-RECORDER so the exact bus trace is under test.
+
+(test slo-zero-page-double-writes-unmodified-then-modified
+  "SLO $10 (compound RMW, zero page) writes the unmodified byte, then the
+shifted one, before ORing into A."
+  (with-cpu (cpu ram :program (list #x07 #x10))   ; SLO $10
+    (setf (aref ram #x10) #x81)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 5 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 5 (length log)))
+        (is (equal (list #x0010 #x81 :write) (aref log 3)))
+        (is (equal (list #x0010 #x02 :write) (aref log 4)))))))
+
+(test isc-absolute-double-writes-unmodified-then-modified
+  "ISC $2000 (compound RMW: INC then SBC) writes the unmodified byte,
+then the incremented one, before subtracting from A."
+  (with-cpu (cpu ram :program (list #xEF #x00 #x20))   ; ISC $2000
+    (setf (aref ram #x2000) #x0F
+          (cpu-a cpu) #x20)
+    (atari800-cl.cpu:set-flag cpu atari800-cl.cpu:+flag-c+)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 6 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 6 (length log)))
+        (is (equal (list #x2000 #x0F :write) (aref log 4)))
+        (is (equal (list #x2000 #x10 :write) (aref log 5)))))))
