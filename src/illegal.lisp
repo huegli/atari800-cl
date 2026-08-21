@@ -142,14 +142,21 @@ Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
 ;;; NMOS RMW hardware quirk: like the documented INC/DEC/ASL/LSR/ROL/ROR,
 ;;; the write-back is really TWO bus writes -- the unmodified byte first,
 ;;; then the modified one (SCANLINE_ACCURACY_PLAN.md Phase 5 item 1).
-;;; Cycle counts are unchanged.
+;;; Cycle counts are unchanged.  A second, independent quirk (Phase 5 item
+;;; 2): (zp),Y / abs,Y / abs,X RMW always dummy-reads the un-carried
+;;; address before the real read, regardless of whether the access
+;;; crosses a page -- :DUMMY-READ marks those.  (zp,X)/zp,X need no flag:
+;;; their addressing functions already do their own unconditional dummy
+;;; read (see ADDR-INDEXED-INDIRECT / ADDR-ZERO-PAGE-X).
 
-(macrolet ((crmw (mnemonic op mode base rmw-fn acc-fn)
+(macrolet ((crmw (mnemonic op mode base rmw-fn acc-fn &key dummy-read)
              (let ((tag (intern (format nil "~A-~A" mnemonic
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (addr) (,mode cpu)
+                  (multiple-value-bind (addr crossed-p uncarried) (,mode cpu)
+                    (declare (ignorable crossed-p uncarried))
+                    ,@(when dummy-read '((cpu-read-byte cpu uncarried)))
                     (let* ((v (cpu-read-byte cpu addr))
                            (r (,rmw-fn v cpu)))
                       (cpu-write-byte cpu addr v)   ; unmodified first
@@ -160,51 +167,51 @@ Used by ISC.  Same signature shape as DO-ASL/DO-LSR/etc."
   (crmw "SLO" #x03 addr-indexed-indirect  8 do-asl %ora-acc)
   (crmw "SLO" #x07 addr-zero-page         5 do-asl %ora-acc)
   (crmw "SLO" #x0F addr-absolute          6 do-asl %ora-acc)
-  (crmw "SLO" #x13 addr-indirect-indexed  8 do-asl %ora-acc)
+  (crmw "SLO" #x13 addr-indirect-indexed  8 do-asl %ora-acc :dummy-read t)
   (crmw "SLO" #x17 addr-zero-page-x       6 do-asl %ora-acc)
-  (crmw "SLO" #x1B addr-absolute-y        7 do-asl %ora-acc)
-  (crmw "SLO" #x1F addr-absolute-x        7 do-asl %ora-acc)
+  (crmw "SLO" #x1B addr-absolute-y        7 do-asl %ora-acc :dummy-read t)
+  (crmw "SLO" #x1F addr-absolute-x        7 do-asl %ora-acc :dummy-read t)
   ;; --- RLA  (ROL then AND) ---
   (crmw "RLA" #x23 addr-indexed-indirect  8 do-rol %and-acc)
   (crmw "RLA" #x27 addr-zero-page         5 do-rol %and-acc)
   (crmw "RLA" #x2F addr-absolute          6 do-rol %and-acc)
-  (crmw "RLA" #x33 addr-indirect-indexed  8 do-rol %and-acc)
+  (crmw "RLA" #x33 addr-indirect-indexed  8 do-rol %and-acc :dummy-read t)
   (crmw "RLA" #x37 addr-zero-page-x       6 do-rol %and-acc)
-  (crmw "RLA" #x3B addr-absolute-y        7 do-rol %and-acc)
-  (crmw "RLA" #x3F addr-absolute-x        7 do-rol %and-acc)
+  (crmw "RLA" #x3B addr-absolute-y        7 do-rol %and-acc :dummy-read t)
+  (crmw "RLA" #x3F addr-absolute-x        7 do-rol %and-acc :dummy-read t)
   ;; --- SRE  (LSR then EOR) ---
   (crmw "SRE" #x43 addr-indexed-indirect  8 do-lsr %eor-acc)
   (crmw "SRE" #x47 addr-zero-page         5 do-lsr %eor-acc)
   (crmw "SRE" #x4F addr-absolute          6 do-lsr %eor-acc)
-  (crmw "SRE" #x53 addr-indirect-indexed  8 do-lsr %eor-acc)
+  (crmw "SRE" #x53 addr-indirect-indexed  8 do-lsr %eor-acc :dummy-read t)
   (crmw "SRE" #x57 addr-zero-page-x       6 do-lsr %eor-acc)
-  (crmw "SRE" #x5B addr-absolute-y        7 do-lsr %eor-acc)
-  (crmw "SRE" #x5F addr-absolute-x        7 do-lsr %eor-acc)
+  (crmw "SRE" #x5B addr-absolute-y        7 do-lsr %eor-acc :dummy-read t)
+  (crmw "SRE" #x5F addr-absolute-x        7 do-lsr %eor-acc :dummy-read t)
   ;; --- RRA  (ROR then ADC)  ---
   ;; ROR updates C from old bit 0; that new C is then used as the ADC carry-in.
   (crmw "RRA" #x63 addr-indexed-indirect  8 do-ror do-adc)
   (crmw "RRA" #x67 addr-zero-page         5 do-ror do-adc)
   (crmw "RRA" #x6F addr-absolute          6 do-ror do-adc)
-  (crmw "RRA" #x73 addr-indirect-indexed  8 do-ror do-adc)
+  (crmw "RRA" #x73 addr-indirect-indexed  8 do-ror do-adc :dummy-read t)
   (crmw "RRA" #x77 addr-zero-page-x       6 do-ror do-adc)
-  (crmw "RRA" #x7B addr-absolute-y        7 do-ror do-adc)
-  (crmw "RRA" #x7F addr-absolute-x        7 do-ror do-adc)
+  (crmw "RRA" #x7B addr-absolute-y        7 do-ror do-adc :dummy-read t)
+  (crmw "RRA" #x7F addr-absolute-x        7 do-ror do-adc :dummy-read t)
   ;; --- DCP  (DEC then CMP) ---
   (crmw "DCP" #xC3 addr-indexed-indirect  8 do-dec-byte %cmp-acc)
   (crmw "DCP" #xC7 addr-zero-page         5 do-dec-byte %cmp-acc)
   (crmw "DCP" #xCF addr-absolute          6 do-dec-byte %cmp-acc)
-  (crmw "DCP" #xD3 addr-indirect-indexed  8 do-dec-byte %cmp-acc)
+  (crmw "DCP" #xD3 addr-indirect-indexed  8 do-dec-byte %cmp-acc :dummy-read t)
   (crmw "DCP" #xD7 addr-zero-page-x       6 do-dec-byte %cmp-acc)
-  (crmw "DCP" #xDB addr-absolute-y        7 do-dec-byte %cmp-acc)
-  (crmw "DCP" #xDF addr-absolute-x        7 do-dec-byte %cmp-acc)
+  (crmw "DCP" #xDB addr-absolute-y        7 do-dec-byte %cmp-acc :dummy-read t)
+  (crmw "DCP" #xDF addr-absolute-x        7 do-dec-byte %cmp-acc :dummy-read t)
   ;; --- ISC / ISB  (INC then SBC) ---
   (crmw "ISC" #xE3 addr-indexed-indirect  8 do-inc-byte do-sbc)
   (crmw "ISC" #xE7 addr-zero-page         5 do-inc-byte do-sbc)
   (crmw "ISC" #xEF addr-absolute          6 do-inc-byte do-sbc)
-  (crmw "ISC" #xF3 addr-indirect-indexed  8 do-inc-byte do-sbc)
+  (crmw "ISC" #xF3 addr-indirect-indexed  8 do-inc-byte do-sbc :dummy-read t)
   (crmw "ISC" #xF7 addr-zero-page-x       6 do-inc-byte do-sbc)
-  (crmw "ISC" #xFB addr-absolute-y        7 do-inc-byte do-sbc)
-  (crmw "ISC" #xFF addr-absolute-x        7 do-inc-byte do-sbc))
+  (crmw "ISC" #xFB addr-absolute-y        7 do-inc-byte do-sbc :dummy-read t)
+  (crmw "ISC" #xFF addr-absolute-x        7 do-inc-byte do-sbc :dummy-read t))
 
 ;;; ---------------------------------------------------------------------------
 ;;; LAX — Load A and X from the same effective address.
@@ -387,11 +394,18 @@ SingleStepTests vectors encode."
         addr
         (dpb value (byte 8 8) (ldb (byte 8 0) addr)))))
 
+;;; Like every other abs,X / abs,Y / (zp),Y STORE, these always dummy-read
+;;; the un-carried address before the real write (Phase 5 item 2) -- see
+;;; %UNCARRIED-INDEXED-ADDRESS.  That dummy read uses the normal
+;;; uncorrected address, independent of the corrupted final write address
+;;; these opcodes are notorious for.
+
 (defopcode #x9C shy (cpu)
   "SHY abs,X — UNSTABLE.  M[base+X] = Y AND (high(base)+1)."
   (let* ((base  (read-pc-word cpu))
          (value (logand (cpu-y cpu) (%high+1 base)))
          (addr  (%unstable-store-address base (cpu-x cpu) value)))
+    (cpu-read-byte cpu (%uncarried-indexed-address base (cpu-x cpu)))
     (cpu-write-byte cpu addr value))
   5)
 
@@ -400,6 +414,7 @@ SingleStepTests vectors encode."
   (let* ((base  (read-pc-word cpu))
          (value (logand (cpu-x cpu) (%high+1 base)))
          (addr  (%unstable-store-address base (cpu-y cpu) value)))
+    (cpu-read-byte cpu (%uncarried-indexed-address base (cpu-y cpu)))
     (cpu-write-byte cpu addr value))
   5)
 
@@ -408,6 +423,7 @@ SingleStepTests vectors encode."
   (let* ((base  (read-pc-word cpu))
          (value (logand (cpu-a cpu) (cpu-x cpu) (%high+1 base)))
          (addr  (%unstable-store-address base (cpu-y cpu) value)))
+    (cpu-read-byte cpu (%uncarried-indexed-address base (cpu-y cpu)))
     (cpu-write-byte cpu addr value))
   5)
 
@@ -420,6 +436,7 @@ where BASE is the 16-bit pointer read from zero page."
          (base  (dpb hi (byte 8 8) lo))
          (value (logand (cpu-a cpu) (cpu-x cpu) (ldb (byte 8 0) (1+ hi))))
          (addr  (%unstable-store-address base (cpu-y cpu) value)))
+    (cpu-read-byte cpu (%uncarried-indexed-address base (cpu-y cpu)))
     (cpu-write-byte cpu addr value))
   6)
 
@@ -430,6 +447,7 @@ where BASE is the 16-bit pointer read from zero page."
          (value  (logand new-sp (%high+1 base)))
          (addr   (%unstable-store-address base (cpu-y cpu) value)))
     (setf (cpu-sp cpu) new-sp)
+    (cpu-read-byte cpu (%uncarried-indexed-address base (cpu-y cpu)))
     (cpu-write-byte cpu addr value))
   5)
 
@@ -451,12 +469,13 @@ where BASE is the 16-bit pointer read from zero page."
 ;;; preserved.  No registers or flags are touched.
 
 (macrolet
-    ;; 1-byte NOPs (implied, 2 cycles): no operand, no read.
+    ;; 1-byte NOPs (implied, 2 cycles): no operand, but still the NMOS
+    ;; dummy PC-read every 1-byte instruction performs -- see %DUMMY-PC-READ.
     ((nop-imp (op)
        (let ((tag (intern (format nil "NOP-IMP-~2,'0X" op)
                           :atari800-cl.cpu)))
          `(defopcode ,op ,tag (cpu)
-            (declare (ignore cpu)) 2))))
+            (%dummy-pc-read cpu) 2))))
   (nop-imp #x1A) (nop-imp #x3A) (nop-imp #x5A)
   (nop-imp #x7A) (nop-imp #xDA) (nop-imp #xFA))
 
@@ -507,8 +526,10 @@ where BASE is the 16-bit pointer read from zero page."
        (let ((tag (intern (format nil "NOP-ABX-~2,'0X" op)
                           :atari800-cl.cpu)))
          `(defopcode ,op ,tag (cpu)
-            (multiple-value-bind (addr crossed-p) (addr-absolute-x cpu)
-              (cpu-read-byte cpu addr)
+            ;; READ-VIA handles the conditional un-carried dummy read
+            ;; (Phase 5 item 2) the same way a real load instruction does.
+            (multiple-value-bind (val crossed-p) (read-via cpu #'addr-absolute-x)
+              (declare (ignore val))
               (+ 4 (if crossed-p 1 0)))))))
   (nop-abx #x1C) (nop-abx #x3C) (nop-abx #x5C)
   (nop-abx #x7C) (nop-abx #xDC) (nop-abx #xFC))

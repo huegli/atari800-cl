@@ -71,16 +71,47 @@
 ;;; shared across multiple opcodes.  Each opcode handler calls the appropriate
 ;;; helper rather than duplicating the logic.
 
-(declaim (inline read-via write-via))
+(declaim (inline read-via write-via %dummy-pc-read))
 
 (defun read-via (cpu mode)
   "Apply addressing MODE to CPU; return (VALUES VALUE PAGE-CROSSED? EFFECTIVE-ADDR).
 MODE is a function like #'ADDR-ABSOLUTE-X.  We call it to get the effective
-address, then read the byte at that address."
+address, then read the byte at that address.
+
+NMOS hardware quirk (SCANLINE_ACCURACY_PLAN.md Phase 5 item 2): when MODE
+reports a page cross AND an un-carried dummy-read address (only
+ADDR-ABSOLUTE-X, ADDR-ABSOLUTE-Y, and ADDR-INDIRECT-INDEXED ever do both),
+the CPU reads that wrong address first and discards it before reading the
+real one -- that wasted read IS the page-cross cycle.  Modes that never
+cross a page, or that always pay the extra cycle regardless of crossing
+(zero-page indexed, (zp,X)), do their own unconditional dummy read inside
+the addressing function itself and report no third value here."
   (declare (type cpu cpu) (type function mode))
   ;; FUNCALL is needed because MODE is a function passed as a value.
-  (multiple-value-bind (addr xpage-p) (funcall mode cpu)
+  (multiple-value-bind (addr xpage-p uncarried) (funcall mode cpu)
+    (when (and xpage-p uncarried)
+      (cpu-read-byte cpu uncarried))
     (values (cpu-read-byte cpu addr) xpage-p addr)))
+
+(defun %dummy-pc-read (cpu)
+  "NMOS hardware quirk: every 1-byte instruction (implied/accumulator
+addressing, and the internal cycles of PHA/PHP/PLA/PLP/JSR/RTS/RTI/BRK)
+speculatively fetches the byte at the current PC and discards it, because
+the CPU has not yet decoded the current instruction as needing no operand
+byte.  PC is NOT advanced -- the next real opcode fetch reads the same
+address again.  This is a pure bus-trace fidelity op: the returned value
+is unused.  See SCANLINE_ACCURACY_PLAN.md Phase 5 / ROADMAP.md Phase 17."
+  (cpu-read-byte cpu (cpu-pc cpu))
+  (values))
+
+(defun %dummy-stack-read (cpu)
+  "NMOS hardware quirk: PLA/PLP/RTS/RTI/JSR all perform one internal bus
+read at the CURRENT (not yet adjusted) stack address before the real
+push/pull sequence -- the pre-increment dummy read that precedes a pull,
+or the pre-decrement dummy read JSR performs before it starts pushing.
+Pure bus-trace fidelity; the returned value is unused."
+  (cpu-read-byte cpu (logior #x0100 (cpu-sp cpu)))
+  (values))
 
 ;;; --- ADC (Add with Carry) ---
 ;;;
@@ -231,16 +262,28 @@ address, then read the byte at that address."
 (defun do-branch (cpu condition)
   "Execute a conditional branch.  CONDITION is a boolean: if true, branch
 to the relative target; if false, skip (the offset byte was already consumed
-by ADDR-RELATIVE).  Returns the number of cycles consumed."
+by ADDR-RELATIVE).  Returns the number of cycles consumed.
+
+NMOS timing quirk on a TAKEN branch: hardware always dummy-reads at
+BEFORE (the address right after the 2-byte instruction, i.e. PC before
+the offset is applied) on its 3rd cycle -- the same 'speculative next
+fetch' idea as %DUMMY-PC-READ, just at the not-yet-redirected PC.  If
+applying the offset crosses a page, a 4th cycle dummy-reads the
+un-carried target (BEFORE's high byte combined with the real target's
+low byte) before the corrected PC takes effect."
   (multiple-value-bind (target) (addr-relative cpu)
     (cond
       ((not condition) 2)                ; not taken: 2 cycles
       (t
        (let* ((before (cpu-pc cpu))
-              ;; 2 (base) + 1 (taken) + 1 if page crossed
-              (cycles (+ 2 1 (if (page-crossed-p before target) 1 0))))
+              (crossed (page-crossed-p before target)))
+         (cpu-read-byte cpu before)       ; dummy read, always, on a taken branch
+         (when crossed
+           (cpu-read-byte cpu (dpb (ldb (byte 8 8) before) (byte 8 8)
+                                    (ldb (byte 8 0) target))))
          (setf (cpu-pc cpu) target)
-         cycles)))))
+         ;; 2 (base) + 1 (taken) + 1 if page crossed
+         (+ 2 1 (if crossed 1 0)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Opcode table construction
@@ -371,23 +414,34 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;;
 ;;; Store instructions always take the same number of cycles regardless of
 ;;; page crossing, which is why STORE-OP has no :PAGE-CROSS parameter.
+;;;
+;;; NMOS quirk (SCANLINE_ACCURACY_PLAN.md Phase 5 item 2): abs,X / abs,Y /
+;;; (zp),Y stores ALWAYS dummy-read the un-carried address before writing
+;;; the real one -- unlike loads, this is unconditional, which is why
+;;; their base cycle count already assumed the worst case even before this
+;;; quirk was modelled.  :DUMMY-READ marks those three addressing modes;
+;;; zero-page-indexed and (zp,X) stores need no flag because their
+;;; addressing functions already perform their own unconditional dummy
+;;; read (see ADDR-ZERO-PAGE-X / ADDR-INDEXED-INDIRECT).
 
-(macrolet ((store-op (mnemonic reg op mode base)
+(macrolet ((store-op (mnemonic reg op mode base &key dummy-read)
              (let ((tag (intern (format nil "~A-~A" mnemonic
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (addr) (,mode cpu)
+                  (multiple-value-bind (addr crossed-p uncarried) (,mode cpu)
+                    (declare (ignorable crossed-p uncarried))
+                    ,@(when dummy-read '((cpu-read-byte cpu uncarried)))
                     (cpu-write-byte cpu addr (,reg cpu))
                     ,base)))))
   ;; STA — Store Accumulator
   (store-op "STA" cpu-a #x85 addr-zero-page         3)
   (store-op "STA" cpu-a #x95 addr-zero-page-x       4)
   (store-op "STA" cpu-a #x8D addr-absolute          4)
-  (store-op "STA" cpu-a #x9D addr-absolute-x        5)
-  (store-op "STA" cpu-a #x99 addr-absolute-y        5)
+  (store-op "STA" cpu-a #x9D addr-absolute-x        5 :dummy-read t)
+  (store-op "STA" cpu-a #x99 addr-absolute-y        5 :dummy-read t)
   (store-op "STA" cpu-a #x81 addr-indexed-indirect  6)
-  (store-op "STA" cpu-a #x91 addr-indirect-indexed  6)
+  (store-op "STA" cpu-a #x91 addr-indirect-indexed  6 :dummy-read t)
   ;; STX — Store X Register
   (store-op "STX" cpu-x #x86 addr-zero-page    3)
   (store-op "STX" cpu-x #x96 addr-zero-page-y  4)
@@ -404,12 +458,14 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;; All transfer instructions copy one register to another and update Z/N,
 ;;; except TXS which copies X to SP without touching flags.
 
-(defopcode #xAA tax (cpu) (setf (cpu-x cpu) (update-zn cpu (cpu-a cpu))) 2)
-(defopcode #xA8 tay (cpu) (setf (cpu-y cpu) (update-zn cpu (cpu-a cpu))) 2)
-(defopcode #x8A txa (cpu) (setf (cpu-a cpu) (update-zn cpu (cpu-x cpu))) 2)
-(defopcode #x98 tya (cpu) (setf (cpu-a cpu) (update-zn cpu (cpu-y cpu))) 2)
-(defopcode #xBA tsx (cpu) (setf (cpu-x cpu) (update-zn cpu (cpu-sp cpu))) 2)
-(defopcode #x9A txs (cpu) (setf (cpu-sp cpu) (cpu-x cpu)) 2)  ; no flag update!
+;;; Each is a 1-byte implied-mode instruction: the NMOS dummy PC-read quirk
+;;; (see %DUMMY-PC-READ) occupies the second of its 2 cycles.
+(defopcode #xAA tax (cpu) (%dummy-pc-read cpu) (setf (cpu-x cpu) (update-zn cpu (cpu-a cpu))) 2)
+(defopcode #xA8 tay (cpu) (%dummy-pc-read cpu) (setf (cpu-y cpu) (update-zn cpu (cpu-a cpu))) 2)
+(defopcode #x8A txa (cpu) (%dummy-pc-read cpu) (setf (cpu-a cpu) (update-zn cpu (cpu-x cpu))) 2)
+(defopcode #x98 tya (cpu) (%dummy-pc-read cpu) (setf (cpu-a cpu) (update-zn cpu (cpu-y cpu))) 2)
+(defopcode #xBA tsx (cpu) (%dummy-pc-read cpu) (setf (cpu-x cpu) (update-zn cpu (cpu-sp cpu))) 2)
+(defopcode #x9A txs (cpu) (%dummy-pc-read cpu) (setf (cpu-sp cpu) (cpu-x cpu)) 2)  ; no flag update!
 
 ;;; ===========================================================================
 ;;; Stack ops
@@ -418,11 +474,23 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;; PHA/PHP push a value; PLA/PLP pull a value.  PLP restores the flags
 ;;; register, but always forces U=1 and B=0 (the B flag only exists on
 ;;; the stack, not as a real register bit).
+;;;
+;;; NMOS timing: PHA/PHP spend their extra (3rd) cycle on the same dummy
+;;; PC-read every 1-byte instruction does before hardware realizes there is
+;;; no operand; PLA/PLP additionally spend a cycle on a dummy read of the
+;;; CURRENT (not-yet-incremented) stack address before the real pull.  See
+;;; %DUMMY-PC-READ / %DUMMY-STACK-READ.
 
-(defopcode #x48 pha (cpu) (push-byte cpu (cpu-a cpu)) 3)
-(defopcode #x08 php (cpu) (push-byte cpu (status-byte-for-push cpu :b-flag t)) 3)
-(defopcode #x68 pla (cpu) (setf (cpu-a cpu) (update-zn cpu (pull-byte cpu))) 4)
+(defopcode #x48 pha (cpu) (%dummy-pc-read cpu) (push-byte cpu (cpu-a cpu)) 3)
+(defopcode #x08 php (cpu) (%dummy-pc-read cpu) (push-byte cpu (status-byte-for-push cpu :b-flag t)) 3)
+(defopcode #x68 pla (cpu)
+  (%dummy-pc-read cpu)
+  (%dummy-stack-read cpu)
+  (setf (cpu-a cpu) (update-zn cpu (pull-byte cpu)))
+  4)
 (defopcode #x28 plp (cpu)
+  (%dummy-pc-read cpu)
+  (%dummy-stack-read cpu)
   (setf (cpu-flags cpu) (status-byte-from-pull (pull-byte cpu)))
   4)
 
@@ -573,12 +641,14 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;; writes.  Cycle counts are unchanged; this replaces what already
 ;;; happens within the existing write cycle with two bus ops instead of one.
 
-(macrolet ((memop (mnemonic delta op mode base)
+(macrolet ((memop (mnemonic delta op mode base &key dummy-read)
              (let ((tag (intern (format nil "~A-~A" mnemonic
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (addr) (,mode cpu)
+                  (multiple-value-bind (addr crossed-p uncarried) (,mode cpu)
+                    (declare (ignorable crossed-p uncarried))
+                    ,@(when dummy-read '((cpu-read-byte cpu uncarried)))
                     (let* ((old (cpu-read-byte cpu addr))
                            (v (ldb (byte 8 0) (+ old ,delta))))
                       (cpu-write-byte cpu addr old)  ; unmodified first (NMOS RMW quirk)
@@ -589,19 +659,19 @@ Used by the family macrolets to auto-generate descriptive function names."
   (memop "INC"  1 #xE6 addr-zero-page    5)
   (memop "INC"  1 #xF6 addr-zero-page-x  6)
   (memop "INC"  1 #xEE addr-absolute     6)
-  (memop "INC"  1 #xFE addr-absolute-x   7)
+  (memop "INC"  1 #xFE addr-absolute-x   7 :dummy-read t)
   ;; DEC — Decrement Memory
   (memop "DEC" -1 #xC6 addr-zero-page    5)
   (memop "DEC" -1 #xD6 addr-zero-page-x  6)
   (memop "DEC" -1 #xCE addr-absolute     6)
-  (memop "DEC" -1 #xDE addr-absolute-x   7))
+  (memop "DEC" -1 #xDE addr-absolute-x   7 :dummy-read t))
 
 ;; Register increment/decrement: 1+ and 1- are arithmetic (return a new
 ;; value), not mutation; UPDATE-ZN masks to 8 bits and sets flags.
-(defopcode #xE8 inx (cpu) (setf (cpu-x cpu) (update-zn cpu (1+ (cpu-x cpu)))) 2)
-(defopcode #xC8 iny (cpu) (setf (cpu-y cpu) (update-zn cpu (1+ (cpu-y cpu)))) 2)
-(defopcode #xCA dex (cpu) (setf (cpu-x cpu) (update-zn cpu (1- (cpu-x cpu)))) 2)
-(defopcode #x88 dey (cpu) (setf (cpu-y cpu) (update-zn cpu (1- (cpu-y cpu)))) 2)
+(defopcode #xE8 inx (cpu) (%dummy-pc-read cpu) (setf (cpu-x cpu) (update-zn cpu (1+ (cpu-x cpu)))) 2)
+(defopcode #xC8 iny (cpu) (%dummy-pc-read cpu) (setf (cpu-y cpu) (update-zn cpu (1+ (cpu-y cpu)))) 2)
+(defopcode #xCA dex (cpu) (%dummy-pc-read cpu) (setf (cpu-x cpu) (update-zn cpu (1- (cpu-x cpu)))) 2)
+(defopcode #x88 dey (cpu) (%dummy-pc-read cpu) (setf (cpu-y cpu) (update-zn cpu (1- (cpu-y cpu)))) 2)
 
 ;;; ===========================================================================
 ;;; Shifts and rotates
@@ -616,17 +686,19 @@ Used by the family macrolets to auto-generate descriptive function names."
 ;;; unchanged; this replaces the single write within the existing write
 ;;; cycle with two bus ops.
 
-(defopcode #x0A asl-a (cpu) (setf (cpu-a cpu) (do-asl (cpu-a cpu) cpu)) 2)
-(defopcode #x4A lsr-a (cpu) (setf (cpu-a cpu) (do-lsr (cpu-a cpu) cpu)) 2)
-(defopcode #x2A rol-a (cpu) (setf (cpu-a cpu) (do-rol (cpu-a cpu) cpu)) 2)
-(defopcode #x6A ror-a (cpu) (setf (cpu-a cpu) (do-ror (cpu-a cpu) cpu)) 2)
+(defopcode #x0A asl-a (cpu) (%dummy-pc-read cpu) (setf (cpu-a cpu) (do-asl (cpu-a cpu) cpu)) 2)
+(defopcode #x4A lsr-a (cpu) (%dummy-pc-read cpu) (setf (cpu-a cpu) (do-lsr (cpu-a cpu) cpu)) 2)
+(defopcode #x2A rol-a (cpu) (%dummy-pc-read cpu) (setf (cpu-a cpu) (do-rol (cpu-a cpu) cpu)) 2)
+(defopcode #x6A ror-a (cpu) (%dummy-pc-read cpu) (setf (cpu-a cpu) (do-ror (cpu-a cpu) cpu)) 2)
 
-(macrolet ((rmw (mnemonic op mode base op-fn)
+(macrolet ((rmw (mnemonic op mode base op-fn &key dummy-read)
              (let ((tag (intern (format nil "~A-~A" mnemonic
                                         (%mode->suffix mode))
                                 :atari800-cl.cpu)))
                `(defopcode ,op ,tag (cpu)
-                  (multiple-value-bind (addr) (,mode cpu)
+                  (multiple-value-bind (addr crossed-p uncarried) (,mode cpu)
+                    (declare (ignorable crossed-p uncarried))
+                    ,@(when dummy-read '((cpu-read-byte cpu uncarried)))
                     (let* ((v (cpu-read-byte cpu addr))    ; read
                            (r (,op-fn v cpu)))             ; modify
                       (cpu-write-byte cpu addr v)          ; write unmodified first
@@ -636,22 +708,22 @@ Used by the family macrolets to auto-generate descriptive function names."
   (rmw "ASL" #x06 addr-zero-page    5 do-asl)
   (rmw "ASL" #x16 addr-zero-page-x  6 do-asl)
   (rmw "ASL" #x0E addr-absolute     6 do-asl)
-  (rmw "ASL" #x1E addr-absolute-x   7 do-asl)
+  (rmw "ASL" #x1E addr-absolute-x   7 do-asl :dummy-read t)
   ;; LSR — Logical Shift Right (memory)
   (rmw "LSR" #x46 addr-zero-page    5 do-lsr)
   (rmw "LSR" #x56 addr-zero-page-x  6 do-lsr)
   (rmw "LSR" #x4E addr-absolute     6 do-lsr)
-  (rmw "LSR" #x5E addr-absolute-x   7 do-lsr)
+  (rmw "LSR" #x5E addr-absolute-x   7 do-lsr :dummy-read t)
   ;; ROL — Rotate Left (memory)
   (rmw "ROL" #x26 addr-zero-page    5 do-rol)
   (rmw "ROL" #x36 addr-zero-page-x  6 do-rol)
   (rmw "ROL" #x2E addr-absolute     6 do-rol)
-  (rmw "ROL" #x3E addr-absolute-x   7 do-rol)
+  (rmw "ROL" #x3E addr-absolute-x   7 do-rol :dummy-read t)
   ;; ROR — Rotate Right (memory)
   (rmw "ROR" #x66 addr-zero-page    5 do-ror)
   (rmw "ROR" #x76 addr-zero-page-x  6 do-ror)
   (rmw "ROR" #x6E addr-absolute     6 do-ror)
-  (rmw "ROR" #x7E addr-absolute-x   7 do-ror))
+  (rmw "ROR" #x7E addr-absolute-x   7 do-ror :dummy-read t))
 
 ;;; ===========================================================================
 ;;; Branches
@@ -695,11 +767,16 @@ Operand order matters: the NMOS 6502 reads the target's LOW byte, then
 pushes the return address, and only THEN reads the HIGH byte.  A JSR
 whose high operand byte lives in the stack page can therefore read back
 one of its own pushed bytes — the target changes under it.  Reading the
-full word up front would be a cycle-order lie that this quirk exposes."
+full word up front would be a cycle-order lie that this quirk exposes.
+
+Between the low-byte fetch and the first push, hardware spends one cycle
+on an internal dummy read at the CURRENT (not yet decremented) stack
+address — see %DUMMY-STACK-READ."
   (let* ((lo (cpu-read-byte cpu (cpu-pc cpu)))
          ;; The high operand byte's address is also the return address
          ;; JSR pushes: RTS adds one to land on the next instruction.
          (hi-addr (ldb (byte 16 0) (1+ (cpu-pc cpu)))))
+    (%dummy-stack-read cpu)
     (push-word cpu hi-addr)
     (let ((hi (cpu-read-byte cpu hi-addr)))
       (setf (cpu-pc cpu) (dpb hi (byte 8 8) lo))))
@@ -707,27 +784,47 @@ full word up front would be a cycle-order lie that this quirk exposes."
 
 (defopcode #x60 rts (cpu)
   "RTS: pull the return address from the stack (pushed by JSR) and add 1
-to get the actual resume address."
+to get the actual resume address.
+
+NMOS timing: a dummy PC-read, then a dummy stack read at the current
+(not-yet-incremented) SP before the real pull-low/pull-high, and finally
+a dummy read AT the pulled address itself before it is incremented to the
+real resume address -- hardware reads the byte there before realizing it
+needs +1.  See %DUMMY-PC-READ / %DUMMY-STACK-READ."
+  (%dummy-pc-read cpu)
+  (%dummy-stack-read cpu)
   (let ((addr (pull-word cpu)))
+    (cpu-read-byte cpu addr)  ; dummy read at the not-yet-incremented address
     (setf (cpu-pc cpu) (ldb (byte 16 0) (1+ addr))))
   6)
 
 (defopcode #x40 rti (cpu)
   "RTI: return from interrupt.  Pull the status register and then PC
-from the stack (in that order — opposite of how the interrupt pushed them)."
+from the stack (in that order — opposite of how the interrupt pushed them).
+
+NMOS timing: a dummy PC-read, then a dummy stack read at the current
+(not-yet-incremented) SP before the three real pulls.  See
+%DUMMY-PC-READ / %DUMMY-STACK-READ."
+  (%dummy-pc-read cpu)
+  (%dummy-stack-read cpu)
   (setf (cpu-flags cpu) (status-byte-from-pull (pull-byte cpu)))
   (setf (cpu-pc cpu) (pull-word cpu))
   6)
 
 (defopcode #x00 brk (cpu)
-  "BRK: software interrupt.  Pushes PC+1 (not PC+2 — the byte after BRK
-is a 'signature' byte that the handler can inspect), pushes status with B=1,
-sets I flag, and vectors through $FFFE (same as IRQ)."
-  (let ((return-pc (ldb (byte 16 0) (1+ (cpu-pc cpu)))))
-    (push-word cpu return-pc)
-    (push-byte cpu (status-byte-for-push cpu :b-flag t))
-    (set-flag cpu +flag-i+)
-    (setf (cpu-pc cpu) (cpu-read-word cpu +irq-vector+)))
+  "BRK: software interrupt.  Reads (and discards) the 'signature' byte
+after the opcode -- the byte a BRK handler may inspect -- which is the
+NMOS dummy-read cycle this handler was previously missing (the pushed
+return address, opcode address + 2, was already numerically correct
+without it, since CPU-PC has already moved past the opcode by the time
+this handler runs).  Then pushes that PC, pushes status with B=1, sets I,
+and vectors through $FFFE (same as IRQ)."
+  (cpu-read-byte cpu (cpu-pc cpu))  ; dummy read of the signature byte
+  (setf (cpu-pc cpu) (ldb (byte 16 0) (1+ (cpu-pc cpu))))
+  (push-word cpu (cpu-pc cpu))
+  (push-byte cpu (status-byte-for-push cpu :b-flag t))
+  (set-flag cpu +flag-i+)
+  (setf (cpu-pc cpu) (cpu-read-word cpu +irq-vector+))
   7)
 
 ;;; ===========================================================================
@@ -736,22 +833,22 @@ sets I flag, and vectors through $FFFE (same as IRQ)."
 ;;;
 ;;; Single-byte instructions that set or clear individual flags.
 
-(defopcode #x18 clc (cpu) (clear-flag cpu +flag-c+) 2)  ; Clear Carry
-(defopcode #x38 sec (cpu) (set-flag   cpu +flag-c+) 2)  ; Set Carry
-(defopcode #x58 cli (cpu) (clear-flag cpu +flag-i+) 2)  ; Clear Interrupt Disable
-(defopcode #x78 sei (cpu) (set-flag   cpu +flag-i+) 2)  ; Set Interrupt Disable
-(defopcode #xB8 clv (cpu) (clear-flag cpu +flag-v+) 2)  ; Clear Overflow
-(defopcode #xD8 cld (cpu) (clear-flag cpu +flag-d+) 2)  ; Clear Decimal Mode
-(defopcode #xF8 sed (cpu) (set-flag   cpu +flag-d+) 2)  ; Set Decimal Mode
+(defopcode #x18 clc (cpu) (%dummy-pc-read cpu) (clear-flag cpu +flag-c+) 2)  ; Clear Carry
+(defopcode #x38 sec (cpu) (%dummy-pc-read cpu) (set-flag   cpu +flag-c+) 2)  ; Set Carry
+(defopcode #x58 cli (cpu) (%dummy-pc-read cpu) (clear-flag cpu +flag-i+) 2)  ; Clear Interrupt Disable
+(defopcode #x78 sei (cpu) (%dummy-pc-read cpu) (set-flag   cpu +flag-i+) 2)  ; Set Interrupt Disable
+(defopcode #xB8 clv (cpu) (%dummy-pc-read cpu) (clear-flag cpu +flag-v+) 2)  ; Clear Overflow
+(defopcode #xD8 cld (cpu) (%dummy-pc-read cpu) (clear-flag cpu +flag-d+) 2)  ; Clear Decimal Mode
+(defopcode #xF8 sed (cpu) (%dummy-pc-read cpu) (set-flag   cpu +flag-d+) 2)  ; Set Decimal Mode
 
 ;;; ===========================================================================
 ;;; NOP
 ;;; ===========================================================================
 
 (defopcode #xEA nop (cpu)
-  "NOP: No Operation.  Does nothing for 2 cycles."
-  ;; DECLARE IGNORE tells the compiler we intentionally don't use CPU.
-  (declare (ignore cpu)) 2)
+  "NOP: No Operation.  Does nothing for 2 cycles, but still performs the
+NMOS dummy PC-read on its second cycle -- see %DUMMY-PC-READ."
+  (%dummy-pc-read cpu) 2)
 
 ;;; DOCUMENTED-OPCODES is defined in src/illegal.lisp, after the full
 ;;; opcode map (documented + 105 NMOS undocumented) has been installed.

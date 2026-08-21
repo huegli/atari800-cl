@@ -936,13 +936,129 @@ $42 (unmodified), write $84 (modified)."
         (is (equal (list #x1234 #x80 :write) (aref log 5)))))))
 
 (test dec-zero-page-x-double-writes-unmodified-then-modified
-  "DEC $10,X (RMW, zero-page indexed) also double-writes."
+  "DEC $10,X (RMW, zero-page indexed) also double-writes.  Zero-page,X
+addressing dummy-reads the unindexed operand address first (Phase 5 item
+2), so the write pair now sits one entry later than plain zero page."
   (with-cpu (cpu ram :program (list #xD6 #x10))   ; DEC $10,X
     (setf (cpu-x cpu) #x05
           (aref ram #x15) #x01)
     (let ((recorder (install-bus-recorder cpu)))
       (is (= 6 (step-cpu cpu)))
       (let ((log (bus-recorder-log recorder)))
+        (is (= 6 (length log)))
+        (is (equal (list #x0015 #x01 :write) (aref log 4)))
+        (is (equal (list #x0015 #x00 :write) (aref log 5)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; NMOS indexed-addressing dummy reads (SCANLINE_ACCURACY_PLAN.md Phase 5
+;;; item 2 / ROADMAP.md Phase 17): abs,X / abs,Y / (zp),Y READS dummy-read
+;;; the un-carried address only on a page cross; STORES and RMW through
+;;; those modes ALWAYS do; zero-page-indexed and (zp,X) always do too, at
+;;; the unindexed/unindexed-pointer address.  Also covers the same
+;;; "speculative next fetch" idea's extended family: implied-mode
+;;; instructions, BRK's signature-byte read, and a taken branch's dummy
+;;; reads.  Pinned with INSTALL-BUS-RECORDER.
+
+(test lda-absolute-x-page-cross-dummy-reads-uncarried-address
+  "LDA $20FF,X with X=$01 crosses into $2100: hardware dummy-reads the
+un-carried address ($2000: base's high byte, indexed low byte) before the
+real read at $2100."
+  (with-cpu (cpu ram :program (list #xBD #xFF #x20))   ; LDA $20FF,X
+    (setf (cpu-x cpu) #x01
+          (aref ram #x2000) #xAA           ; dummy-read address (discarded)
+          (aref ram #x2100) #x55)          ; real target
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 5 (step-cpu cpu)))            ; base 4 + 1 page-cross
+      (is (= #x55 (cpu-a cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        ;; log: opcode, low operand byte, high operand byte, dummy, real.
         (is (= 5 (length log)))
-        (is (equal (list #x0015 #x01 :write) (aref log 3)))
-        (is (equal (list #x0015 #x00 :write) (aref log 4)))))))
+        (is (equal (list #x2000 #xAA :read) (aref log 3)))
+        (is (equal (list #x2100 #x55 :read) (aref log 4)))))))
+
+(test lda-absolute-x-no-cross-single-real-read
+  "LDA $2000,X with X=$01 (no page cross): no dummy read -- just the one
+real read at $2001."
+  (with-cpu (cpu ram :program (list #xBD #x00 #x20))   ; LDA $2000,X
+    (setf (cpu-x cpu) #x01
+          (aref ram #x2001) #x33)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 4 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        ;; log: opcode, low operand byte, high operand byte, real read.
+        (is (= 4 (length log)))
+        (is (equal (list #x2001 #x33 :read) (aref log 3)))))))
+
+(test sta-absolute-x-always-dummy-reads-uncarried-address
+  "STA $2000,X ALWAYS dummy-reads the un-carried address before writing,
+whether or not the access crosses a page (unlike loads, stores pay this
+cost unconditionally -- their base cycle count already assumed it)."
+  (with-cpu (cpu ram :program (list #x9D #x00 #x20))   ; STA $2000,X
+    (setf (cpu-x cpu) #x01
+          (cpu-a cpu) #x99)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 5 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        ;; log: opcode, low operand byte, high operand byte, dummy, write.
+        (is (= 5 (length log)))
+        (is (equal (list #x2001 #x00 :read)  (aref log 3)))  ; dummy (no cross: same addr)
+        (is (equal (list #x2001 #x99 :write) (aref log 4)))))))
+
+(test asl-absolute-x-rmw-always-dummy-reads-uncarried-address
+  "ASL $20FF,X (RMW, no cross since X=$00) still dummy-reads the
+un-carried address unconditionally, then reads, then double-writes."
+  (with-cpu (cpu ram :program (list #x1E #xFF #x20))   ; ASL $20FF,X
+    (setf (cpu-x cpu) #x00
+          (aref ram #x20FF) #x01)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 7 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        ;; log: opcode, low operand byte, high operand byte, dummy, real
+        ;; read, write-unmodified, write-modified.
+        (is (= 7 (length log)))
+        (is (equal (list #x20FF #x01 :read)  (aref log 3)))  ; dummy (no cross: same addr)
+        (is (equal (list #x20FF #x01 :read)  (aref log 4)))  ; real read
+        (is (equal (list #x20FF #x01 :write) (aref log 5)))  ; unmodified
+        (is (equal (list #x20FF #x02 :write) (aref log 6)))))))  ; modified
+
+(test lda-zero-page-x-dummy-reads-unindexed-address
+  "LDA $10,X with X=$05 dummy-reads the UNINDEXED zero-page address ($10)
+before the real read at the indexed one ($15) -- unconditional, like all
+zero-page-indexed accesses."
+  (with-cpu (cpu ram :program (list #xB5 #x10))   ; LDA $10,X
+    (setf (cpu-x cpu) #x05
+          (aref ram #x10) #xEE
+          (aref ram #x15) #x77)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 4 (step-cpu cpu)))
+      (is (= #x77 (cpu-a cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 4 (length log)))
+        (is (equal (list #x0010 #xEE :read) (aref log 2)))
+        (is (equal (list #x0015 #x77 :read) (aref log 3)))))))
+
+(test brk-dummy-reads-signature-byte
+  "BRK dummy-reads the signature byte after the opcode before pushing the
+return address (opcode addr + 2) and vectoring through $FFFE."
+  (with-cpu (cpu ram :pc #x0400 :program (list #x00 #x00))
+    (setf (aref ram #xFFFE) #x00
+          (aref ram #xFFFF) #x80)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 7 (step-cpu cpu)))
+      (is (= #x8000 (cpu-pc cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 7 (length log)))
+        (is (equal (list #x0401 #x00 :read) (aref log 1)))))))  ; signature byte
+
+(test bcc-taken-cross-dummy-reads-both-addresses
+  "A taken BCC that crosses a page dummy-reads the not-yet-redirected PC,
+then the un-carried target, before the real 4-cycle total lands on PC."
+  (with-cpu (cpu ram :pc #x20F0 :program (list #x90 #x20))   ; BCC +$20
+    (atari800-cl.cpu:clear-flag cpu atari800-cl.cpu:+flag-c+)  ; carry clear: taken
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 4 (step-cpu cpu)))
+      (is (= #x2112 (cpu-pc cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        (is (= 4 (length log)))
+        (is (equal (list #x20F2 #x00 :read) (aref log 2)))    ; dummy: before-branch PC
+        (is (equal (list #x2012 #x00 :read) (aref log 3)))))))  ; dummy: un-carried target

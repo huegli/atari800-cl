@@ -450,3 +450,62 @@ then the incremented one, before subtracting from A."
         (is (= 6 (length log)))
         (is (equal (list #x2000 #x0F :write) (aref log 4)))
         (is (equal (list #x2000 #x10 :write) (aref log 5)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; NMOS indexed-addressing dummy reads on the illegal opcodes
+;;; (SCANLINE_ACCURACY_PLAN.md Phase 5 item 2 / ROADMAP.md Phase 17).
+
+(test dcp-absolute-x-always-dummy-reads-then-double-writes
+  "DCP $2000,X (compound RMW, no cross since X=$00) dummy-reads the
+un-carried address unconditionally, reads, then double-writes the
+decremented value."
+  (with-cpu (cpu ram :program (list #xDF #x00 #x20))   ; DCP $2000,X
+    (setf (cpu-x cpu) #x00
+          (aref ram #x2000) #x05
+          (cpu-a cpu) #x05)
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 7 (step-cpu cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        ;; log: opcode, low operand byte, high operand byte, dummy, real
+        ;; read, write-unmodified, write-modified.
+        (is (= 7 (length log)))
+        (is (equal (list #x2000 #x05 :read)  (aref log 3)))  ; dummy
+        (is (equal (list #x2000 #x05 :read)  (aref log 4)))  ; real read
+        (is (equal (list #x2000 #x05 :write) (aref log 5)))  ; unmodified
+        (is (equal (list #x2000 #x04 :write) (aref log 6)))) ; modified
+      ;; DCP compares A (still $05) against the DECREMENTED value ($04):
+      ;; A > value, so carry is set (no borrow) and zero is clear.
+      (is-true (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-c+))
+      (is-false (atari800-cl.cpu:flag-set-p cpu atari800-cl.cpu:+flag-z+)))))
+
+(test lax-indexed-indirect-dummy-reads-unindexed-pointer
+  "LAX ($10,X) dummy-reads the UNINDEXED zero-page pointer address ($10)
+before adding X, then fetches the 16-bit pointer from the indexed one."
+  (with-cpu (cpu ram :program (list #xA3 #x10))   ; LAX ($10,X)
+    (setf (cpu-x cpu) #x04
+          (aref ram #x10) #xFF        ; dummy-read value (discarded)
+          (aref ram #x14) #x00        ; pointer low byte
+          (aref ram #x15) #x30        ; pointer high byte
+          (aref ram #x3000) #x77)     ; target value
+    (let ((recorder (install-bus-recorder cpu)))
+      (is (= 6 (step-cpu cpu)))
+      (is (= #x77 (cpu-a cpu)))
+      (is (= #x77 (cpu-x cpu)))
+      (let ((log (bus-recorder-log recorder)))
+        ;; log: opcode, operand fetch, dummy (unindexed ptr), ptr-lo,
+        ;; ptr-hi, real read.
+        (is (= 6 (length log)))
+        (is (equal (list #x0010 #xFF :read) (aref log 2)))
+        (is (equal (list #x3000 #x77 :read) (aref log 5)))))))
+
+(test nop-implied-illegal-dummy-reads-pc
+  "The illegal 1-byte implied NOPs ($1A $3A $5A $7A $DA $FA) dummy-read
+the current PC on their second cycle, like every other implied opcode."
+  (dolist (op '(#x1A #x3A #x5A #x7A #xDA #xFA))
+    (with-cpu (cpu ram :program (list op))
+      (setf (aref ram #x0201) #x99)
+      (let ((recorder (install-bus-recorder cpu)))
+        (is (= 2 (step-cpu cpu)))
+        (let ((log (bus-recorder-log recorder)))
+          (is (= 2 (length log)))
+          (is (equal (list #x0201 #x99 :read) (aref log 1))))))))

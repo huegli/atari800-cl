@@ -109,6 +109,49 @@ separation verdict per workload, and a short note.
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
 
+## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
+
+SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction
+path: every RMW instruction now writes twice (unmodified, then
+modified) and every indexed/implied/stack/branch/BRK/JSR/RTS/RTI
+instruction performs the extra bus reads real NMOS hardware spends its
+already-budgeted cycles on. Cycle counts are unchanged, but the number
+of real bus operations per instruction goes up almost everywhere, so
+unlike Phase 12's CPU fixes this one is NOT performance-neutral.
+Measured with `scripts/bench-ab.sh 17e8600` (the RMW-only commit) against
+the working tree (the indexed/dummy-read commit), 3 interleaved pairs:
+
+### sbcl (3 pairs)
+
+| workload | 17e8600 fps (B) | working tree fps (A) | delta | separation |
+|----------|-----------------|-----------------------|-------|------------|
+| nop      | 2948.59         | 2643.01               | -10.4% | CLEAN |
+| irq      | 3489.75         | 3231.91               | -7.4%  | CLEAN |
+| display  | 1657.30         | 1638.88               | -1.1%  | MIXED (noise) |
+| audio    | 1621.76         | 1466.47               | -9.6%  | CLEAN |
+
+### lispworks (3 pairs)
+
+| workload | 17e8600 fps (B) | working tree fps (A) | delta | separation |
+|----------|-----------------|-----------------------|-------|------------|
+| nop      | 869.94          | 826.01                | -5.0% | MIXED (noise) |
+| irq      | 1384.99         | 1265.85               | -8.6% | MIXED (noise) |
+| display  | 295.03          | 295.88                | +0.3% | MIXED (noise) |
+| audio    | 267.64          | 266.99                | -0.2% | MIXED (noise) |
+
+SBCL shows a clean, consistent ~7-10% regression on `nop`/`irq`/`audio`
+(the workloads dominated by plain instruction throughput); `display`'s
+delta is inside noise on both implementations. LispWorks' deltas are
+all MIXED (run-to-run spread swamps the signal at 3 pairs), consistent
+with a real but small cost against LispWorks' larger fixed per-access
+overhead. This is accepted, not chased: CLAUDE.md's priority is
+"correctness (especially 6502 behavioral accuracy) over performance,"
+this ratchet is exactly that, and the added work is real bus cycles the
+emulator was previously skipping outright rather than any avoidable
+inefficiency -- there is no straightforward branch-free way to recover
+it without dropping the trace fidelity the Tom Harte harness now
+enforces (ROADMAP.md Phase 17).
+
 ## ROADMAP Phase 22 -- POKEY pending-work bitmask
 
 The serial transmitter and audio synthesis each added their own "one

@@ -381,8 +381,31 @@ two-argument call shape matches the original scaffold API."
 A page boundary cross adds an extra cycle on certain 6502 instructions."
   (/= (ldb (byte 8 8) base) (ldb (byte 8 8) offset-addr)))
 
+(declaim (inline %uncarried-indexed-address))
+
+(defun %uncarried-indexed-address (base index)
+  "NMOS indexed addressing (abs,X / abs,Y / (zp),Y) hardware quirk: before
+reaching the corrected effective address, the CPU first forms an address
+using BASE's high byte together with the 8-bit-wrapped sum of BASE's low
+byte and INDEX -- i.e. the address as it would be if the index's carry
+into the high byte hadn't happened yet.  A READ instruction dummy-reads
+this address only when the real access crosses a page (the wasted cycle
+IS the page-cross penalty); a STORE or RMW instruction always does,
+whether or not the access crosses (their cycle count is already the
+worst case).  See SCANLINE_ACCURACY_PLAN.md Phase 5 item 2 /
+ROADMAP.md Phase 17."
+  (declare (type u16 base) (type u8 index))
+  (dpb (ldb (byte 8 8) base) (byte 8 8) (ldb (byte 8 0) (+ (ldb (byte 8 0) base) index))))
+
 ;;; --- Addressing modes ---
-;;; Each returns (VALUES effective-address page-crossed-p).
+;;; Each returns (VALUES effective-address page-crossed-p uncarried-address).
+;;; UNCARRIED-ADDRESS is only meaningful (non-NIL) for ADDR-ABSOLUTE-X,
+;;; ADDR-ABSOLUTE-Y, and ADDR-INDIRECT-INDEXED -- the three modes whose
+;;; dummy-read address differs from their real one; callers that don't
+;;; need it simply don't bind a third value.  ADDR-ZERO-PAGE-X/Y and
+;;; ADDR-INDEXED-INDIRECT perform their own dummy read unconditionally
+;;; (real hardware always spends that cycle there, regardless of whether
+;;; the caller is a load, store, or RMW), so they need no third value.
 
 (defun addr-immediate (cpu)
   "Immediate: the operand IS the byte at PC."
@@ -395,28 +418,38 @@ A page boundary cross adds an extra cycle on certain 6502 instructions."
   (values (read-pc-byte cpu) nil))
 
 (defun addr-zero-page-x (cpu)
-  "Zero page,X: (operand + X) wrapped to 8 bits (stays in zero page)."
-  (values (ldb (byte 8 0) (+ (read-pc-byte cpu) (cpu-x cpu))) nil))
+  "Zero page,X: (operand + X) wrapped to 8 bits (stays in zero page).
+NMOS hardware always dummy-reads the UNINDEXED operand address first --
+the cycle that indexing zero page costs over plain zero page is spent
+there, not on the final read/write."
+  (let ((zp (read-pc-byte cpu)))
+    (cpu-read-byte cpu zp)  ; dummy read at the unindexed zero-page address
+    (values (ldb (byte 8 0) (+ zp (cpu-x cpu))) nil)))
 
 (defun addr-zero-page-y (cpu)
-  "Zero page,Y: (operand + Y) wrapped to 8 bits (stays in zero page)."
-  (values (ldb (byte 8 0) (+ (read-pc-byte cpu) (cpu-y cpu))) nil))
+  "Zero page,Y: (operand + Y) wrapped to 8 bits (stays in zero page).
+See ADDR-ZERO-PAGE-X for the unconditional dummy-read note."
+  (let ((zp (read-pc-byte cpu)))
+    (cpu-read-byte cpu zp)  ; dummy read at the unindexed zero-page address
+    (values (ldb (byte 8 0) (+ zp (cpu-y cpu))) nil)))
 
 (defun addr-absolute (cpu)
   "Absolute: a full 16-bit address follows the opcode."
   (values (read-pc-word cpu) nil))
 
 (defun addr-absolute-x (cpu)
-  "Absolute,X: 16-bit base + X register.  Reports page cross."
+  "Absolute,X: 16-bit base + X register.  Reports page cross and the
+un-carried dummy-read address (see %UNCARRIED-INDEXED-ADDRESS)."
   (let* ((base (read-pc-word cpu))
          (addr (ldb (byte 16 0) (+ base (cpu-x cpu)))))
-    (values addr (page-crossed-p base addr))))
+    (values addr (page-crossed-p base addr) (%uncarried-indexed-address base (cpu-x cpu)))))
 
 (defun addr-absolute-y (cpu)
-  "Absolute,Y: 16-bit base + Y register.  Reports page cross."
+  "Absolute,Y: 16-bit base + Y register.  Reports page cross and the
+un-carried dummy-read address (see %UNCARRIED-INDEXED-ADDRESS)."
   (let* ((base (read-pc-word cpu))
          (addr (ldb (byte 16 0) (+ base (cpu-y cpu)))))
-    (values addr (page-crossed-p base addr))))
+    (values addr (page-crossed-p base addr) (%uncarried-indexed-address base (cpu-y cpu)))))
 
 (defun addr-indirect (cpu)
   "JMP indirect: read a 16-bit pointer, then fetch the target from that address.
@@ -435,21 +468,25 @@ byte from $1000, NOT $1100."
 (defun addr-indexed-indirect (cpu)
   "(zp,X): add X to the zero-page operand (wrapping to 8 bits), then read a
 16-bit pointer from that zero-page location.  The pointer fetch also wraps
-within zero page."
-  (let* ((zp  (ldb (byte 8 0) (+ (read-pc-byte cpu) (cpu-x cpu))))
-         (lo  (cpu-read-byte cpu zp))
-         (hi  (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp)))))
-    (values (dpb hi (byte 8 8) lo) nil)))
+within zero page.  NMOS hardware always dummy-reads the UNINDEXED pointer
+address first, before adding X -- see ADDR-ZERO-PAGE-X."
+  (let ((zp0 (read-pc-byte cpu)))
+    (cpu-read-byte cpu zp0)  ; dummy read at the unindexed pointer address
+    (let* ((zp  (ldb (byte 8 0) (+ zp0 (cpu-x cpu))))
+           (lo  (cpu-read-byte cpu zp))
+           (hi  (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp)))))
+      (values (dpb hi (byte 8 8) lo) nil))))
 
 (defun addr-indirect-indexed (cpu)
   "(zp),Y: read a 16-bit pointer from the zero-page operand (with wrap),
-then add Y to get the effective address.  Reports page cross."
+then add Y to get the effective address.  Reports page cross and the
+un-carried dummy-read address (see %UNCARRIED-INDEXED-ADDRESS)."
   (let* ((zp   (read-pc-byte cpu))
          (lo   (cpu-read-byte cpu zp))
          (hi   (cpu-read-byte cpu (ldb (byte 8 0) (1+ zp))))
          (base (dpb hi (byte 8 8) lo))
          (addr (ldb (byte 16 0) (+ base (cpu-y cpu)))))
-    (values addr (page-crossed-p base addr))))
+    (values addr (page-crossed-p base addr) (%uncarried-indexed-address base (cpu-y cpu)))))
 
 (defun addr-relative (cpu)
   "Relative: used by branch instructions.  The operand is a signed 8-bit
