@@ -443,6 +443,7 @@ and say so in the commit message.
 | 23    | CONFIRM retirement pass                      | --          | no       | done   |
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | done   |
 | 25    | SIO receive path + serial-wire disk          | 13, 16, 22 | no       | deferred |
+| 26    | LispWorks fast-path array access             | 18         | yes      | open   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
@@ -1216,6 +1217,10 @@ accepted constant.
 Commit: per follow-up the profile justifies, each with
 `PERFORMANCE_LOG.md` rows.
 
+Follow-up: Phase 26 revisits this phase's `SYSTEM::AREF1` finding with
+a narrowly scoped `(safety 0)` carve-out for the profile-named hot
+array accesses.
+
 ---
 
 ## Phase 19 -- 256-entry palette
@@ -1425,6 +1430,122 @@ boot test in the `tests/test-machine.lisp` real-ROM group, skipping
 when no ATR is present.
 
 Commits: one per stage, message "SIO: <stage>".
+
+---
+
+## Phase 26 -- LispWorks fast-path array access  [hot path -> benchmark]
+
+Phase 18's profiling pass ended with a diagnosis and no lever: on the
+LispWorks 8.1.1 ARM64 build, every checked array access compiles to an
+out-of-line `SYSTEM::AREF1` / `SET-AREF1` call at `(safety 1)` no
+matter how precisely the type is declared, and those calls are where
+the SBCL/LispWorks gap concentrates (4 of the top 5 self-time entries
+on the LispWorks `nop` profile; `SET-AREF1` alone 37% of `display`).
+The only thing that inlines the access is `(safety 0)`, which
+`PERFORMANCE_PLAN.md`'s blanket safety floor forbids. This phase
+replaces the blanket rule with a narrow, auditable carve-out: `(safety
+0)` ONLY at the profile-named hot array accesses, only on LispWorks,
+behind a compat macro that keeps every other access -- and the whole
+of SBCL -- fully checked.
+
+**26a -- the `fast-aref` compat macro.** In `src/compat.lisp` (the one
+file allowed implementation conditionals):
+
+1. `(fast-aref type array index)` and its `setf` expansion, where
+   TYPE is the literal array type, e.g. `(simple-array fixnum (4))`.
+   - SBCL expansion: `(aref (the type array) index)` -- checked,
+     unchanged semantics; SBCL already inlines this at `(safety 1)`,
+     so the macro is behaviorally and performance-wise an identity.
+   - LispWorks expansion: the same access wrapped in `(locally
+     (declare (optimize (safety 0) (speed 3) #| debug per file |#))
+     ...)` with the array and index both `the`-asserted.
+2. Checked mode: when the environment variable
+   `ATARI800_CL_CHECKED_AREF` is non-empty at COMPILE time, the
+   LispWorks expansion becomes identical to the SBCL one (fully
+   checked). This is the audit switch: a checked LispWorks build must
+   be one env var away, and the fasl cache must not conflate the two
+   (verify a checked run after an unchecked one actually recompiles;
+   if it does not, key the expansion off a feature pushed by the test
+   script and document the rebuild step).
+3. Verbose docstring stating the contract: a `fast-aref` call site
+   MUST make its index provably in range by construction -- masked
+   (`logand`), loop-bounded over `length`, or typed to the array's
+   exact dimension -- and MUST carry a one-line comment naming the
+   proof. No exceptions; an access that cannot state its proof stays
+   plain `aref`.
+4. Unit tests in `tests/test-compat.lisp`: read/write through
+   `fast-aref` on both expansions, values and setf semantics identical
+   to `aref`; macroexpansion shape per implementation.
+
+Commit: "compat: fast-aref, a scoped LispWorks (safety 0) array access".
+
+**26b -- amend the safety rule.** `PERFORMANCE_PLAN.md`'s ground rule
+("Do not use `(safety 0)` anywhere") and Anti-goals bullet ("No
+`(safety 0)`") gain the carve-out in place: `(safety 0)` exists ONLY
+inside `fast-aref`'s LispWorks expansion; call sites must satisfy the
+proof-comment contract; everything else keeps the `(safety 1)` floor,
+and SBCL keeps it everywhere. Note the checked-mode env var next to
+the rule. Same commit as 26a (the rule change and the mechanism it
+licenses land together), and cite this phase.
+
+**26c -- convert the profile-named sites, one commit per file,
+measured.** In the order the Phase 18 profile ranks them:
+
+1. `src/pokey.lisp` -- the 4-slot `(simple-array fixnum (4))` accesses
+   in `%EXPIRE-CHANNEL`, `POKEY-TICK`, `POKEY-ADVANCE`,
+   `%TIMER-RELOAD-VALUE` (30 AREF1 + 12 SET-AREF1 calls in
+   `POKEY-ADVANCE`'s disassembly). Index proof: channel indices are
+   already 0-3 by construction; make it explicit with `(logand ch 3)`
+   where it is not already a constant.
+2. `src/renderer.lisp` -- the framebuffer/scanline row writes behind
+   `SET-AREF1` (37% self time on `display`). Index proof: loop bounds
+   against the row length; assert the framebuffer's exact dimensions
+   once per scanline, not per pixel.
+3. Further sites ONLY if a fresh profile names them (the obvious
+   candidate is the bus RAM array, whose `u16` index is in range by
+   type -- but do not convert it on speculation; profile first).
+
+Each conversion commit: `./scripts/bench-ab.sh` against the previous
+commit, 5+ pairs, BOTH implementations. Acceptance per commit: SBCL
+within noise (the macro is an identity there -- any SBCL movement
+means the macro is wrong, not that SBCL got faster), LispWorks
+improvement separated from noise. A conversion that does not separate
+from noise on LispWorks gets reverted, not kept -- the carve-out must
+pay for its audit burden site by site. `PERFORMANCE_LOG.md` rows
+either way.
+
+**26d -- verification and close-out.**
+
+1. Full suite green on both implementations, unchecked build.
+2. Full LispWorks suite green AGAIN with `ATARI800_CL_CHECKED_AREF=1`
+   (the checked build is the bounds-check audit; document the
+   invocation in the run-tests skill).
+3. Re-profile LispWorks `nop`/`display` with `with-profiling`: the
+   `AREF1`/`SET-AREF1` share must visibly drop at the converted sites;
+   record the new top-5 tables and the new SBCL/LispWorks ratio in
+   `PERFORMANCE_LOG.md`, updating Phase 18's "documented rather than
+   chased" framing to point here.
+4. If any converted file is CPU-adjacent (it should not be -- POKEY
+   and renderer are the targets), re-run the full-corpus Harte trace
+   on SBCL; the ratchet stays at zero failures regardless.
+5. ROADMAP status entry + table row, CHANGES.md entry, ASCII-only.
+
+Risks, stated plainly: `(safety 0)` array writes that miss their range
+proof corrupt the image silently instead of signaling. The mitigations
+are structural -- the macro is the only door, every call site carries
+a written proof, the checked build re-runs the whole suite with bounds
+checks on, and SBCL (which runs the same suite) keeps full checking
+everywhere, so an index bug fails loudly there even when LispWorks
+would corrupt. A site whose proof depends on a value crossing a struct
+slot or function boundary should mask defensively at the use site --
+one `logand` costs less than the call it replaces.
+
+Aspirational target (not a gate): recover a meaningful slice of the
+gap on `nop` -- the profile puts ~2/3 of LispWorks' `nop` time under
+`POKEY-ADVANCE` with array dispatch dominating it, so +30% LispWorks
+`nop` fps is plausible; log whatever materializes.
+
+Commits: as listed per stage.
 
 ---
 
