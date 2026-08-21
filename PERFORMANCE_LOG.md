@@ -109,6 +109,188 @@ separation verdict per workload, and a short note.
 | 2026-08-02 | 8255be7   | lispworks     | display  |  325.74 |  5.436     | ROADMAP Phase 6: P/M DMA + PRIOR (mean of 3) |
 | 2026-08-02 | 8255be7   | lispworks     | klaus    |  933.02 | 15.573     | ROADMAP Phase 6, klaus+PASS, 3500 frames (mean of 3) |
 
+## ROADMAP Phase 18 -- LispWorks profiling pass
+
+`PERFORMANCE_PLAN.md` Phase 4 / `ROADMAP.md` Phase 18, with the
+roadmap's amendment: LispWorks profiled FIRST, and the SBCL/LispWorks
+gap treated as the thing under investigation rather than an accepted
+constant. `atari800-cl.compat:with-profiling` (commit `3017eaa`) wraps
+`sb-sprof` on SBCL and `hcl:start-profiling`/`hcl:stop-profiling` on
+LispWorks. A scratchpad driver (not committed -- throwaway, per-session)
+loaded `:atari800-cl` plus `scripts/bench.lisp`'s workload-building
+helpers and wrapped a chunk of frames per workload in `WITH-PROFILING`,
+sized per implementation to land each profiled run at roughly 15-22
+seconds of wall clock: thousands of samples on both hosts (1500-3100 per
+run), not the "five" the plan warns against.
+
+### Profile: top 5 functions by self time
+
+LispWorks columns are the profiler's "top" (self) / "profile"
+(inclusive) percentages; SBCL columns are `sb-sprof`'s Self / Total.
+Sample counts: LispWorks nop 1765, irq 1714, display 1521, audio 1578;
+SBCL nop 3057, irq 2635, display 2448, audio 2442.
+
+**nop**
+
+| rank | LispWorks (self / incl) | SBCL (self / total) |
+|------|--------------------------|----------------------|
+| 1 | POKEY-ADVANCE 19% / 69% | POKEY-ADVANCE 32.0% / 36.3% |
+| 2 | SYSTEM::AREF1 18% / 18% | %RUN-CLOCKS 21.6% / 99.7% |
+| 3 | SVREF-NO-CHECK$I-VECTOR$FIXNUM 10% / 10% | BUS-READ 18.5% / 18.5% |
+| 4 | SYSTEM::SET-AREF1 10% / 20% | STEP-CPU 15.0% / 41.0% |
+| 5 | SET-SVREF-NO-CHECK$SIGNED-I-VECTOR$FIXNUM$INTEGER 8% / 8% | OPCODE-NOP-EA 4.9% / 15.5% |
+
+Four of LispWorks' top five self-time entries (46% of all samples) are
+generic array-dispatch internals that never appear at all in SBCL's
+list; SBCL's list is entirely real emulation work (POKEY, the scanline
+loop, the bus, the CPU, the NOP handler). `SYSTEM::CHECK-IN-MAKE-BIGNUM`
+(5%) also showed up just outside the top 5 on LispWorks -- a bignum
+overflow check on a fixnum decrement, another symptom of the same
+generic-path dispatch.
+
+**irq**
+
+| rank | LispWorks (self / incl) | SBCL (self / total) |
+|------|--------------------------|----------------------|
+| 1 | POKEY-ADVANCE 17% / 49% | POKEY-ADVANCE 25.7% / 29.4% |
+| 2 | SYSTEM::AREF1 11% / 11% | BUS-READ 16.2% / 16.2% |
+| 3 | SYSTEM::SET-AREF1 10% / 19% | %RUN-CLOCKS 11.7% / 99.3% |
+| 4 | SVREF-NO-CHECK$I-VECTOR$FIXNUM 8% / 8% | ASH 9.3% / 9.3% |
+| 5 | BUS-READ 8% / 8% | SB-KERNEL:%DPB 4.9% / 18.0% |
+
+Same pattern: `POKEY-ADVANCE`'s inclusive share is 49% on LispWorks vs.
+29% on SBCL, and LispWorks spends 21% of all samples (AREF1 + SET-AREF1)
+in generic array dispatch that has no SBCL counterpart.
+
+**display / audio** (brief): both implementations shift the top spot to
+the workload's own driver (`%RENDER-CHAR-MODE`/`RENDER-SCANLINE` for
+display, `POKEY-ADVANCE`/`AUDIO-ADVANCE` for audio), as expected.
+LispWorks' `display` profile still shows `SET-AREF1` at 37% self time
+(the renderer's framebuffer writes) despite `src/renderer.lisp` already
+declaring `(simple-array (unsigned-byte 8) (*))` on every hot array
+parameter -- see the diagnosis below for why that declaration doesn't
+help there either. LispWorks' `display` run also allocated ~1.75 GB
+over 6000 frames (vs. ~10 KB for nop/irq); not investigated further in
+this pass -- flagged as a candidate for a future renderer-focused look,
+since it is a `display`-specific cost, not part of the nop/irq gap this
+phase was scoped to.
+
+### Diagnosis and follow-up attempt
+
+`POKEY-ADVANCE`'s hot array slots (`SUB-COUNTERS`, `TIMER-COUNTS`,
+`AUDF`, all `(simple-array fixnum (4))` or `(simple-array (unsigned-byte
+8) (4))` per their `defstruct :type` declarations) are read through the
+struct accessor at each `AREF`/`SETF AREF` in `%EXPIRE-CHANNEL`,
+`POKEY-TICK`, and `%TIMER-RELOAD-VALUE`, with only `POKEY-ADVANCE`
+itself binding a local (previously undeclared). Per PERFORMANCE_PLAN.md
+step 3's "struct accessor dispatch" candidate, added explicit local
+`(declare (type (simple-array fixnum (4)) ...))` (and the
+`(unsigned-byte 8)` equivalent for `AUDF`) at every one of these sites.
+
+Measured with `scripts/bench-ab.sh 3017eaa -impl both -pairs 5`:
+
+| workload | 3017eaa fps (B) | working tree (A) | delta | separation |
+|----------|------------------|-------------------|-------|------------|
+| nop (sbcl) | 2824.22 | 2826.12 | +0.1% | MIXED (noise) |
+| irq (sbcl) | 3439.31 | 3497.66 | +1.7% | MIXED (noise) |
+| display (sbcl) | 1745.20 | 1721.23 | -1.4% | MIXED (noise) |
+| audio (sbcl) | 1562.94 | 1517.29 | -2.9% | MIXED (noise) |
+| nop (lispworks) | 844.55 | 838.47 | -0.7% | MIXED (noise) |
+| irq (lispworks) | 1368.54 | 1377.75 | +0.7% | MIXED (noise) |
+| display (lispworks) | 307.92 | 316.47 | +2.8% | MIXED (noise) |
+| audio (lispworks) | 276.73 | 285.94 | +3.3% | MIXED (noise) |
+
+Every workload landed inside noise, no clean separation either
+direction. Rather than accept "probably no effect" on 5-pair noise
+alone, disassembled `ATARI800_CL.POKEY:POKEY-ADVANCE` on LispWorks
+before and after the change: both versions call `SYSTEM::AREF1` 30
+times and `SYSTEM::SET-AREF1` 12 times, with byte-identical instruction
+sequences at each call site (`ldur.64 symbol, [const, #N] ;
+SYSTEM::AREF1` followed by a full indirect call). The declaration
+provably changed nothing about the generated code.
+
+An isolated microbenchmark pinned the root cause. Compiling, at `(speed
+3) (safety 1) (debug 1)` (this project's floor):
+
+```lisp
+(defun micro-aref (arr i)
+  (declare (type (simple-array fixnum (4)) arr) (type fixnum i))
+  (aref arr i))
+```
+
+LispWorks 8.1.1 (this ARM64/Apple Silicon build) compiles this to a call
+to `SYSTEM::AREF1` -- load the symbol, load its function cell, `blr` --
+regardless of the array's declared type. Only recompiling at `(safety
+0)` produces an inlined bounds-checked load (`CMP`/branch-on-out-of-range
+then a direct pointer-offset `LDR`, no call). SBCL, at the SAME `(safety
+1)`, compiles the identical function to an inlined bounds check (`CMP
+R1, #8` / `BHS` to a trap) followed by a direct `ADD`+`LDR` -- no call at
+all. `upgraded-array-element-type` confirms `fixnum` already gets a
+genuinely specialized `(SIGNED-BYTE 64)` backing store on this LispWorks
+build (so this is not an unspecialized-storage issue) -- the gap is
+purely that LispWorks' ARM64 backend does not provide an inlined
+array-access path at `(safety 1)`, where SBCL's does.
+
+This explains why `src/renderer.lisp`'s already-declared framebuffer
+accesses show the same `SET-AREF1` dispatch in the `display` profile:
+the issue is not missing or imprecise type declarations anywhere in this
+codebase, it is a LispWorks-8.1.1-ARM64-specific compiler policy that no
+source-level declaration can work around. CLAUDE.md's safety floor
+(`(safety 1)` minimum, `(safety 0)` nowhere -- "this is a learning
+codebase and bounds checks stay on") forecloses the one lever that
+changes it.
+
+**Verdict: reverted, not committed.** `src/pokey.lisp` is unchanged from
+`3017eaa`. This is a null result in the sense the plan asks to log
+either way -- but a well-explained one: the SBCL/LispWorks gap on
+array-heavy hot paths (POKEY, and by the same mechanism the renderer)
+is now understood to trace to this specific compiler/architecture
+combination's array-access codegen at the project's mandated safety
+level, not to any addressable inefficiency in this codebase's source.
+
+### Other plan candidates checked against the profile
+
+- `update-zn` flag traffic and opcode-handler `multiple-value-bind`
+  overhead: neither appears as a separable line item in either profile
+  (both are inlined into `STEP-CPU`/the `OPCODE-*` handlers, whose
+  self-time is proportionate to real work) -- no action, consistent with
+  the plan's own expectation that these are non-issues unless the
+  profile disagrees.
+- CPU bus closure slots: `src/cpu.lisp`'s `BUS-READ`/`BUS-WRITE` struct
+  slots already carry `:type (or null function)` from Phase 1 -- already
+  done, nothing further to do.
+
+### Target framing (Step 4)
+
+Post-pass numbers, mean of 3 runs, same machine, immediately after this
+pass (no source changes landed, so these are also the pass's baseline):
+
+| implementation | workload | fps | realtime-x |
+|-----------------|----------|---------|------------|
+| sbcl | nop | 2850.43 | 47.57x |
+| sbcl | irq | 3486.64 | 58.19x |
+| sbcl | display | 1755.25 | 29.29x |
+| sbcl | audio | 1605.57 | 26.80x |
+| sbcl | klaus+PASS | 2690.83 | 44.91x |
+| lispworks | nop | 768.94 | 12.83x |
+| lispworks | irq | 1304.95 | 21.78x |
+| lispworks | display | 299.09 | 4.99x |
+| lispworks | audio | 256.35 | 4.28x |
+| lispworks | klaus+PASS | 819.03 | 13.67x |
+
+SBCL's `nop` workload runs at ~47.6x NTSC realtime. LispWorks' first-run
+`nop` sample in this set (612.87 fps) was a clear session-warmth
+outlier; the steady-state figure across this session's later runs was
+836-857 fps (~14.0-14.3x realtime), i.e. LispWorks runs at roughly
+27-30% of SBCL's throughput on the workload this phase was scoped to --
+essentially unchanged from the phase's opening `~950 vs ~3550` framing
+(absolute fps drifts session to session on this machine; the ratio is
+the stable quantity, and it is now explained rather than merely
+observed). No further chase is planned within the project's safety
+constraints; a future pass could revisit this if LispWorks ships a
+better ARM64 array-access fast path, or if profiling on an x86-64
+LispWorks host shows a materially different picture.
+
 ## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
 
 SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction

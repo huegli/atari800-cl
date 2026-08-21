@@ -1,17 +1,28 @@
 # Performance & Benchmarking Plan
 
-> **Status (2026-08-02): complete and merged to main.**
+> **Status (2026-08-20): complete and merged to main.**
 > Phase 0 (harness), Phase 1 (declarations), and Phase 3 (POKEY
 > batching) shipped; Phase 2 (page-dispatch table) was implemented,
 > measured, and rejected per its own <5% bar (LispWorks regressed).
-> Phase 4 (profiling pass) remains open, and is now scheduled as
-> ROADMAP.md Phase 18 with one added instruction: profile LispWorks
-> FIRST. It is the project's primary implementation and runs at roughly
-> a quarter of SBCL's speed (`nop` ~950 vs ~3550 fps), yet every
-> optimization so far was measured on both but designed against SBCL's
-> behaviour. Measured results live in `PERFORMANCE_LOG.md`, which also
-> now carries non-optimization entries where a feature touched the hot
-> path (POKEY serial output, the Phase 12 CPU fixes).
+> Phase 4 (profiling pass, ROADMAP.md Phase 18) is now done too: LispWorks
+> was profiled first as instructed, and the gap it was meant to
+> investigate -- LispWorks at roughly a quarter of SBCL's speed (`nop`
+> ~950 vs ~3550 fps at the time this status was first written) -- is now
+> understood rather than chased. The profile pinned the largest single
+> cost (`POKEY-ADVANCE`'s array-slot accesses) to LispWorks 8.1.1's ARM64
+> backend routing every checked array access through a generic dispatch
+> call at `(safety 1)`, only inlining at `(safety 0)` -- which this
+> plan's own safety floor forbids trading away; SBCL's ARM64 backend
+> inlines the identical bounds-checked access at `(safety 1)`. A
+> source-level follow-up (explicit array-element-type declarations on
+> the hot POKEY locals) was implemented, benchmarked as flat noise, and
+> confirmed by disassembly to change nothing, so it was reverted rather
+> than committed. See `PERFORMANCE_LOG.md` ("ROADMAP Phase 18 --
+> LispWorks profiling pass") for the full profile tables and disassembly
+> evidence, and `ROADMAP.md` Phase 18 for the closing summary. Measured
+> results live in `PERFORMANCE_LOG.md`, which also now carries
+> non-optimization entries where a feature touched the hot path (POKEY
+> serial output, the Phase 12 CPU fixes).
 
 Goal: make the emulator measurably faster without sacrificing the project's
 first two priorities (idiomatic portable CL; emulation accuracy). Every

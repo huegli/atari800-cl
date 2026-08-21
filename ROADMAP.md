@@ -284,6 +284,54 @@
 > Phase 5 items 1-2 are done; items 3-5 remain open. See `CHANGES.md`
 > and `PERFORMANCE_LOG.md` for the full writeup, including the accepted
 > hot-path cost of the dummy-read commit.
+>
+> **Phase 18 done (2026-08-20)**: profiled LispWorks first (per this
+> phase's own amendment), then SBCL, on the `nop`/`irq`/`display`/`audio`
+> benchmark workloads via a new `with-profiling`-wrapped scratchpad
+> driver (thousands of samples per run). The profile named something the
+> plan's own candidate list didn't: on `nop`/`irq`, `POKEY-ADVANCE` is
+> the single largest self-time cost on BOTH implementations, but far
+> more disproportionately on LispWorks (69%/49% inclusive on
+> nop/irq) than SBCL (36%/29%) -- and LispWorks' breakdown showed the gap
+> concentrated in `SYSTEM::AREF1`/`SYSTEM::SET-AREF1`/
+> `SYSTEM:SVREF-NO-CHECK$I-VECTOR$FIXNUM`, LispWorks' generic,
+> runtime-dispatching array accessors. `src/pokey.lisp`'s hot array slots
+> (`SUB-COUNTERS`, `TIMER-COUNTS`, `AUDF`) already carry defstruct `:type
+> (simple-array fixnum (4))` declarations, so as the plan's step 3
+> anticipates for "struct accessor dispatch," the follow-up added
+> explicit local `(simple-array fixnum (4))` type declarations at every
+> hot AREF/SETF-AREF site in `%EXPIRE-CHANNEL`, `POKEY-TICK`,
+> `POKEY-ADVANCE`, and `%TIMER-RELOAD-VALUE`. `scripts/bench-ab.sh` (5
+> pairs, both implementations) showed no separation from noise on any
+> workload, and disassembling `POKEY-ADVANCE` before/after the change
+> showed byte-identical `AREF1`/`SET-AREF1` call counts (30/12) -- the
+> declaration provably changed nothing. An isolated microbenchmark
+> pinned why: on this LispWorks 8.1.1 ARM64 build, `(aref (the
+> (simple-array fixnum (4)) arr) i)` compiles to an out-of-line call to
+> `SYSTEM::AREF1` at `(safety 1)` regardless of how precisely the type is
+> declared, and only inlines to a direct bounds-checked load at `(safety
+> 0)`; SBCL's ARM64 backend inlines the same bounds-checked access at
+> `(safety 1)` (confirmed by disassembly on both). `src/renderer.lisp`'s
+> framebuffer accesses, which already carry equivalent explicit
+> declarations, show the identical dispatch pattern in the LispWorks
+> `display` profile (`SET-AREF1` alone was 37% self time) -- corroborating
+> that this is systemic, not a POKEY-specific oversight. Since
+> CLAUDE.md's safety floor (`(safety 1)` minimum, `(safety 0)` nowhere)
+> forecloses the one compiler lever that changes this, the change was
+> reverted rather than committed (`src/pokey.lisp` is unchanged from
+> `3017eaa`) and the gap is documented rather than chased, per this
+> phase's own suggested framing. The plan's other listed candidates
+> (`update-zn` flag traffic, opcode-handler `multiple-value-bind`
+> overhead, bus-closure `:type function` declarations) are non-issues:
+> none appears as a separable hot function in either profile, and the
+> bus closures already carry `:type (or null function)` from Phase 1.
+> Post-pass numbers (mean of 3, same machine): SBCL `nop` ~2850 fps
+> (~47.6x NTSC realtime); LispWorks `nop` ~769-857 fps (~12.8-14.3x
+> realtime) depending on in-session warmth -- LispWorks runs at roughly
+> 27-30% of SBCL's throughput, essentially unchanged from this phase's
+> opening `~950 vs ~3550` framing (absolute numbers drift session to
+> session; the ratio is the stable quantity). See `PERFORMANCE_LOG.md`
+> for the full per-workload profile tables and disassembly evidence.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -387,7 +435,7 @@ and say so in the commit message.
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | done   |
 | 16    | Host disk bridge + virtual disk (revised)    | 21         | no       | done   |
 | 17    | Harte bus-trace comparison                   | 12         | yes      | done   |
-| 18    | LispWorks profiling pass                     | --          | yes      | open   |
+| 18    | LispWorks profiling pass                     | --          | yes      | done   |
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
 | 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
 | 21    | Strict test gate + skip census               | --          | no       | done   |
@@ -1132,6 +1180,25 @@ Commit: "Harte harness: compare the cycle-by-cycle bus trace".
 ---
 
 ## Phase 18 -- LispWorks profiling pass  [hot path -> benchmark]
+
+> **Done (2026-08-20)**: profiled LispWorks first, then SBCL, on the
+> `nop`/`irq`/`display`/`audio` workloads. The profile named
+> `POKEY-ADVANCE`'s array-slot accesses as disproportionately expensive
+> on LispWorks (69%/49% inclusive on nop/irq vs. SBCL's 36%/29%),
+> traced in the LispWorks breakdown to `SYSTEM::AREF1`/`SET-AREF1`
+> generic dispatch. Adding explicit local `(simple-array fixnum (4))`
+> type declarations at the hot AREF sites (`%EXPIRE-CHANNEL`,
+> `POKEY-TICK`, `POKEY-ADVANCE`, `%TIMER-RELOAD-VALUE`) measured as flat
+> noise (`bench-ab.sh`, 5 pairs, both implementations) and, confirmed by
+> disassembly, changed nothing: LispWorks 8.1.1's ARM64 backend calls
+> out to `SYSTEM::AREF1` for any checked array access at `(safety 1)`
+> regardless of declared type, only inlining at `(safety 0)` -- which
+> CLAUDE.md's safety floor forbids. SBCL's ARM64 backend inlines the
+> identical bounds-checked access at `(safety 1)` (verified by
+> disassembly). The change was reverted, not committed; the gap is
+> documented rather than chased, per this phase's own framing. Full
+> profile tables, the disassembly evidence, and post-pass numbers are in
+> `PERFORMANCE_LOG.md` ("ROADMAP Phase 18 -- LispWorks profiling pass").
 
 `PERFORMANCE_PLAN.md` Phase 4, which remains open, aimed at the
 implementation this project calls primary. LispWorks runs at roughly a

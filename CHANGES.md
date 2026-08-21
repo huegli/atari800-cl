@@ -3,6 +3,53 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 18 / PERFORMANCE_PLAN Phase 4 -- LispWorks profiling pass
+
+Profiled LispWorks first, then SBCL, on the `nop`/`irq`/`display`/`audio`
+benchmark workloads (thousands of samples per run via a scratchpad
+driver built on `atari800-cl.compat:with-profiling`). On `nop`/`irq`,
+`ATARI800_CL.POKEY:POKEY-ADVANCE` is the largest self-time cost on both
+implementations, but far more disproportionately on LispWorks (69%/49%
+inclusive) than SBCL (36%/29%); the LispWorks breakdown showed the extra
+cost concentrated in `SYSTEM::AREF1`/`SYSTEM::SET-AREF1`, LispWorks'
+generic runtime-dispatching array accessors.
+
+Added explicit local `(simple-array fixnum (4))` type declarations at
+every hot AREF/SETF-AREF site in `%EXPIRE-CHANNEL`, `POKEY-TICK`,
+`POKEY-ADVANCE`, and `%TIMER-RELOAD-VALUE` (`src/pokey.lisp`) as the
+plan's step 3 anticipates for "struct accessor dispatch." Measured with
+`scripts/bench-ab.sh` (5 interleaved pairs, both implementations): every
+workload landed inside noise, no clean separation either direction.
+Disassembling `POKEY-ADVANCE` before/after confirmed why: byte-identical
+`AREF1`/`SET-AREF1` call counts (30/12) -- the declaration provably
+changed nothing. An isolated microbenchmark pinned the root cause: on
+this LispWorks 8.1.1 ARM64 build, `(aref (the (simple-array fixnum (4))
+arr) i)` compiles to an out-of-line call to `SYSTEM::AREF1` at `(safety
+1)` regardless of how precisely the array's type is declared, and only
+inlines to a direct bounds-checked load at `(safety 0)`; SBCL's ARM64
+backend inlines the identical bounds-checked access at `(safety 1)`
+(confirmed by disassembly on both). `src/renderer.lisp`'s framebuffer
+accesses, which already carry equivalent explicit declarations, show
+the identical dispatch pattern in the LispWorks `display` profile
+(`SET-AREF1` alone was 37% self time) -- corroborating that this is
+systemic to the LispWorks/ARM64 combination, not a POKEY-specific
+oversight fixable from this codebase's source.
+
+Since CLAUDE.md's safety floor (`(safety 1)` minimum, `(safety 0)`
+nowhere) forecloses the one compiler lever that changes this, the
+`src/pokey.lisp` change was reverted rather than committed -- the file
+is unchanged from `3017eaa` -- and the SBCL/LispWorks gap is documented
+rather than chased, per PERFORMANCE_PLAN.md Phase 4 step 4's own
+suggested framing. The plan's other listed candidates (`update-zn` flag
+traffic, opcode-handler `multiple-value-bind` overhead, bus-closure
+`:type function` declarations) were checked against the profile and
+found to be non-issues: none appears as a separable hot function in
+either profile, and the CPU's bus closures already carry `:type (or
+null function)` from Phase 1. Full profile tables and disassembly
+evidence are in `PERFORMANCE_LOG.md` ("ROADMAP Phase 18 -- LispWorks
+profiling pass"); this closes ROADMAP.md Phase 18 and PERFORMANCE_PLAN.md
+Phase 4.
+
 ## PERFORMANCE_PLAN Phase 4 step 1 -- compat-wrapped WITH-PROFILING helper
 
 Added `atari800-cl.compat:with-profiling` (`src/compat.lisp`), the one
