@@ -3,6 +3,22 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## PERFORMANCE_PLAN Phase 4 step 1 -- compat-wrapped WITH-PROFILING helper
+
+Added `atari800-cl.compat:with-profiling` (`src/compat.lisp`), the one
+place ROADMAP.md Phase 18 / PERFORMANCE_PLAN.md Phase 4's profiling pass
+is meant to reach for an implementation-specific profiler: `sb-sprof` on
+SBCL (`:mode` forwarded verbatim, so `:cpu`/`:alloc`/`:time` all work),
+and `hcl:start-profiling`/`hcl:stop-profiling` on LispWorks. `:mode` is
+accepted-and-ignored on the LispWorks branch -- probing
+`hcl:set-up-profiler`'s `:kind :allocation` option while developing this
+helper segfaulted the LispWorks 8.1.1 console image outright, so that
+branch always uses the default statistical sampler regardless of what is
+passed, and falls back to a no-op-plus-warning only if
+`hcl:start-profiling` itself errors (e.g. a delivered image without the
+profiler system). This is step 1 only: no profiling run or optimization
+follow-up is included here, and Phase 18 remains open.
+
 ## ROADMAP Phase 17 -- Harte bus-trace comparison: NMOS quirks + gate removal
 
 The Tom Harte / SingleStepTests harness (`tests/test-harte.lisp`) gained

@@ -168,6 +168,51 @@ across a Unix-domain socket on whichever implementation we're running."
           (close-unix-listener listener)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; WITH-PROFILING (PERFORMANCE_PLAN.md Phase 4 step 1 / ROADMAP.md Phase 18)
+;;;
+;;; These tests assert only the macro's CONTRACT -- return values, single
+;;; execution, clean expansion -- never on profiler report contents, which
+;;; are implementation-specific and, on a LispWorks image without the
+;;; profiler system, may be a documented no-op instead of a real profile.
+
+(test with-profiling-returns-body-values
+  "WITH-PROFILING returns all of BODY's values, not just the first."
+  (multiple-value-bind (a b c)
+      (with-profiling ()
+        (values 1 2 3))
+    (is (= 1 a))
+    (is (= 2 b))
+    (is (= 3 c))))
+
+(test with-profiling-runs-body-exactly-once
+  "A side effect inside BODY happens exactly once, not zero or twice --
+guards against a macro expansion that accidentally duplicates BODY (e.g.
+splicing it into both a success and a cleanup path)."
+  (let ((count 0))
+    (with-profiling ()
+      (incf count))
+    (is (= 1 count) "expected BODY to run exactly once; ran ~D times" count)))
+
+(test with-profiling-accepts-mode-keyword
+  "The :MODE keyword is accepted (and, per implementation, honored or
+documented-ignored) without signalling -- both :CPU (the default) and
+:ALLOC must expand and run cleanly."
+  (let ((cpu-count 0) (alloc-count 0))
+    (with-profiling (:mode :cpu)
+      (incf cpu-count))
+    (with-profiling (:mode :alloc)
+      (incf alloc-count))
+    (is (= 1 cpu-count))
+    (is (= 1 alloc-count))))
+
+(test with-profiling-propagates-body-error
+  "If BODY signals, the condition propagates out of WITH-PROFILING rather
+than being swallowed by the profiler set-up/tear-down."
+  (signals division-by-zero
+    (with-profiling ()
+      (/ 1 0))))
+
+;;; ---------------------------------------------------------------------------
 ;;; %SKIP-OR-FAIL self-test (ROADMAP.md Phase 21 -- the strict test gate)
 ;;;
 ;;; %SKIP-OR-FAIL (tests/test-helpers.lisp) is what turns the Klaus, Harte,

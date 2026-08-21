@@ -42,7 +42,8 @@
 #+sbcl
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (require :sb-posix)
-  (require :sb-bsd-sockets))
+  (require :sb-bsd-sockets)
+  (require :sb-sprof))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Implementation identification
@@ -406,3 +407,115 @@ loops; routing through here keeps the noise centralized."
   #+sbcl      `(let ((sb-ext:*muffled-warnings* t)) ,@body)
   #+lispworks `(progn ,@body)        ; LispWorks is quiet by default
   #-(or sbcl lispworks) `(progn ,@body))
+
+;;; ---------------------------------------------------------------------------
+;;; Statistical profiling (PERFORMANCE_PLAN.md Phase 4 step 1 / ROADMAP.md
+;;; Phase 18)
+;;;
+;;; WITH-PROFILING is the ONE place a profiling pass is allowed to reach for
+;;; an implementation-specific profiler; everywhere else in the tree calls
+;;; this macro instead of naming SB-SPROF or HCL directly.
+;;;
+;;; SBCL routes straight to SB-SPROF, a statistical (signal-driven) sampling
+;;; profiler that supports both :CPU and :ALLOC sampling natively.
+;;;
+;;; LispWorks routes to HCL:START-PROFILING / HCL:STOP-PROFILING, the same
+;;; entry points behind the IDE's "Profile" command (HCL:PROFILE macroexpands
+;;; to a bare wrapper around SYSTEM::WITH-PROFILING with no keyword options at
+;;; all, so calling START-/STOP-PROFILING directly is the only way to control
+;;; where the report is printed and to unwind-protect it around BODY).
+;;; MODE is accepted-and-ignored on this branch: probing
+;;; HCL:SET-UP-PROFILER's :KIND :ALLOCATION option while developing this
+;;; helper (LispWorks 8.1.1, Darwin/arm64 console image) crashed the image
+;;; outright -- a segfault inside the GC sweep -- so only the default
+;;; statistical call/time sampler is used, regardless of MODE.
+
+#+sbcl
+(defun %sbcl-with-profiling (thunk mode)
+  "Run THUNK under SB-SPROF statistical profiling in MODE (:CPU, :ALLOC, or
+:TIME -- forwarded verbatim to SB-SPROF:START-PROFILING's :MODE argument),
+printing a flat report to *STANDARD-OUTPUT* once profiling stops.  Both the
+STOP-PROFILING call and the REPORT attempt are inside THUNK's
+UNWIND-PROTECT cleanup, so they still run if THUNK signals; the signalled
+condition then propagates normally (THUNK's values are only returned on a
+normal return, per UNWIND-PROTECT semantics).  A ~5ms sample interval and a
+generous 100000-sample cap are sensible defaults for the few-second
+benchmark workloads this helper is meant for -- short runs never hit the
+cap, and 5ms resolves plenty of detail without dominating a short run's
+own sample count."
+  (sb-sprof:start-profiling :mode mode
+                             :sample-interval 0.005
+                             :max-samples 100000
+                             :threads :all)
+  (unwind-protect
+       (funcall thunk)
+    (sb-sprof:stop-profiling)
+    ;; REPORT itself stops profiling too (harmless double-stop) and prints
+    ;; nothing useful if THUNK never got a chance to run -- IGNORE-ERRORS
+    ;; keeps a reporting hiccup from masking THUNK's own condition.
+    (ignore-errors (sb-sprof:report :type :flat :stream *standard-output*))))
+
+#+lispworks
+(defun %lispworks-with-profiling (thunk mode)
+  "Run THUNK under HCL:START-PROFILING / HCL:STOP-PROFILING, printing a flat
+report to *STANDARD-OUTPUT* once profiling stops.  MODE is accepted for
+signature parity with the SBCL branch of WITH-PROFILING but ignored --
+see the section comment above for why.  STOP-PROFILING is inside THUNK's
+UNWIND-PROTECT cleanup, so it still runs if THUNK signals; the signalled
+condition then propagates normally.
+
+If HCL:START-PROFILING itself errors (e.g. a delivered application image
+built without the profiler system loaded), THUNK's set-up never ran, so
+there is nothing to unwind: this degrades to a no-op that runs THUNK
+unprofiled and emits a WARNING explaining why, per PERFORMANCE_PLAN.md
+Phase 4 step 1's sanctioned fallback."
+  (declare (ignore mode))
+  (if (handler-case (progn (hcl:start-profiling) t)
+        (error (e)
+          (warn "atari800-cl.compat: LispWorks profiler unavailable (~A); running body unprofiled." e)
+          nil))
+      (unwind-protect
+           (funcall thunk)
+        (ignore-errors (hcl:stop-profiling :print t :stream *standard-output*)))
+      (funcall thunk)))
+
+(defmacro with-profiling ((&key (mode :cpu)) &body body)
+  "Run BODY under a statistical profiler appropriate to the host Lisp,
+printing a flat profile report to *STANDARD-OUTPUT* once profiling stops,
+and returning BODY's values on a normal return.  This is the ONE compat
+entry point PERFORMANCE_PLAN.md Phase 4 / ROADMAP.md Phase 18's profiling
+pass is meant to use; no other file should reach for SB-SPROF or HCL
+directly.
+
+MODE selects the sampling kind:
+  :CPU    -- CPU-time sampling.  The default; supported on both hosts.
+  :ALLOC  -- allocation-based sampling.  Fully supported on SBCL
+             (forwarded to SB-SPROF:START-PROFILING's :MODE).  On
+             LispWorks, MODE is accepted but IGNORED -- this helper
+             always profiles with the default statistical sampler
+             regardless of what is passed, because the LispWorks entry
+             point that exposes an allocation-kind switch
+             (HCL:SET-UP-PROFILER :KIND :ALLOCATION) crashed the
+             console image this helper was developed against.
+  :TIME   -- wall-clock sampling.  SBCL only; forwarded like :ALLOC.
+
+Set-up/tear-down is UNWIND-PROTECTed around BODY on both implementations,
+so profiling is always stopped -- and, where the underlying API allows it,
+the report is always attempted -- even if BODY signals; the condition
+itself still propagates normally afterward.
+
+  * SBCL: wraps SB-SPROF:START-PROFILING / STOP-PROFILING / REPORT
+    (:TYPE :FLAT) around BODY.  SB-SPROF is REQUIREd near the top of this
+    file.
+  * LispWorks: wraps HCL:START-PROFILING / HCL:STOP-PROFILING around
+    BODY.  If the profiler is unavailable in this image, degrades to a
+    no-op that runs BODY and signals a WARNING explaining why."
+  #+sbcl
+  `(%sbcl-with-profiling (lambda () ,@body) ,mode)
+  #+lispworks
+  `(%lispworks-with-profiling (lambda () ,@body) ,mode)
+  #-(or sbcl lispworks)
+  `(progn
+     (warn "atari800-cl.compat: WITH-PROFILING has no profiler implementation for ~A; running BODY unprofiled."
+           (lisp-implementation-type))
+     ,@body))

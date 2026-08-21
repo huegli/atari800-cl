@@ -69,6 +69,7 @@
            #:read-binary-file
            #:write-binary-file
            #:without-gc-warnings
+           #:with-profiling
            ;; Process / filesystem helpers
            #:current-process-id
            #:delete-file-if-exists
