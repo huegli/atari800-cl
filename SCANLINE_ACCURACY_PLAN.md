@@ -34,6 +34,24 @@
 > assertion at a known cycle index. One Phase 5-adjacent bug was fixed
 > in passing: JSR read its high operand byte before pushing rather
 > than after (regression test in `tests/test-regressions.lisp`).
+>
+> **Update (2026-08-20): Phase 5 items 1-2 done, via ROADMAP.md Phase
+> 17.** "CPU: RMW double-write (unmodified value first)" and "CPU:
+> indexed-addressing dummy reads at the un-carried address" land both
+> quirks -- the second commit grew past its name once the full
+> 2,560,000-case Harte corpus (run under the new trace comparison) showed
+> the dummy-read behaviour is not unique to indexed addressing: every
+> instruction whose cycle count exceeds its minimal bus need spends the
+> extra cycles on a real, discarded read on hardware, and this project
+> was skipping all of them. Now modelled: implied/accumulator opcodes,
+> PHA/PHP/PLA/PLP, JSR/RTS/RTI, BRK's signature byte, and a taken
+> branch's target computation, alongside the originally-scoped indexed
+> addressing (abs,X/abs,Y/(zp),Y conditional-on-cross for reads,
+> unconditional for stores/RMW; zero-page-indexed and (zp,X)
+> unconditional always). The full corpus's trace comparison is green on
+> both SBCL and LispWorks, `ATARI800_CL_STRICT=1` included -- see
+> `CHANGES.md` and `PERFORMANCE_LOG.md` for the full writeup. Items 3-5
+> (interrupt poll timing, SEI/CLI/PLP delay, BRK/NMI hijack) remain open.
 
 Goal: move the emulator from frame-level timing to scanline-level timing
 accuracy, in dependency order. Each phase is independently committable and
@@ -298,14 +316,26 @@ its own commit with tests in `tests/test-cpu-opcodes.lisp` /
 `tests/test-illegal.lisp` using a recording bus stub (wrap `cpu-bus-read`/
 `cpu-bus-write` closures that log accesses).
 
-1. RMW double-write: INC/DEC/ASL/LSR/ROL/ROR (and the illegal compound
-   RMWs) write the UNMODIFIED value, then the modified one. Visible on
-   hardware registers (`DEC WSYNC`, HITCLR). Test: recording bus sees two
-   writes, original-then-modified.
-2. Dummy reads on indexed addressing page-cross: abs,X / abs,Y / (zp),Y
-   read from the un-carried address `(dpb target-low (byte 8 0) base-page)`
-   before the corrected one; stores ALWAYS do the dummy read. Matters for
-   read-sensitive registers.
+1. **Done (ROADMAP.md Phase 17, 2026-08-20).** RMW double-write:
+   INC/DEC/ASL/LSR/ROL/ROR (and the illegal compound RMWs) write the
+   UNMODIFIED value, then the modified one. Visible on hardware registers
+   (`DEC WSYNC`, HITCLR). Tests: recording bus sees two writes,
+   original-then-modified, in `tests/test-cpu-opcodes.lisp` /
+   `tests/test-illegal.lisp`.
+2. **Done (ROADMAP.md Phase 17, 2026-08-20)**, and broader than
+   originally scoped. Dummy reads on indexed addressing page-cross:
+   abs,X / abs,Y / (zp),Y read from the un-carried address (base's high
+   byte + indexed low byte) before the corrected one; stores and RMW
+   through those modes ALWAYS do the dummy read; zero-page-indexed and
+   (zp,X) always dummy-read their unindexed address. The full Harte
+   corpus, run under the new trace comparison, showed the same
+   "speculative next fetch" idea applies well past indexed addressing:
+   every implied/accumulator opcode, PHA/PHP/PLA/PLP, JSR/RTS/RTI, BRK's
+   signature byte, and a taken branch's target computation were all
+   spending their already-correct cycle count on no bus access at all,
+   where hardware performs a real (if discarded) one. All now modelled;
+   the trace comparison is green across the full 2.56M-case corpus on
+   both implementations.
 3. Interrupt poll timing: interrupts are recognized on the second-to-last
    cycle of an instruction; a taken branch without page cross delays
    recognition by one instruction. Requires modelling "poll point" per

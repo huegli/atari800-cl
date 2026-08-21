@@ -30,19 +30,21 @@
 ;;;; Trace comparison (ROADMAP.md Phase 17)
 ;;;;
 ;;;; Each case's "cycles" array is a full cycle-by-cycle bus trace --
-;;;; [address, value, "read"|"write"] per cycle.  By default the harness
-;;;; uses only its LENGTH, as the expected cycle count (checked alongside
-;;;; the end-state comparison).  Setting `ATARI800_CL_HARTE_TRACE` to a
-;;;; non-empty value additionally compares the trace itself,
-;;;; element-by-element, using the shared recording-bus stub
-;;;; (INSTALL-BUS-RECORDER, tests/test-helpers.lisp).
+;;;; [address, value, "read"|"write"] per cycle.  Compared element-by-
+;;;; element against a recording bus (INSTALL-BUS-RECORDER, tests/
+;;;; test-helpers.lisp) wrapped around the instruction, on every run --
+;;;; not just the LENGTH-as-cycle-count check this started as. This is
+;;;; the strongest CPU-accuracy check available: "right accesses in the
+;;;; right order," not just "right answer in the right number of cycles."
 ;;;;
-;;;; This is deliberately gated OFF by default: SCANLINE_ACCURACY_PLAN.md
-;;;; Phase 5 items 1-2 (the NMOS RMW double-write and indexed dummy reads)
-;;;; are not modelled yet, so a gated run is EXPECTED to fail today --
-;;;; that failure is the specification for implementing those quirks, not
-;;;; a bug in the harness.  Once they land, flip the gate on (or remove it)
-;;;; and delete this paragraph.
+;;;; This ran gated behind $ATARI800_CL_HARTE_TRACE while
+;;;; SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2 (the NMOS RMW
+;;;; double-write and indexed dummy reads, plus the wider family of
+;;;; previously-unmodelled dummy reads the vectors turned up: implied
+;;;; opcodes, stack ops, JSR/RTS/RTI/BRK, and taken branches) were
+;;;; unimplemented. Both commits are in (see CHANGES.md); the full
+;;;; 2.56M-case corpus is green on both SBCL and LispWorks, so the gate
+;;;; is gone and trace comparison always runs when vectors are present.
 ;;;;
 ;;;; ---------------------------------------------------------------------------
 ;;;; Triage workflow — READ THIS BEFORE ADDING A SKIP
@@ -102,15 +104,6 @@ silence a failing check.")
     (if (and full (member full '("1" "t" "T" "yes" "true") :test #'string=))
         most-positive-fixnum
         *harte-default-cases*)))
-
-(defun %harte-trace-p ()
-  "True when $ATARI800_CL_HARTE_TRACE requests the cycle-by-cycle bus
-trace comparison in addition to the default end-state + cycle-count check
-(ROADMAP.md Phase 17). Gated off by default because it is expected to fail
-until SCANLINE_ACCURACY_PLAN.md Phase 5's RMW double-write and indexed
-dummy-read quirks are modelled."
-  (let ((env (uiop:getenv "ATARI800_CL_HARTE_TRACE")))
-    (and env (plusp (length env)) t)))
 
 (defun %harte-opcode-from-path (path)
   "Opcode number encoded in a vector file's name (\"7d.json\" -> #x7D), or NIL."
@@ -215,12 +208,12 @@ only once a mismatch is found)."
                     i (%harte-format-access got) (%harte-format-expected want))))))
     nil))
 
-(defun %harte-run-case (case-object &optional trace)
+(defun %harte-run-case (case-object)
   "Run one case.  Returns NIL on success, else a description of the
-failure.  When TRACE is true, additionally installs a recording bus
-(INSTALL-BUS-RECORDER) around the instruction and compares its log against
-the case's `cycles` array element-by-element (ROADMAP.md Phase 17); this
-is skipped by default because %HARTE-TRACE-P gates it off."
+failure.  Installs a recording bus (INSTALL-BUS-RECORDER) around the
+instruction and compares its log against the case's `cycles` array
+element-by-element, in addition to the end-state and cycle-count check
+(ROADMAP.md Phase 17)."
   (let* ((cpu (make-cpu))
          (mem (make-memory))
          (initial (%harte-state case-object "initial"))
@@ -230,7 +223,7 @@ is skipped by default because %HARTE-TRACE-P gates it off."
          (cycles-used 0))
     (attach-memory-bus cpu mem)
     (%harte-load-state cpu mem initial)
-    (let ((recorder (when trace (install-bus-recorder cpu))))
+    (let ((recorder (install-bus-recorder cpu)))
       (handler-case
           (setf cycles-used (step-cpu cpu))
         ;; KIL/JAM: the emulator refuses to continue, which is the modelled
@@ -242,10 +235,9 @@ is skipped by default because %HARTE-TRACE-P gates it off."
         (t
          (let ((problems (%harte-compare cpu mem final cycles-used
                                          expected-cycles)))
-           (when recorder
-             (let ((mismatch (%harte-trace-mismatch (bus-recorder-log recorder)
-                                                     (gethash "cycles" case-object))))
-               (when mismatch (setf problems (nconc problems (list mismatch))))))
+           (let ((mismatch (%harte-trace-mismatch (bus-recorder-log recorder)
+                                                   (gethash "cycles" case-object))))
+             (when mismatch (setf problems (nconc problems (list mismatch)))))
            (when problems
              (format nil "~A: ~{~A~^; ~}"
                      (gethash "name" case-object) problems))))))))
@@ -276,15 +268,13 @@ default depth, parses 500 objects instead of 10,000."
                   (incf count)))
           finally (return count))))
 
-(defun %harte-run-opcode (path limit &optional trace)
-  "Run up to LIMIT cases from PATH.  Returns (values run-count failures).
-TRACE, when true, is passed through to %HARTE-RUN-CASE to additionally
-compare each case's cycle-by-cycle bus trace."
+(defun %harte-run-opcode (path limit)
+  "Run up to LIMIT cases from PATH.  Returns (values run-count failures)."
   (let ((failures '()))
     (values (%harte-map-cases
              path limit
              (lambda (case-object)
-               (let ((problem (%harte-run-case case-object trace)))
+               (let ((problem (%harte-run-case case-object)))
                  (when problem (push problem failures)))))
             (nreverse failures))))
 
@@ -293,7 +283,9 @@ compare each case's cycle-by-cycle bus trace."
 
 (test harte-processor-tests
   "Every opcode vector file found under $ATARI800_CL_HARTE_TESTS must pass:
-registers, memory and cycle count after a single STEP-CPU."
+registers, memory, and cycle count after a single STEP-CPU, AND its exact
+cycle-by-cycle bus trace (ROADMAP.md Phase 17) -- right accesses, in the
+right order, not just the right answer in the right number of cycles."
   (let ((dir (%harte-directory)))
     (if (null dir)
         (%skip-or-fail "$ATARI800_CL_HARTE_TESTS is unset or does not exist; skipping ~
@@ -301,7 +293,6 @@ registers, memory and cycle count after a single STEP-CPU."
                the variable at its 6502/v1 directory to enable them.")
         (let ((files (%harte-vector-files dir))
               (limit (%harte-case-limit))
-              (trace (%harte-trace-p))
               (total-cases 0)
               (total-failures 0))
           (if (null files)
@@ -311,7 +302,7 @@ registers, memory and cycle count after a single STEP-CPU."
                   (destructuring-bind (opcode . path) entry
                     (unless (member opcode +harte-skip-opcodes+)
                       (multiple-value-bind (run failures)
-                          (%harte-run-opcode path limit trace)
+                          (%harte-run-opcode path limit)
                         (incf total-cases run)
                         (incf total-failures (length failures))
                         ;; One check per opcode keeps the check count sane

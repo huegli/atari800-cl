@@ -268,6 +268,22 @@
 > exception only. Phase 25 (SIO receive path + serial-wire disk) can
 > reuse this bridge's ATR/XEX plumbing as one implementation alongside a
 > real serial model, per that phase's own notes.
+>
+> **Phase 17 done (2026-08-20)**, four commits: the trace-comparison
+> harness itself (`62c9510`), the two NMOS bus quirks it specified --
+> "CPU: RMW double-write (unmodified value first)" (`17e8600`) and "CPU:
+> indexed-addressing dummy reads at the un-carried address" (`5a7e987`,
+> which grew to cover the whole family of previously-unmodelled dummy
+> reads the full corpus exposed, not only indexed addressing) -- and
+> dropping the `ATARI800_CL_HARTE_TRACE` gate now that both are in. The
+> full 2,560,000-case corpus passes the complete cycle-by-cycle trace
+> comparison on both SBCL and LispWorks, and `ATARI800_CL_STRICT=1` runs
+> are fully green on both -- zero failures. Acid800's known-issues list
+> (Phase 24) is unchanged: none of `cpu_bugs` or the four unisolated
+> ANTIC failures were caused by these quirks. `SCANLINE_ACCURACY_PLAN.md`
+> Phase 5 items 1-2 are done; items 3-5 remain open. See `CHANGES.md`
+> and `PERFORMANCE_LOG.md` for the full writeup, including the accepted
+> hot-path cost of the dummy-read commit.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,
@@ -370,7 +386,7 @@ and say so in the commit message.
 | 14    | `fetch-harte.sh` + fast subset gate          | 12         | no       | done   |
 | 15    | Documentation drift sweep (misc item 9)      | --          | no       | done   |
 | 16    | Host disk bridge + virtual disk (revised)    | 21         | no       | done   |
-| 17    | Harte bus-trace comparison                   | 12         | no       | open   |
+| 17    | Harte bus-trace comparison                   | 12         | yes      | done   |
 | 18    | LispWorks profiling pass                     | --          | yes      | open   |
 | 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
 | 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
@@ -1061,6 +1077,33 @@ commit follows minimal-xl's own conventions).
 ---
 
 ## Phase 17 -- Harte bus-trace comparison
+
+> **Done (2026-08-20)**, four commits total. `62c9510` ("Harte harness:
+> compare the cycle-by-cycle bus trace") landed steps 1-3 as planned
+> (recording bus, trace comparison, gated behind
+> `ATARI800_CL_HARTE_TRACE`). Step 4's two quirks then landed one commit
+> each: `17e8600` ("CPU: RMW double-write (unmodified value first)") and
+> `5a7e987` ("CPU: indexed-addressing dummy reads at the un-carried
+> address") -- the second one grew beyond its name once the FULL 2.56M-
+> case corpus was run under the trace comparison: 157 of 256 opcodes
+> were still mismatching after the RMW fix alone, all from the same
+> family of previously-unmodelled dummy reads (implied/accumulator
+> opcodes, PHA/PHP/PLA/PLP, JSR/RTS/RTI, BRK's signature byte, taken
+> branches) that the plan's step 2 named only the indexed-addressing
+> case of. A fourth commit then dropped the `ATARI800_CL_HARTE_TRACE`
+> gate: trace comparison always runs now. Verified fully green on both
+> SBCL and LispWorks with the full corpus and `ATARI800_CL_STRICT=1`:
+> zero failures. Re-ran Acid800 (Phase 24); no `+ACID800-KNOWN-ISSUES+`
+> entry moved -- `cpu_bugs` and the four unisolated ANTIC failures are
+> confirmed still failing for their existing documented reasons, not
+> related to these quirks. See `CHANGES.md` and `PERFORMANCE_LOG.md`
+> ("ROADMAP Phase 17 -- NMOS bus quirks") for the full writeup and
+> benchmark numbers -- the dummy-read commit is a real, accepted
+> hot-path regression (SBCL -7% to -10% on throughput-bound workloads),
+> not chased per CLAUDE.md's correctness-over-performance priority.
+> `SCANLINE_ACCURACY_PLAN.md` Phase 5 items 1-2 are done via this phase;
+> items 3-5 (interrupt poll timing, SEI/CLI/PLP delay, BRK/NMI hijack)
+> remain open.
 
 The vectors carry a full cycle-by-cycle bus trace -- `[address, value,
 "read"|"write"]` per cycle -- and `tests/test-harte.lisp` currently uses

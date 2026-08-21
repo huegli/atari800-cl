@@ -3,6 +3,58 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 17 -- Harte bus-trace comparison: NMOS quirks + gate removal
+
+The Tom Harte / SingleStepTests harness (`tests/test-harte.lisp`) gained
+a cycle-by-cycle bus-trace comparison alongside its existing end-state
+and cycle-count check: every recorded (address, value, read/write) access
+an instruction makes must match the vector's own `cycles` array,
+element-by-element, not just agree on how many cycles elapsed. This
+directly exercises SCANLINE_ACCURACY_PLAN.md's stretch Phase 5 -- the
+NMOS 6502's undocumented bus behaviour -- turning "probably unmodelled"
+into a failing assertion at a known cycle index.
+
+Three commits closed the loop. First, "CPU: RMW double-write (unmodified
+value first)": every memory-form read-modify-write instruction --
+documented INC/DEC/ASL/LSR/ROL/ROR and the illegal compound RMWs
+SLO/RLA/SRE/RRA/DCP/ISC -- writes the unmodified byte back, then the
+modified one, in two consecutive bus cycles, matching real hardware
+(visible on software that points an RMW instruction at a chip register,
+e.g. `DEC WSYNC`). Second, "CPU: indexed-addressing dummy reads at the
+un-carried address": running the fix against the FULL 2.56M-case corpus
+under the new trace comparison revealed the quirk is broader than its
+name -- abs,X/abs,Y/(zp),Y reads dummy-read the un-carried address only
+on a page cross, while stores and RMW through those modes always do;
+zero-page-indexed and (zp,X) always dummy-read their unindexed address;
+and the same "the CPU speculatively fetches ahead before it knows it
+doesn't need to" idea extends to every implied/accumulator opcode, PHA/
+PHP/PLA/PLP, JSR/RTS/RTI, BRK's signature byte, and a taken branch's
+target computation -- all previously skipped outright. Cycle counts were
+already correct throughout; both commits only add previously-missing
+real bus operations within budgets that already accounted for them.
+Third, this trace comparison's own gate (`ATARI800_CL_HARTE_TRACE`) was
+removed -- it always runs now whenever vectors are present, with the
+length-only fallback gone.
+
+Verification: the full 2,560,000-case corpus (256 opcodes x 10,000 cases)
+passes the complete trace comparison on both SBCL and LispWorks, and
+`ATARI800_CL_STRICT=1` runs are now fully green on both -- zero
+failures, not just the previous "Harte strict exception." No
+chip/machine/timing test regressed and none needed updating for the new
+double-write/dummy-read behaviour beyond one existing bus-trace index
+shifting by one (zero-page,X gained its own dummy-read cycle). Re-ran
+the Acid800 suite (ROADMAP.md Phase 24) under these fixes: no entry in
+`+ACID800-KNOWN-ISSUES+` moved -- `cpu_bugs` (NMI-hijacks-BRK) and the
+four unisolated ANTIC failures are unrelated architectural/timing gaps,
+confirmed still failing for the same documented reasons. Benchmarked
+with `scripts/bench-ab.sh` (interleaved, not session-separated): the
+RMW commit is performance-neutral (noise-level); the dummy-read commit
+is a real, accepted hot-path cost (SBCL -7% to -10% on
+nop/irq/audio, LispWorks -5% to -9% but noise-level at 3 pairs) --
+logged in `PERFORMANCE_LOG.md`, not chased, because the added work is
+real bus cycles the emulator was previously skipping, and CLAUDE.md's
+stated priority is correctness over performance.
+
 ## ROADMAP Phase 16 -- Host disk bridge: ATR/XEX/OBX via minimal-xl
 
 The machine now loads real software from disk images without emulating
