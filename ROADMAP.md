@@ -465,8 +465,8 @@ and say so in the commit message.
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | done   |
 | 25    | SIO receive path + serial-wire disk          | 13, 16, 22 | no       | deferred |
 | 26    | LispWorks fast-path array access             | 18         | yes      | done   |
-| 27    | Idle benchmark workloads (idle, serve)       | --          | no       | open   |
-| 28    | AESP push economics (gate, reuse, dedup)     | 27         | yes      | open   |
+| 27    | Idle benchmark workloads (idle, serve)       | --          | no       | done   |
+| 28    | AESP push economics (gate, reuse, dedup)     | 27         | yes      | done   |
 | 29    | Dirty-frame render skip (conditional)        | 27, 28     | yes      | open   |
 | 30    | Deferred POKEY advance                       | 27         | yes      | open   |
 | 31    | Spin-loop fast-forward (conditional, opt-in) | 28, 30     | yes      | open   |
@@ -1668,6 +1668,16 @@ that, in that order.
 
 ## Phase 27 -- Idle benchmark workloads
 
+> **Done (2026-08-23)**, commits `0f0a561` (27a, the `idle` workload:
+> `MAKE-IDLE-ROM`'s `JMP *` spin under the static mode-2 display
+> setup) and `6bc8aba` (27b, the `serve` workload: the same machine
+> pushed through a real in-process AESP server to one draining video
+> client, with the EPERM skip path). 27c baseline recorded in
+> `PERFORMANCE_LOG.md`: sbcl `idle` 1858 / `serve` 558 fps, lispworks
+> `idle` 1003 / `serve` 229 fps -- `idle` tracks `display` as
+> predicted, and the push path costs 2.3-3.4x the rest of the frame,
+> confirming Phase 28's target. Suites green on both implementations.
+
 Measurement first: none of the five existing workloads has the idle
 shape. `nop` executes a NOP sled (memory-crossing work every 2
 cycles, no renderer), `display` renders but also runs the sled, and
@@ -1727,6 +1737,20 @@ Commits: `bench: idle workload (JMP-self + static display)`,
 ---
 
 ## Phase 28 -- AESP push economics  [hot path -> benchmark]
+
+> **Done (2026-08-23)**, commits `5784523` (28a gating), `f4900d8`
+> (28b payload-buffer reuse), `a8d7851` (28c unchanged-frame dedup),
+> `f2a0b2f` (28d deadline pacing), each bench-ab'd per the tranche
+> rules; new AESP server tests in `tests/test-aesp.lisp`. Cumulative
+> vs the Phase 27 tip: `serve` +70.7% CLEAN on sbcl (563 -> 961 fps)
+> and +22.8% CLEAN on lispworks (232 -> 285 fps); every other
+> workload within noise on both implementations. One instructive
+> mid-phase catch: 28b's first cut passed the output buffer as an
+> undeclared parameter and CLEANLY regressed sbcl `serve` -26% --
+> generic AREF dispatch cost more than the allocation it removed --
+> fixed by declaring the buffer types (amended into `f4900d8`; full
+> story in `PERFORMANCE_LOG.md`). Suites green on both
+> implementations after every commit.
 
 Output-side only: nothing in this phase touches emulation state, so
 there is zero accuracy risk (GTIA collisions live in `src/gtia.lisp`;

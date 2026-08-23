@@ -532,6 +532,106 @@ re-run was not required beyond what this suite run already exercises.
 Commits: `963f0ee` (26a/26b), `e254142` (26c-1), `5acef18` (26c-2),
 close-out documentation and this section (26d).
 
+## ROADMAP Phases 27-28 -- idle workloads + AESP push economics
+
+Date 2026-08-23. Commits: `0f0a561` / `6bc8aba` (Phase 27, the `idle`
+and `serve` benchmark workloads), `5784523` (28a, subscriber gating),
+`f4900d8` (28b, FRAME_RAW payload buffer reuse), `a8d7851` (28c,
+unchanged-frame dedup), `f2a0b2f` (28d, deadline-corrected serve
+pacing). Methodology per the tranche ground rules: `bench-ab.sh
+<prev-commit> -impl both -pairs 5` per hot commit.
+
+### Phase 27c baseline (single same-session run, `6bc8aba`)
+
+| implementation | idle fps | serve fps | note |
+|----------------|----------|-----------|------|
+| sbcl | 1858.17 | 557.89 | serve = idle/3.3: push path costs 2.3x the rest of the frame |
+| lispworks | 1003.34 | 229.27 | serve = idle/4.4 |
+
+`idle` lands near `display` on both implementations, as Phase 27
+predicted (rendering dominates once the CPU is just spinning on
+`JMP *`). The `serve` gap is the Phase 28 target.
+
+### 28a `5784523` vs `6bc8aba` -- subscriber gating
+
+All 6 comparable workloads within noise on both implementations
+(sbcl -0.8%..+2.8%, one borderline `display` +1.9% CLEAN improvement;
+lispworks -0.3%..+7.5%, all MIXED). Exactly the acceptance shape: the
+gate's win (zero-client operation) is not exercised by any workload --
+`serve` always has one client -- so 28a's claim was "no regression
+anywhere", which held.
+
+### 28b `f4900d8` vs `5784523` -- payload buffer reuse
+
+First attempt REGRESSED: sbcl `serve` -26.0% CLEAN (558 -> 413 fps).
+Cause: `%RGB24->BGRA32-INTO` takes the output buffer as a parameter,
+where the old code allocated it locally with `%MAKE-OCTETS` -- SBCL
+could infer the local's element type and inline the array writes, but
+an undeclared parameter falls back to generic `AREF` dispatch across
+the ~322K writes per frame, which cost more than the allocation it
+saved. LispWorks was flat (its accesses were already out-of-line
+`AREF1` calls either way). Fixed in the same (amended) commit by
+declaring RGB/OUT `(simple-array (unsigned-byte 8) (*))`. Re-measured:
+
+| workload | sbcl delta | sep | lispworks delta | sep |
+|----------|-----------|-----|-----------------|-----|
+| nop | +2.2% | CLEAN | +0.5% | MIXED |
+| irq | +1.1% | MIXED | +0.2% | MIXED |
+| display | +2.6% | MIXED | -2.0% | MIXED |
+| audio | -0.5% | MIXED | -0.3% | MIXED |
+| idle | -0.5% | MIXED | -0.3% | MIXED |
+| serve | +36.0% (557 -> 758 fps) | CLEAN | +1.0% | MIXED |
+
+The sbcl `serve` gain exceeds "regression fixed" because the RGB input
+had been undeclared all along -- the declaration sped up the whole
+conversion loop, on top of removing ~19 MB/s of garbage at 60 fps.
+The sbcl `nop` +2.2% CLEAN is on a path this commit cannot affect;
+judged a session artifact (see the artifact note below).
+
+### 28c `a8d7851` vs `f4900d8` -- unchanged-frame dedup
+
+| workload | sbcl delta | sep | lispworks delta | sep |
+|----------|-----------|-----|-----------------|-----|
+| nop | +1.1% | MIXED | +5.8% | MIXED |
+| irq | -0.6% | MIXED | +0.5% | MIXED |
+| display | -0.1% | MIXED | +3.1% | MIXED |
+| audio | +1.5% | MIXED | +7.0% | MIXED |
+| idle | -0.5% | MIXED | +2.8% | MIXED |
+| serve | +30.4% (747 -> 974 fps) | CLEAN | +23.1% (233 -> 287 fps) | CLEAN |
+
+The `serve` workload displays a static screen, so after the first push
+every frame takes the byte-compare-plus-resend path instead of
+convert-plus-send; the cached-payload resend preserves the FRAME_RAW /
+AUDIO_PCM 1:1 cadence.
+
+### 28d `f2a0b2f` -- serve pacing (no throughput claim)
+
+`runner.lisp` is not part of the benchmarked system; the fixed
+`(sleep 0.016)` became a 59.92 fps deadline accumulator. Verified by
+cadence observation, not bench-ab.
+
+### Cumulative, `f2a0b2f` (working tree) vs `6bc8aba` (Phase 27 tip)
+
+| workload | sbcl | sep | lispworks | sep |
+|----------|------|-----|-----------|-----|
+| nop | -2.0% | CLEAN | -0.7% | MIXED |
+| irq | -0.6% | MIXED | +0.1% | MIXED |
+| display | +0.2% | MIXED | +0.6% | MIXED |
+| audio | -2.8% | MIXED | +0.2% | MIXED |
+| idle | +1.0% | MIXED | -1.4% | CLEAN |
+| serve | +70.7% (563 -> 961 fps) | CLEAN | +22.8% (232 -> 285 fps) | CLEAN |
+
+Artifact note: two small CLEAN rows sit on paths Phase 28 provably
+does not execute -- sbcl `nop` (-2.0% here, +2.2% in the 28b table,
+opposite signs across same-day runs) and lispworks `idle` (-1.4%; the
+`idle` workload attaches the renderer directly via
+`%SETUP-DISPLAY-WORKLOAD` and never constructs an AESP server, so no
+Phase 28 code runs in it). Both match the Phase 26 close-out
+precedent (sbcl `irq` -3.5% CLEAN that vanished on re-run): small
+CLEAN separations on untouched paths are image-layout/session
+artifacts, not effects. The honest cumulative read: `serve` +70.7%
+sbcl / +22.8% lispworks, everything else flat.
+
 ## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
 
 SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction

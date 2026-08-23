@@ -3,6 +3,29 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phases 27-28 -- idle workloads + AESP push economics
+
+The first two phases of the idle-operation tranche (ROADMAP Phases
+27-31). Phase 27 adds two benchmark workloads: `idle` (a `JMP *` spin
+loop under the static mode-2 display setup -- the parked-machine
+shape) and `serve` (the same machine pushed through a real in-process
+AESP server to one draining video client; skips cleanly where the
+sandbox forbids TCP listeners). Phase 28 makes the AESP push path pay
+only for what changed: rendering and BGRA conversion are gated on a
+video client actually being connected (with a full-render handshake so
+a client connecting mid-frame never sees a torn frame), the ~322 KB
+FRAME_RAW payload is converted into one preallocated buffer instead of
+consing per frame, unchanged frames resend the cached payload after a
+byte-compare instead of reconverting (resend, never suppress -- the
+Nth AUDIO_PCM still pairs with the Nth FRAME_RAW), and the runner's
+serve loop paces on a 59.92 fps deadline accumulator instead of a
+fixed sleep. Measured cumulative on the `serve` workload: +70.7% on
+SBCL (563 -> 961 fps) and +22.8% on LispWorks (232 -> 285 fps), all
+other workloads within noise on both implementations; per-commit
+tables and the 28b undeclared-buffer regression story are in
+`PERFORMANCE_LOG.md`. New AESP server tests cover the gate, the
+dedup resend, and reconnect invalidation.
+
 ## ROADMAP Phase 26 -- LispWorks fast-path array access
 
 Phase 18 diagnosed, but could not fix, a LispWorks-8.1.1-ARM64 compiler
