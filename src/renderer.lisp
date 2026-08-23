@@ -150,17 +150,21 @@ Index with (* color-register 3)."))
 (defun atari-color->r (c)
   "Return the red component (0-255) for Atari color byte C."
   (declare (type (unsigned-byte 8) c))
-  (aref +atari-rgb-palette+ (* c 3)))
+  ;; C is (unsigned-byte 8), so (* c 3) <= 765 -- in range of the 768-entry
+  ;; palette by C's type alone, no cross-function bound needed.
+  (fast-aref (simple-array (unsigned-byte 8) (768)) +atari-rgb-palette+ (* c 3)))
 
 (defun atari-color->g (c)
   "Return the green component (0-255) for Atari color byte C."
   (declare (type (unsigned-byte 8) c))
-  (aref +atari-rgb-palette+ (+ (* c 3) 1)))
+  ;; C is (unsigned-byte 8), so (* c 3)+1 <= 766 -- in range by C's type.
+  (fast-aref (simple-array (unsigned-byte 8) (768)) +atari-rgb-palette+ (+ (* c 3) 1)))
 
 (defun atari-color->b (c)
   "Return the blue component (0-255) for Atari color byte C."
   (declare (type (unsigned-byte 8) c))
-  (aref +atari-rgb-palette+ (+ (* c 3) 2)))
+  ;; C is (unsigned-byte 8), so (* c 3)+2 <= 767 -- in range by C's type.
+  (fast-aref (simple-array (unsigned-byte 8) (768)) +atari-rgb-palette+ (+ (* c 3) 2)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framebuffer pixel helpers
@@ -171,9 +175,15 @@ Index with (* color-register 3)."))
   "Write Atari COLOR's RGB triple into FB at byte offset BASE."
   (declare (type (simple-array (unsigned-byte 8) (*)) fb)
            (type fixnum base) (type (unsigned-byte 8) color))
-  (setf (aref fb base)       (atari-color->r color)
-        (aref fb (+ base 1)) (atari-color->g color)
-        (aref fb (+ base 2)) (atari-color->b color)))
+  ;; BASE is always ROW-BASE + column*3 at every call site in this file
+  ;; (audited: %RENDER-BITMAP-MODE, %RENDER-GTIA-MODE,
+  ;; %PAINT-FIFTH-PLAYER-MISSILE, %RENDER-PM-LAYER), with ROW-BASE <=
+  ;; 275328 by RENDER-SCANLINE's per-call assertion (row in 0..239) and
+  ;; column always proven in 0..383 at its own call site -- BASE+2 never
+  ;; reaches (length fb) = 276480. %WRITE-RGB is private to this file.
+  (setf (fast-aref (simple-array (unsigned-byte 8) (*)) fb base)       (atari-color->r color)
+        (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ base 1)) (atari-color->g color)
+        (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ base 2)) (atari-color->b color)))
 
 (defun %fill-span (fb row-base start-x n color)
   "Fill N consecutive pixels of the row at byte offset ROW-BASE with
@@ -187,10 +197,14 @@ hoisted out of the loop."
         (b (atari-color->b color))
         (p (+ row-base (* start-x 3))))
     (declare (type fixnum p))
+    ;; P walks ROW-BASE+start-x*3 .. ROW-BASE+(start-x+n)*3-3; every call
+    ;; site (here and %FILL-ROW) keeps start-x+n <= +framebuffer-width+
+    ;; (384), and ROW-BASE <= 275328 via RENDER-SCANLINE's assertion, so
+    ;; P+2 never reaches (length fb).
     (dotimes (i n)
-      (setf (aref fb p)       r
-            (aref fb (+ p 1)) g
-            (aref fb (+ p 2)) b)
+      (setf (fast-aref (simple-array (unsigned-byte 8) (*)) fb p)       r
+            (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 1)) g
+            (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 2)) b)
       (incf p 3))))
 
 (defun %fill-row (fb row-base color)
@@ -310,23 +324,28 @@ implementations.)"
              (p     (+ pf-base (* cx px-per-ch 3)))
              (tx    (+ +playfield-left-border+ (* cx px-per-ch))))
         (declare (type fixnum p tx))
+        ;; n-chars*px-per-ch == +playfield-pixel-width+ (320) by
+        ;; construction (40 chars x 8px or 20 x 16px), and PF-BASE =
+        ;; ROW-BASE+96 with ROW-BASE <= 275328 (RENDER-SCANLINE's
+        ;; assertion), so P/TX only ever walk the 320 active columns:
+        ;; well inside FB's headroom and TAGS' 384 slots (TX <= 351).
         (dotimes (bx 8)
           (multiple-value-bind (r g b tag)
               (if (logbitp (- 7 bx) bits)
                   (values on-r on-g on-b on-tag)
                   (values off-r off-g off-b off-tag))
-            (setf (aref fb p)       r
-                  (aref fb (+ p 1)) g
-                  (aref fb (+ p 2)) b)
-            (when tags (setf (aref tags tx) tag))
+            (setf (fast-aref (simple-array (unsigned-byte 8) (*)) fb p)       r
+                  (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 1)) g
+                  (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 2)) b)
+            (when tags (setf (fast-aref (simple-array (unsigned-byte 8) (384)) tags tx) tag))
             (incf p 3)
             (incf tx)
             ;; Wide-char modes: each glyph bit covers 2 output pixels.
             (when wide-p
-              (setf (aref fb p)       r
-                    (aref fb (+ p 1)) g
-                    (aref fb (+ p 2)) b)
-              (when tags (setf (aref tags tx) tag))
+              (setf (fast-aref (simple-array (unsigned-byte 8) (*)) fb p)       r
+                    (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 1)) g
+                    (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 2)) b)
+              (when tags (setf (fast-aref (simple-array (unsigned-byte 8) (384)) tags tx) tag))
               (incf p 3)
               (incf tx))))))))
 
@@ -367,6 +386,10 @@ column's playfield source tag for P/M priority arbitration."
              (p        (+ pf-base (* cx 8 3)))
              (tx       (+ +playfield-left-border+ (* cx 8))))
         (declare (type fixnum p tx))
+        ;; 40 chars x 8 columns == +playfield-pixel-width+ (320) by
+        ;; construction, and PF-BASE = ROW-BASE+96 with ROW-BASE <= 275328
+        ;; (RENDER-SCANLINE's assertion), so P/TX stay inside FB's
+        ;; headroom and TAGS' 384 slots (TX <= 351) throughout.
         (dotimes (px 4)
           (multiple-value-bind (color tag)
               (case (ldb (byte 2 (- 6 (* px 2))) bits)
@@ -379,10 +402,10 @@ column's playfield source tag for P/M priority arbitration."
                   (b (atari-color->b color)))
               ;; Each 2-bit pixel covers 2 output columns.
               (dotimes (rep 2)
-                (setf (aref fb p)       r
-                      (aref fb (+ p 1)) g
-                      (aref fb (+ p 2)) b)
-                (when tags (setf (aref tags tx) tag))
+                (setf (fast-aref (simple-array (unsigned-byte 8) (*)) fb p)       r
+                      (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 1)) g
+                      (fast-aref (simple-array (unsigned-byte 8) (*)) fb (+ p 2)) b)
+                (when tags (setf (fast-aref (simple-array (unsigned-byte 8) (384)) tags tx) tag))
                 (incf p 3)
                 (incf tx)))))))))
 
@@ -435,8 +458,11 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
                      (out-x (+ (* bx 8) bit))
                      (p     (+ pf-base (* out-x 3))))
                 (%write-rgb fb p color)
+                ;; bx<40, bit<8 => out-x <= 319 == +playfield-pixel-width+-1,
+                ;; so the tags index stays <= 351 of TAGS' 384 slots.
                 (when tags
-                  (setf (aref tags (+ +playfield-left-border+ out-x))
+                  (setf (fast-aref (simple-array (unsigned-byte 8) (384))
+                                    tags (+ +playfield-left-border+ out-x))
                         (if (zerop v) +tag-bak+ +tag-pf2+)))))))
         ;; Modes 8-E: generic scaled decode from the shared byte table.
         (let* ((nbytes      (bytes-per-screen-row mode))
@@ -461,10 +487,14 @@ is out of scope until the GTIA-mode work, ROADMAP.md Phase 7)."
                             (values colpf0 +tag-pf0+)))
                   (let* ((out-x (* (+ (* bx px-per-byte) px) scale))
                          (p     (+ pf-base (* out-x 3))))
+                    ;; SCALE = (truncate 320 (* nbytes px-per-byte)), so
+                    ;; (* nbytes px-per-byte scale) <= 320: out-x+dp, dp <
+                    ;; scale, never reaches 320 -- tags index stays <= 351.
                     (dotimes (dp scale)
                       (%write-rgb fb (+ p (* dp 3)) color)
                       (when tags
-                        (setf (aref tags (+ +playfield-left-border+ out-x dp))
+                        (setf (fast-aref (simple-array (unsigned-byte 8) (384))
+                                          tags (+ +playfield-left-border+ out-x dp))
                               tag))))))))))))
 
 (declaim (inline %gtia-mode10-register-offset))
@@ -540,10 +570,13 @@ priority rather than playfield priority — are NOT modelled."
                  (out-x  (* (+ (* bx 2) half) 4))
                  (p      (+ pf-base (* out-x 3))))
             (declare (type fixnum out-x p))
+            ;; bx<40, half<2 => (bx*2+half) <= 79, *4 = 316; d<4 => out-x+d
+            ;; <= 319 -- tags index stays <= 351 of TAGS' 384 slots.
             (dotimes (d 4)
               (%write-rgb fb (+ p (* d 3)) color)
               (when tags
-                (setf (aref tags (+ +playfield-left-border+ out-x d))
+                (setf (fast-aref (simple-array (unsigned-byte 8) (384))
+                                  tags (+ +playfield-left-border+ out-x d))
                       +tag-pf2+)))))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -570,8 +603,12 @@ columns."
           (dotimes (d cols-per-bit)
             (let ((x (+ x0 d)))
               (declare (type fixnum x))
+              ;; x is checked against 0<=x<384 on the line immediately
+              ;; above -- both PM-ROW accesses are in range by that guard.
               (when (and (>= x 0) (< x +framebuffer-width+))
-                (setf (aref pm-row x) (logior (aref pm-row x) chan-bit))
+                (setf (fast-aref (simple-array (unsigned-byte 8) (384)) pm-row x)
+                      (logior (fast-aref (simple-array (unsigned-byte 8) (384)) pm-row x)
+                              chan-bit))
                 (when (< x min-x) (setf min-x x))
                 (when (> x max-x) (setf max-x x))))))))
     (values min-x max-x)))
@@ -596,8 +633,10 @@ playfield 3's priority'."
           (dotimes (d cols-per-bit)
             (let ((x (+ x0 d)))
               (declare (type fixnum x))
+              ;; x is checked against 0<=x<384 on the line immediately
+              ;; above -- the TAGS access is in range by that guard.
               (when (and (>= x 0) (< x +framebuffer-width+))
-                (setf (aref tags x) +tag-pf3+)
+                (setf (fast-aref (simple-array (unsigned-byte 8) (384)) tags x) +tag-pf3+)
                 (%write-rgb fb (+ row-base (* x 3)) colpf3)))))))))
 
 (defun %render-pm-layer (fb row-base prior gtia)
@@ -684,16 +723,20 @@ beyond that check."
           (mark-player 1 grafp1)
           (mark-player 2 grafp2)
           (mark-player 3 grafp3))
-        ;; Arbitration pass over the marked extent.
+        ;; Arbitration pass over the marked extent.  MIN-X/MAX-X start at
+        ;; the out-of-range sentinels +framebuffer-width+/-1 and are only
+        ;; narrowed to in-range x (0..383) by %MARK-PM-SPAN's own clipped
+        ;; return -- so this loop body runs only for x already proven in
+        ;; range (else min-x > max-x and it never executes).
         (loop for x fixnum from min-x to max-x
-              do (let ((mask (aref pm x)))
+              do (let ((mask (fast-aref (simple-array (unsigned-byte 8) (384)) pm x)))
                    (unless (zerop mask)
                      (let* ((chan  (cond ((logtest mask #x01) 0)
                                          ((logtest mask #x02) 1)
                                          ((logtest mask #x04) 2)
                                          (t 3)))
                             (beats (aref +pm-beats-pf-masks+ srow chan)))
-                       (when (logbitp (aref tags x) beats)
+                       (when (logbitp (fast-aref (simple-array (unsigned-byte 8) (384)) tags x) beats)
                          (let ((color (aref wr (+ +w-colpm0+ chan))))
                            ;; Multicolor: overlapping P0/P1 (P2/P3) OR
                            ;; their color registers.
@@ -736,6 +779,13 @@ taken at the start of the scanline before any end-of-line advancement)."
   (declare (type (simple-array (unsigned-byte 8) (*)) fb)
            (type fixnum row)
            (type antic antic) (type gtia gtia) (type bus bus))
+  ;; FAST-AREF proof anchor (ROADMAP.md Phase 26c item 2): checked ONCE
+  ;; per scanline call, not per pixel.  Every FB/TAGS/PM-ROW write reached
+  ;; from here derives its byte offset from ROW-BASE below; this assertion
+  ;; is what makes ROW-BASE <= 275328 a fact the private helper functions
+  ;; can cite instead of re-deriving.
+  (assert (and (typep row '(integer 0 239))
+               (= (length fb) (* +framebuffer-width+ +framebuffer-height+ 3))))
   (let* ((wr      (gtia-write-regs gtia))
          (regs    (antic-registers antic))
          (colbk   (aref wr +w-colbk+))
