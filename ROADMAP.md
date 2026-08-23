@@ -332,6 +332,18 @@
 > opening `~950 vs ~3550` framing (absolute numbers drift session to
 > session; the ratio is the stable quantity). See `PERFORMANCE_LOG.md`
 > for the full per-workload profile tables and disassembly evidence.
+>
+> **Phase 19 done (2026-08-23)**: widened `+atari-rgb-palette+` from 128
+> entries indexed by `(color >> 1)` to 256 entries indexed directly by
+> the color byte, so luminance is the full 4-bit field instead of 3 bits
+> with bit 0 discarded. The Y-per-step formula (13 per luminance step,
+> base 8) was chosen so every even luminance reproduces the old table's
+> RGB exactly, keeping every existing caller (which only ever writes
+> bit-0-clear color bytes) unchanged. GTIA mode 9's 16 nibble values now
+> render 16 distinct luminances instead of collapsing into 8 pairs;
+> `GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE` is replaced by
+> `GTIA-MODE-9-RECOVERS-16-LUMINANCES`. See `CHANGES.md` for the full
+> writeup.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,

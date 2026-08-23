@@ -32,14 +32,14 @@
         (is (> r prev) "lum ~D: brightness ~D not > prev ~D" lum r prev)
         (setf prev r)))))
 
-(test palette-bit0-ignored
-  "Color #x40 and #x41 map to the same RGB (bit 0 is discarded)."
-  (is (= (atari800-cl.renderer:atari-color->r #x40)
-         (atari800-cl.renderer:atari-color->r #x41)))
-  (is (= (atari800-cl.renderer:atari-color->g #x40)
-         (atari800-cl.renderer:atari-color->g #x41)))
-  (is (= (atari800-cl.renderer:atari-color->b #x40)
-         (atari800-cl.renderer:atari-color->b #x41))))
+(test palette-bit0-selects-distinct-luminance
+  "Color #x40 and #x41 map to distinct, monotonically brighter RGB:
+bit 0 is a real luminance bit (256-entry palette, ROADMAP.md Phase 19),
+not a hardware no-op."
+  (is (not (= (atari800-cl.renderer:atari-color->r #x40)
+              (atari800-cl.renderer:atari-color->r #x41))))
+  (is (< (atari800-cl.renderer:atari-color->r #x40)
+         (atari800-cl.renderer:atari-color->r #x41))))
 
 (test palette-colored-hue-not-neutral
   "A non-zero hue produces R≠G or R≠B (is not neutral gray)."
@@ -673,19 +673,24 @@ bits, keeping COLBK's hue, and paints 4 output columns."
     (is (equal (%color-rgb #x30) (%fb-rgb fb 44))
         "byte 1's low nibble 0 must render COLBK's own luminance 0")))
 
-(test gtia-mode-9-luminance-pairs-collapse
-  "Known limitation: this project's palette is 128 entries indexed by
-(color >> 1), so mode 9's 16 nibble values collapse to 8 luminances in
-pairs.  The color BYTES are hardware-correct -- widening the palette to
-256 entries is all that is needed to recover 16 distinct shades, and
-this test is the reminder to revisit if that ever happens."
+(test gtia-mode-9-recovers-16-luminances
+  "ROADMAP.md Phase 19: the 256-entry palette gives mode 9's 16 nibble
+values 16 distinct luminances of COLBK's hue (previously nibbles
+differing only in the low bit rendered identical RGB)."
   (multiple-value-bind (bus antic gtia fb)
-      (%gtia-mode-fixture #x40 #x30 #xEF)   ; nibbles E and F
+      (%gtia-mode-fixture #x40 #x30
+                           #x01 #x23 #x45 #x67 #x89 #xAB #xCD #xEF)
     (atari800-cl.renderer:render-scanline fb 0 antic gtia bus)
-    (is (equal (%fb-rgb fb 32) (%fb-rgb fb 36))
-        "nibbles E and F differ only in color bit 0, which the palette drops")
-    (is (not (equal (%fb-rgb fb 32) (%color-rgb #x30)))
-        "...but they must still differ from luminance 0")))
+    (let ((rgbs (loop for nibble from 0 below 16
+                       collect (%fb-rgb fb (+ 32 (* nibble 4))))))
+      (is (= 16 (length (remove-duplicates rgbs :test #'equal)))
+          "expected 16 distinct RGB triples across nibbles 0-F, got ~D: ~A"
+          (length (remove-duplicates rgbs :test #'equal)) rgbs)
+      (loop for nibble from 0 below 16
+            for rgb in rgbs
+            do (is (equal (%color-rgb (logior #x30 nibble)) rgb)
+                   "nibble ~D should render color $~2,'0X" nibble
+                   (logior #x30 nibble))))))
 
 (test gtia-mode-10-nibble-selects-color-register
   "PRIOR bits 6-7 = 10 (mode 10): nibble 0-3 selects COLPM0-3, 4-7

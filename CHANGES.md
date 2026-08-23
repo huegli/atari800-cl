@@ -3,6 +3,27 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 19 -- 256-entry palette
+
+Widened `+atari-rgb-palette+` (`src/renderer.lisp`) from 128 entries
+indexed by `(color-register >> 1)` to 256 entries indexed directly by
+the color byte: hue stays bits 7-4, but luminance is now the full 4-bit
+field (bits 3-0) rather than 3 bits with bit 0 discarded. `ATARI-COLOR->R/G/B`
+index the table directly (`(* c 3)`, no more `ash -1`). The Y-per-luminance
+step changed from 26 (8 steps, 8-190) to 13 (16 steps, 8-203), chosen so
+every even luminance value reproduces the old table's RGB exactly --
+normal color-register writes always clear bit 0, so this is a pure
+extension for every existing caller.
+
+GTIA color mode 9 writes a full 4-bit nibble into COLBK's low bits per
+pixel (`%RENDER-GTIA-MODE`, `src/renderer.lisp`); with the 128-entry
+table this collapsed the mode's 16 luminances into 8 pairs
+(`GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE`, since removed). That test is
+now `GTIA-MODE-9-RECOVERS-16-LUMINANCES`, asserting all 16 nibble values
+render distinct RGB. `PALETTE-BIT0-IGNORED` is now
+`PALETTE-BIT0-SELECTS-DISTINCT-LUMINANCE`, asserting the opposite of its
+old name. 2488 checks pass on both SBCL and LispWorks.
+
 ## ROADMAP Phase 18 / PERFORMANCE_PLAN Phase 4 -- LispWorks profiling pass
 
 Profiled LispWorks first, then SBCL, on the `nop`/`irq`/`display`/`audio`

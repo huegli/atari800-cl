@@ -87,12 +87,17 @@ and does not attempt that generality.
 ;;; ---------------------------------------------------------------------------
 ;;; Atari NTSC color palette
 ;;;
-;;; The Atari color register uses 7 significant bits:
+;;; The Atari color register uses all 8 bits of the color byte:
 ;;;   bits 7-4 (4 bits): hue  (0 = grayscale; 1-15 = equally-spaced hues)
-;;;   bits 3-1 (3 bits): luminance (0-7, low to high brightness)
-;;;   bit  0   (1 bit):  ignored (always 0 in hardware writes)
+;;;   bits 3-0 (4 bits): luminance (0-15, low to high brightness)
 ;;;
-;;; The palette is indexed by (ash color-register -1), giving 128 entries.
+;;; Software conventionally writes color registers with bit 0 clear (8
+;;; luminance steps), but GTIA color mode 9 (see %RENDER-GTIA-MODE) feeds
+;;; the DAC a full 4-bit luminance nibble per pixel, and the DAC does not
+;;; distinguish that path from a normal color-register write -- so bit 0
+;;; is a real luminance bit, not a hardware no-op (ROADMAP.md Phase 19).
+;;;
+;;; The palette is indexed directly by the color byte, giving 256 entries.
 ;;; Each entry occupies 3 consecutive bytes (R, G, B).
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -103,14 +108,17 @@ and does not attempt that generality.
       (cond ((< i 0) 0) ((> i 255) 255) (t i))))
 
   (defun %build-atari-palette ()
-    "Compute the 128-entry 384-byte Atari NTSC palette using YIQ conversion.
-Luminance 0-7 maps Y linearly from 8 to 190.  Saturation constant = 0.28.
-Hue angles start near orange-red (offset 0.4 radians) and step by 2π/15."
-    (let ((tbl (make-array 384 :element-type '(unsigned-byte 8) :initial-element 0)))
-      (dotimes (i 128)
-        (let* ((lum  (ldb (byte 3 0) i))
-               (hue  (ldb (byte 4 3) i))
-               (y    (float (+ (* lum 26) 8)))
+    "Compute the 256-entry 768-byte Atari NTSC palette using YIQ conversion.
+Luminance 0-15 maps Y linearly from 8 to 203 (13 per step), chosen so
+every even luminance (bit 0 clear, the only values normal color-register
+writes produce) reproduces the previous 8-luminance table's Y exactly.
+Saturation constant = 0.28.  Hue angles start near orange-red (offset 0.4
+radians) and step by 2π/15."
+    (let ((tbl (make-array 768 :element-type '(unsigned-byte 8) :initial-element 0)))
+      (dotimes (i 256)
+        (let* ((lum  (ldb (byte 4 0) i))
+               (hue  (ldb (byte 4 4) i))
+               (y    (float (+ (* lum 13) 8)))
                (base (* i 3)))
           (cond
             ((zerop hue)
@@ -134,25 +142,25 @@ Hue angles start near orange-red (offset 0.4 radians) and step by 2π/15."
       tbl))
 
   (defparameter +atari-rgb-palette+ (%build-atari-palette)
-    "384-byte vector: 128 Atari NTSC color entries in R, G, B order.
-Index with (* (ash color-register -1) 3)."))
+    "768-byte vector: 256 Atari NTSC color entries in R, G, B order.
+Index with (* color-register 3)."))
 
 (declaim (inline atari-color->r atari-color->g atari-color->b))
 
 (defun atari-color->r (c)
   "Return the red component (0-255) for Atari color byte C."
   (declare (type (unsigned-byte 8) c))
-  (aref +atari-rgb-palette+ (* (ash c -1) 3)))
+  (aref +atari-rgb-palette+ (* c 3)))
 
 (defun atari-color->g (c)
   "Return the green component (0-255) for Atari color byte C."
   (declare (type (unsigned-byte 8) c))
-  (aref +atari-rgb-palette+ (+ (* (ash c -1) 3) 1)))
+  (aref +atari-rgb-palette+ (+ (* c 3) 1)))
 
 (defun atari-color->b (c)
   "Return the blue component (0-255) for Atari color byte C."
   (declare (type (unsigned-byte 8) c))
-  (aref +atari-rgb-palette+ (+ (* (ash c -1) 3) 2)))
+  (aref +atari-rgb-palette+ (+ (* c 3) 2)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framebuffer pixel helpers
@@ -492,15 +500,9 @@ each nibble is one wide pixel — 4 output columns at this renderer's
 
 Nibble → color byte:
   Mode 9:  (COLBK & $F0) | nibble — the nibble replaces COLBK's
-           luminance bits, keeping its hue.  NOTE: this project's
-           palette is 128 entries indexed by (color >> 1), i.e. color
-           bit 0 is ignored (see ATARI-COLOR->R and the deliberate
-           PALETTE-BIT0-IGNORED test), so the 16 nibble values collapse
-           to 8 distinct luminances in pairs.  The color BYTE produced
-           here is hardware-correct; widening the palette to 256
-           entries would recover all 16 shades and is the only change
-           needed (GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE pins the
-           current behaviour).
+           luminance bits, keeping its hue.  The 256-entry palette
+           (ROADMAP.md Phase 19) gives all 16 nibble values distinct
+           luminances (see GTIA-MODE-9-RECOVERS-16-LUMINANCES).
   Mode 10: the nibble selects a color REGISTER via
            %GTIA-MODE10-REGISTER-OFFSET — 0-3 → COLPM0-3, 4-7 →
            COLPF0-3, 8-11 → COLBK, and (a hardware quirk, not a clamp)
