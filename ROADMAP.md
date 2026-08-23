@@ -344,6 +344,15 @@
 > `GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE` is replaced by
 > `GTIA-MODE-9-RECOVERS-16-LUMINANCES`. See `CHANGES.md` for the full
 > writeup.
+>
+> **Phase 20 done (2026-08-23)**: documentation only, per
+> `MISC_IMPROVEMENTS_PLAN.md` item 10. Added an honest comment block in
+> `src/antic.lisp` at the VBI re-latch (`%BEGIN-SCANLINE-EVENTS`) and the
+> DLISTL/DLISTH write cases (`ANTIC-WRITE`) describing how this
+> emulator's re-latch-every-VBI model diverges from hardware's
+> JVB-gated latch, cross-referencing `SCANLINE_ACCURACY_PLAN.md` Phase 4+
+> where changing the behaviour belongs and `ACID800-ANTIC-DLISTWRAP` as
+> the test that already exercises the divergence. No behavioural change.
 
 A complete, ordered execution plan covering the four open work streams:
 scanline accuracy (WSYNC, DMA stealing), renderer fidelity (P/M DMA,

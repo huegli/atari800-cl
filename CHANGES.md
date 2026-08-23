@@ -3,6 +3,22 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 20 -- ANTIC display-list latch note
+
+Documentation only (`MISC_IMPROVEMENTS_PLAN.md` item 10). Added a
+comment block in `src/antic.lisp` at the two places this emulator's
+display-list latch model diverges from hardware: the VBI re-latch in
+`%BEGIN-SCANLINE-EVENTS`, which unconditionally reloads the live DL
+pointer from DLISTL/DLISTH every VBI, and the DLISTL/DLISTH write cases
+in `ANTIC-WRITE`, which apply a write directly to the live DL pointer
+instead of only the shadow latch. Real ANTIC's DLISTL/H are a plain
+latch -- the live DL program counter reloads only when a JVB
+instruction's wait is released at VBLANK. Both comments cross-reference
+each other, `ACID800-ANTIC-DLISTWRAP` (which already exercises this as
+a documented failure), and `SCANLINE_ACCURACY_PLAN.md` Phase 4+ as
+where a true JVB-gated latch belongs. No behavioural change; 2513
+checks pass on both SBCL and LispWorks.
+
 ## ROADMAP Phase 19 -- 256-entry palette
 
 Widened `+atari-rgb-palette+` (`src/renderer.lisp`) from 128 entries

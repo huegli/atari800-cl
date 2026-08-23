@@ -454,6 +454,22 @@ stolen this line."
     (when (logtest (antic-nmien antic) +nmi-vbi+)
       (%raise-nmi antic))
     ;; A JVB instruction parks ANTIC until VBLANK; we release it now.
+    ;;
+    ;; SIMPLIFICATION (ROADMAP.md Phase 20, MISC_IMPROVEMENTS_PLAN.md item
+    ;; 10): real ANTIC's DLISTL/DLISTH are a plain latch -- the DL program
+    ;; counter is loaded from them only when a JVB (JMP with bit 6 set)
+    ;; instruction is executed and VBLANK arrives, not on every VBI. This
+    ;; emulator instead re-latches the DL pointer from DLISTL/DLISTH
+    ;; unconditionally on every VBI, whether or not a JVB was pending (see
+    ;; the DLISTL/DLISTH write cases in ANTIC-WRITE below for the other
+    ;; half of the same simplification). This is behaviourally
+    ;; indistinguishable for OS-standard display lists, which always end
+    ;; in JVB and so re-latch to the same address either way, but diverges
+    ;; from hardware for a list that never reaches its own JVB before
+    ;; VBLANK (e.g. one rewritten mid-frame without a terminating JVB) --
+    ;; ACID800-ANTIC-DLISTWRAP exercises exactly this and is a documented,
+    ;; not accidental, failure. Changing the behaviour to a true
+    ;; JVB-gated latch belongs with SCANLINE_ACCURACY_PLAN.md Phase 4+.
     (setf (antic-jvb-wait antic) nil
           (antic-mode-scanlines-remaining antic) 0
           ;; Re-latch DL pointer from the shadow registers.
@@ -637,6 +653,17 @@ register file."
     (setf (aref (antic-registers antic) offset) v)
     (case offset
       (#.+reg-dmactl+ (setf (antic-dmactl antic) v))
+      ;; SIMPLIFICATION (ROADMAP.md Phase 20, MISC_IMPROVEMENTS_PLAN.md
+      ;; item 10): on hardware, writing DLISTL/DLISTH only updates the
+      ;; shadow latch -- ANTIC's live DL pointer is unaffected until the
+      ;; next JVB-gated re-latch at VBLANK (see %BEGIN-SCANLINE-EVENTS
+      ;; above). This emulator instead applies the write directly to the
+      ;; live DL pointer (and resets the mid-list offset), so a DLISTL/H
+      ;; write takes effect immediately rather than waiting for VBLANK.
+      ;; Indistinguishable from hardware for the OS-standard pattern of
+      ;; writing DLISTL/H only during VBLANK setup; diverges for a
+      ;; mid-frame rewrite. See the VBI comment above for the
+      ;; cross-reference to SCANLINE_ACCURACY_PLAN.md Phase 4+.
       (#.+reg-dlistl+ (setf (antic-dlist-pointer antic)
                             (dpb v (byte 8 0) (antic-dlist-pointer antic))
                             (antic-dl-offset antic) 0
