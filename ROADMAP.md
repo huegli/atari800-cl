@@ -1246,6 +1246,19 @@ array accesses.
 
 ## Phase 19 -- 256-entry palette
 
+> **Done (2026-08-23)**: widened `+atari-rgb-palette+` from 128 entries
+> indexed by `(color >> 1)` to 256 entries indexed directly by the color
+> byte, so luminance is the full 4-bit field (bits 3-0) instead of 3
+> bits with bit 0 discarded. The Y-per-step formula (13 per luminance
+> step, base 8) was chosen so every even luminance reproduces the old
+> table's RGB exactly, keeping every existing caller (which only ever
+> writes bit-0-clear color bytes) unchanged. GTIA mode 9's 16 nibble
+> values now render 16 distinct luminances instead of collapsing into 8
+> pairs; `GTIA-MODE-9-LUMINANCE-PAIRS-COLLAPSE` is replaced by
+> `GTIA-MODE-9-RECOVERS-16-LUMINANCES`, and `PALETTE-BIT0-IGNORED` is
+> replaced by `PALETTE-BIT0-SELECTS-DISTINCT-LUMINANCE`. See
+> `CHANGES.md` for the full writeup.
+
 Phase 7 pinned a limitation by test: the 128-entry palette collapses
 GTIA mode 9's 16 luminances into 8 pairs. The color bytes the renderer
 computes are already hardware-correct, so this is a palette-table
@@ -1260,6 +1273,16 @@ Commit: "Renderer: 256-entry palette recovers mode 9's 16 luminances".
 ---
 
 ## Phase 20 -- ANTIC display-list latch note
+
+> **Done (2026-08-23)**: documentation only, per
+> `MISC_IMPROVEMENTS_PLAN.md` item 10. Added an honest comment block in
+> `src/antic.lisp` at the VBI re-latch (`%BEGIN-SCANLINE-EVENTS`) and the
+> DLISTL/DLISTH write cases (`ANTIC-WRITE`) describing how this
+> emulator's re-latch-every-VBI model diverges from hardware's
+> JVB-gated latch, cross-referencing `SCANLINE_ACCURACY_PLAN.md` Phase
+> 4+ where changing the behaviour belongs and `ACID800-ANTIC-DLISTWRAP`
+> as the test that already exercises the divergence. No behavioural
+> change; 2513 checks pass on both SBCL and LispWorks.
 
 `MISC_IMPROVEMENTS_PLAN.md` item 10, unchanged: an honest comment block
 in `src/antic.lisp` at the VBI re-latch and the DLISTL/H write cases,
