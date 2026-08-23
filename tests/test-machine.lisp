@@ -954,6 +954,218 @@ edventure.obx's own segment headers say it occupies)."
                      (atari800-cl.cpu:cpu-pc (atari800-cl.machine:atari-machine-cpu m))
                      (atari800-cl.cpu:cpu-halted (atari800-cl.machine:atari-machine-cpu m))))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Machine-level lockstep equivalence harness (ROADMAP.md Phase 30, stage
+;;; 30c) -- proves two ATARI-MACHINE instances stay in identical observable
+;;; states frame-by-frame.  Written against CURRENT main, where the Phase 30
+;;; deferred-POKEY-advance feature does not exist yet: %RUN-MACHINES-IN-
+;;; LOCKSTEP takes both machines as ARGUMENTS rather than building them, so
+;;; it needs no deferral-specific symbol and stays useful (and green) right
+;;; now.  Phase 30's close-out instantiates the actual equivalence test by
+;;; building one machine with the deferral debug switch forced on and
+;;; comparing it against a default (deferral off) machine -- see the
+;;; MACHINE-LOCKSTEP-DEFER-ON-VS-OFF comment below.
+;;;
+;;; What the comparator covers: the complete POKEY struct (every scalar and
+;;; array slot bearing observable state -- see %POKEY-STATE-PLIST), CPU
+;;; registers/flags/cycle count and both interrupt lines (%CPU-STATE-PLIST),
+;;; and a checksum over the full 64K RAM array.  What it deliberately does
+;;; NOT cover: ANTIC/GTIA/PIA internal state and the pixel framebuffer.
+;;; Phase 30's deferral is entirely internal to POKEY-ADVANCE's call
+;;; pattern (ROADMAP.md states the batching is EXACT -- POKEY-ADVANCE by A
+;;; then by B is bit-identical to one advance by A+B), so any divergence it
+;;; could possibly introduce shows up in POKEY's own state, in the CPU
+;;; (mistimed/missed IRQ moves PC and flags), or in RAM (any interrupt
+;;; handler's or register-readback's side effect eventually lands there).
+;;; Comparing the other chips would add cost without adding confidence.
+
+(defun %pokey-state-plist (pokey)
+  "Capture the complete observable state of POKEY as a plist, for use by
+%MACHINES-STATE-EQUAL-P.  Hand-enumerated rather than derived by
+reflection: this project has no CLOS-MOP dependency (adding one just for
+this harness felt like the wrong tradeoff), and reader conditionals -- the
+usual way to reach for an implementation-specific reflection API like
+SB-MOP -- are banned everywhere outside src/compat.lisp (CLAUDE.md), so a
+portable structure-slot walk is not available without one.
+
+IMPORTANT: when a new slot is added to the POKEY struct (src/pokey.lisp),
+add it here too, or this harness will silently stop covering it.
+
+Excluded on purpose (wiring/back-pointers, not chip state): AUDIO,
+AUDIO-ADVANCE-FN, AUDIO-UNDERFLOW-FN (the optional audio-unit attachment
+and its closures -- comparing closure identity between two independently
+built machines is meaningless, and no bench/test workload here attaches
+audio), CPU (POKEY's back-pointer to its owning CPU, already covered
+directly via %CPU-STATE-PLIST), and INPUT (the optional host INPUT-STATE
+attachment -- not attached by MAKE-TEST-MACHINE / MAKE-ATARI-MACHINE).
+
+Calls the internal %SYNC-RNG first (on POKEY itself -- a harmless,
+idempotent catch-up: it is exactly what POKEY-RANDOM does before every
+read, and the LFSR steps it performs are a pure function of elapsed
+cycles, not of when they happen to be applied) so POLY17-STATE /
+POLY9-STATE are always exact and RNG-LAG always reads back 0, rather than
+comparing two machines that merely have the same amount of un-applied lag."
+  (atari800-cl.pokey::%sync-rng pokey)
+  (list :audf                (copy-seq (atari800-cl.pokey:pokey-audf pokey))
+        :audc                (copy-seq (atari800-cl.pokey:pokey-audc pokey))
+        :audctl              (atari800-cl.pokey:pokey-audctl pokey)
+        :skctl               (atari800-cl.pokey:pokey-skctl pokey)
+        :irqen               (atari800-cl.pokey:pokey-irqen pokey)
+        :irqst               (atari800-cl.pokey:pokey-irqst pokey)
+        :skstat              (atari800-cl.pokey::pokey-skstat pokey)
+        :kbcode              (atari800-cl.pokey:pokey-kbcode pokey)
+        :timer-counts        (copy-seq (atari800-cl.pokey:pokey-timer-counts pokey))
+        :sub-counters        (copy-seq (atari800-cl.pokey:pokey-sub-counters pokey))
+        :poly17-state        (atari800-cl.pokey:pokey-poly17-state pokey)
+        :poly9-state         (atari800-cl.pokey:pokey-poly9-state pokey)
+        :rng-lag             (atari800-cl.pokey::pokey-rng-lag pokey)
+        :pending             (atari800-cl.pokey:pokey-pending pokey)
+        :serial-out-shift    (atari800-cl.pokey:pokey-serial-out-shift pokey)
+        :serial-out-holding  (atari800-cl.pokey:pokey-serial-out-holding pokey)
+        :serial-out-cycles   (atari800-cl.pokey:pokey-serial-out-cycles pokey)))
+
+(defun %cpu-state-plist (cpu)
+  "Capture CPU's observable register file, cycle count, halted flag, and
+both interrupt lines as a plist, for use by %MACHINES-STATE-EQUAL-P."
+  (list :a            (cpu-a cpu)
+        :x            (cpu-x cpu)
+        :y            (cpu-y cpu)
+        :sp           (cpu-sp cpu)
+        :pc           (cpu-pc cpu)
+        :flags        (cpu-flags cpu)
+        :cycles       (cpu-cycles cpu)
+        :halted       (cpu-halted cpu)
+        :pending-irq  (cpu-pending-irq cpu)
+        :pending-nmi  (cpu-pending-nmi cpu)))
+
+(defun %ram-checksum (bus)
+  "A cheap order-sensitive checksum over BUS's full RAM array (Horner's
+method, mod 2^32) -- good enough to catch any single-byte divergence
+without pulling in a hashing dependency or relying on SXHASH producing
+the same digest across implementations (irrelevant here anyway, since
+both machines being compared always run under the same implementation
+within one test process, but avoiding SXHASH sidesteps the question)."
+  (let ((ram (atari800-cl.bus:bus-ram bus))
+        (sum 0))
+    (loop for byte across ram
+          do (setf sum (logand (+ (* sum 31) byte) #xFFFFFFFF)))
+    sum))
+
+(defun %machines-state-equal-p (m1 m2)
+  "Compare the complete observable state of two ATARI-MACHINE instances:
+POKEY (%POKEY-STATE-PLIST), CPU (%CPU-STATE-PLIST), and a RAM checksum
+(%RAM-CHECKSUM).  Returns T when everything matches.  On the first
+mismatch, returns (VALUES NIL DESCRIPTION) where DESCRIPTION names the
+differing key and both values, so a lockstep test failure is debuggable
+instead of an opaque NIL."
+  (let* ((pa (%pokey-state-plist (atari800-cl.machine:atari-machine-pokey m1)))
+         (pb (%pokey-state-plist (atari800-cl.machine:atari-machine-pokey m2)))
+         (ca (%cpu-state-plist   (atari800-cl.machine:atari-machine-cpu m1)))
+         (cb (%cpu-state-plist   (atari800-cl.machine:atari-machine-cpu m2)))
+         (ra (%ram-checksum      (atari800-cl.machine:atari-machine-bus m1)))
+         (rb (%ram-checksum      (atari800-cl.machine:atari-machine-bus m2))))
+    (loop for (key va) on pa by #'cddr
+          for vb = (getf pb key)
+          unless (equalp va vb)
+            do (return-from %machines-state-equal-p
+                 (values nil (format nil "POKEY ~S differs: ~S vs ~S" key va vb))))
+    (loop for (key va) on ca by #'cddr
+          for vb = (getf cb key)
+          unless (equalp va vb)
+            do (return-from %machines-state-equal-p
+                 (values nil (format nil "CPU ~S differs: ~S vs ~S" key va vb))))
+    (unless (= ra rb)
+      (return-from %machines-state-equal-p
+        (values nil (format nil "RAM checksum differs: ~D vs ~D" ra rb))))
+    (values t nil)))
+
+(defun %run-machines-in-lockstep (ma mb frames &key per-frame-fn)
+  "Run MA and MB -- two already-constructed ATARI-MACHINE instances -- for
+FRAMES frames apiece, asserting %MACHINES-STATE-EQUAL-P (via FiveAM IS,
+so the failing frame index and the differing key/values both land in the
+failure message) after every single frame.
+
+MA and MB are taken as ARGUMENTS rather than built inside this function:
+that is the whole point.  Callers build the two machines however they
+like BEFORE calling this -- identically, for a no-false-positives self
+check, or (Phase 30's eventual close-out) one with the deferral debug
+switch forced on and one left at its default, to prove deferral is
+observably a no-op.  This function never needs to know which.
+
+PER-FRAME-FN, when supplied, is called as (FUNCALL PER-FRAME-FN MA MB
+FRAME-INDEX) immediately BEFORE that frame's two MACHINE-RUN-FRAME calls,
+so a caller can apply identical mid-run stimuli (e.g. POKEY register
+pokes through the bus) to both machines in lockstep."
+  (dotimes (frame frames)
+    (when per-frame-fn (funcall per-frame-fn ma mb frame))
+    (atari800-cl.machine:machine-run-frame ma)
+    (atari800-cl.machine:machine-run-frame mb)
+    (multiple-value-bind (equal-p description) (%machines-state-equal-p ma mb)
+      (is-true equal-p "lockstep divergence at frame ~D: ~A" frame description))))
+
+(test machine-lockstep-self-check
+  "Two identically-built machines, ~60 frames, no stimuli: pins that
+MAKE-ATARI-MACHINE / MACHINE-COLD-RESET / MACHINE-RUN-FRAME are
+deterministic and that the lockstep harness itself has no false
+positives -- the baseline every deferral-vs-non-deferral comparison will
+be built on."
+  (let ((ma (make-test-machine))
+        (mb (make-test-machine)))
+    (%run-machines-in-lockstep ma mb 60)))
+
+(test machine-lockstep-with-pokey-stimuli
+  "Same harness, but with identical mid-run POKEY pokes applied through the
+bus on both machines: AUDF1-4/AUDC1-4, AUDCTL (channel 1 at 1.79 MHz),
+STIMER, IRQEN (enabling then disabling the timer-1 IRQ), and SKCTL.  An
+IRQ handler is installed and the CPU's I flag is unmasked on both
+machines identically, so the timer-1 IRQ this poke sequence triggers is
+actually serviced -- exercising the comparator across real POKEY and CPU
+state changes, not just idle register writes.  IRQEN is turned back off
+a few frames after being enabled (frame 6, vs. enabled at frame 2) so the
+run stays a bounded, deterministic number of interrupt services rather
+than free-running for the rest of the test."
+  (flet ((build-os ()
+           (let ((rom (%make-synthetic-os-rom :reset-pc #xC000 :irq-pc #xFE10)))
+             ;; Main program at $C000: JMP $C000 -- a tight loop, so PC
+             ;; never marches down the NOP filler into the handler bytes.
+             (%poke rom #x0000 #x4C)
+             (%poke rom #x0001 #x00)
+             (%poke rom #x0002 #xC0)
+             ;; IRQ handler at $FE10 (ROM offset $3E10): INC $81, RTI.
+             (%poke rom #x3E10 #xE6)
+             (%poke rom #x3E11 #x81)
+             (%poke rom #x3E12 #x40)
+             rom))
+         (poke-both (ma mb addr value)
+           (atari800-cl.bus:bus-write (atari800-cl.machine:atari-machine-bus ma) addr value)
+           (atari800-cl.bus:bus-write (atari800-cl.machine:atari-machine-bus mb) addr value)))
+    (let ((ma (make-test-machine :os-rom (build-os)))
+          (mb (make-test-machine :os-rom (build-os))))
+      ;; Cold reset leaves I=1 on both; unmask IRQs identically so the
+      ;; timer-1 IRQ triggered below is actually serviced on each side.
+      (atari800-cl.cpu:clear-flag (atari800-cl.machine:atari-machine-cpu ma)
+                                   atari800-cl.cpu:+flag-i+)
+      (atari800-cl.cpu:clear-flag (atari800-cl.machine:atari-machine-cpu mb)
+                                   atari800-cl.cpu:+flag-i+)
+      (%run-machines-in-lockstep
+       ma mb 40
+       :per-frame-fn
+       (lambda (ma mb frame)
+         (case frame
+           (2  (poke-both ma mb #xD200 30)     ; AUDF1
+               (poke-both ma mb #xD201 #xA0)   ; AUDC1 (volume only, no distortion)
+               (poke-both ma mb #xD202 60)     ; AUDF2
+               (poke-both ma mb #xD203 #x00)   ; AUDC2
+               (poke-both ma mb #xD204 10)     ; AUDF3
+               (poke-both ma mb #xD205 #x00)   ; AUDC3
+               (poke-both ma mb #xD206 200)    ; AUDF4
+               (poke-both ma mb #xD207 #x00)   ; AUDC4
+               (poke-both ma mb #xD208 #x40)   ; AUDCTL: channel 1 at 1.79 MHz
+               (poke-both ma mb #xD209 0)      ; STIMER: reload all timer counters
+               (poke-both ma mb #xD20E #x01))  ; IRQEN: timer 1 only
+           (6  (poke-both ma mb #xD20E #x00))  ; IRQEN: disable -- stay deterministic
+           (10 (poke-both ma mb #xD20F #x20)))))))) ; SKCTL: transmit-mode bit (register only)
+
 (test hostdev-load-xex-boots-minimal-xl-and-reaches-edventure
   "Acceptance test for ROADMAP.md Phase 16 (revised), the LOAD-XEX half:
 minimal-xl's OS ROM reaches the same game state loading straight from
