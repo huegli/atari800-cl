@@ -8,7 +8,7 @@
 ;;;; approach as tests/test-helpers.lisp::%make-synthetic-os-rom, but
 ;;;; inlined here so the bench does not depend on the test system.
 ;;;;
-;;;; Four workloads:
+;;;; Six workloads:
 ;;;;   NOP     — a NOP sled that loops back via a JMP at $FFF9, so the PC
 ;;;;             marches NOPs from $C000 to $FFF9 forever without running
 ;;;;             into the vector bytes.  Baseline CPU/memory path.
@@ -29,6 +29,12 @@
 ;;;;             client would.  The other workloads all run with audio
 ;;;;             DETACHED, so the pair of rows shows both that the
 ;;;;             no-audio path stays free and what synthesis costs.
+;;;;   IDLE    — a single JMP-to-self at reset (no NOP sled -- the PC
+;;;;             just re-fetches the same three bytes forever) with the
+;;;;             DISPLAY workload's static 24-line mode-2 screen and
+;;;;             renderer attached.  The canonical parked-machine load:
+;;;;             spin loop + unchanging screen, e.g. a real OS sitting at
+;;;;             the BASIC READY prompt.
 ;;;;   KLAUS   — Klaus Dormann 6502 functional test binary loaded into
 ;;;;             RAM at $0000, run until the success trap at $3469.
 ;;;;             Skips gracefully if roms/6502_functional_test.bin is absent.
@@ -186,6 +192,25 @@ Timer 1 period ~ 50 * 28 = 1400 cycles, so IRQs fire roughly every
      :reset-pc #xC000
      :nmi-pc   #xFE00
      :irq-pc   #xFE00)))
+
+(defun make-idle-rom ()
+  "Idle/parked-machine workload ROM.  Reset at $C000 is a single
+JMP $C000 (opcode $4C targeting its own address): the PC re-fetches the
+same three bytes forever, touching no other memory -- the canonical
+parked-machine CPU load, e.g. a real OS sitting at the BASIC READY
+prompt.  NMI/IRQ vectors point at $FE00, a bare RTI stub; nothing in
+this workload enables interrupts, so the stub is never actually
+reached, but a vector pointing at real RTI code (rather than relying on
+the ROM's NOP fill) is what a parked machine's reset/interrupt table
+looks like."
+  (%make-rom
+   (list (cons #xC000 #x4C)
+         (cons #xC001 (logand #xC000 #xFF))
+         (cons #xC002 (logand (ash #xC000 -8) #xFF))
+         (cons #xFE00 #x40))                 ; RTI
+   :reset-pc #xC000
+   :nmi-pc   #xFE00
+   :irq-pc   #xFE00))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Display workload setup
@@ -380,12 +405,14 @@ Returns the printed line as a string."
         (force-output *standard-output*)
         line))))
 
-(defun run-benchmarks (&key (workloads '(:nop :irq :display :audio :klaus)))
+(defun run-benchmarks (&key (workloads '(:nop :irq :display :audio :idle :klaus)))
   "Run every workload named in WORKLOADS (default :nop, :irq, :display,
-:audio, :klaus) and print one BENCH line per workload.  The :klaus
-workload skips gracefully if the functional test binary is not found.
-Returns a list of the printed lines (NIL entries for skipped workloads
-are removed)."
+:audio, :idle, :klaus) and print one BENCH line per workload.  The
+:idle workload is a JMP-self spin loop with the :display workload's
+static screen attached (the canonical parked-machine load).  The
+:klaus workload skips gracefully if the functional test binary is not
+found.  Returns a list of the printed lines (NIL entries for skipped
+workloads are removed)."
   (let ((roms (list (cons :nop (make-nop-rom))
                     (cons :irq (make-irq-rom))))
         (lines '()))
@@ -402,6 +429,10 @@ are removed)."
         ((eq w :audio)
          (push (run-workload "audio" (make-nop-rom)
                              :setup-fn #'%setup-audio-workload)
+               lines))
+        ((eq w :idle)
+         (push (run-workload "idle" (make-idle-rom)
+                             :setup-fn #'%setup-display-workload)
                lines))
         (t
          (let ((rom (cdr (assoc w roms))))
