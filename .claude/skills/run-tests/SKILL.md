@@ -49,6 +49,34 @@ Without the ROMs or vectors present, strict mode fails exactly those tests
 by design -- it is meant to be run only once you believe the assets are in
 place, not as the default CI posture.
 
+**Checked-build audit (ROADMAP.md Phase 26).** `src/compat.lisp`'s
+`FAST-AREF` macro is the one place `(safety 0)` is allowed in this
+tree: a scoped LispWorks-only array-access fast path used at a small,
+proof-commented set of hot call sites in `src/pokey.lisp` and
+`src/renderer.lisp`. Setting `ATARI800_CL_CHECKED_AREF` to any
+non-empty value at compile time forces `FAST-AREF`'s LispWorks
+expansion back to the fully-checked SBCL form (`(aref (the type array)
+index)`) at every one of those call sites -- the audit build that
+proves the carve-out has not silently corrupted anything the ordinary
+unchecked build's tests wouldn't catch:
+```sh
+ATARI800_CL_CHECKED_AREF=1 ./scripts/test-lispworks.sh
+```
+Because the checked/unchecked choice is baked into the fasl at
+macroexpansion time, ASDF's timestamp-based recompilation will not by
+itself notice the env var changing between runs -- a checked run
+launched right after an ordinary run could silently reuse stale
+unchecked fasls otherwise. `scripts/test-lispworks.lisp` (and, for
+symmetry, `scripts/test-sbcl.sh`, where the var is a no-op since SBCL's
+`FAST-AREF` expansion never varies) routes `ATARI800_CL_CHECKED_AREF`
+runs to a separate `.cache/fasls-checked/` ASDF output-translation
+directory instead of the ordinary `.cache/fasls/`, guaranteeing a
+from-scratch recompile under the checked expansion every time and
+never conflating the two caches. This is only an audit tool, not the
+default posture -- SBCL is fully checked unconditionally on every run
+regardless of this variable, and the ordinary (unchecked) LispWorks
+build is what `./scripts/test-lispworks.sh` runs without it.
+
 > **Exit-code gotcha:** `asdf:test-system` returns `T` even when tests
 > *fail*, so it is useless for shell/CI exit codes. Always key the exit
 > status off `fiveam:run!`, which returns `T` only when every check

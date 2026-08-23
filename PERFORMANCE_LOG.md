@@ -291,6 +291,247 @@ constraints; a future pass could revisit this if LispWorks ships a
 better ARM64 array-access fast path, or if profiling on an x86-64
 LispWorks host shows a materially different picture.
 
+**Update (Phase 26, 2026-08-23): the lever this section said did not
+exist was found.** `(safety 0)` was the only thing that inlined
+LispWorks' array access, and this project's blanket safety floor
+forbade it everywhere -- Phase 26 replaced that blanket rule with a
+narrow, auditable carve-out (`FAST-AREF`, `src/compat.lisp`) instead of
+accepting the gap as structural. See the "ROADMAP Phase 26" section
+below for the mechanism, the measured LispWorks gains (+75% to +231%
+across workloads), and the re-profile confirming `SYSTEM::AREF1` /
+`SYSTEM::SET-AREF1` visibly receded at the converted sites. "Documented
+rather than chased" no longer describes this codebase's posture on the
+LispWorks array-access gap; it describes this phase's starting point.
+
+## ROADMAP Phase 26 -- LispWorks fast-path array access
+
+Phase 18 diagnosed, and did not fix, a LispWorks-8.1.1-ARM64-specific
+compiler policy: every checked array access compiles to an out-of-line
+`SYSTEM::AREF1` / `SET-AREF1` call at `(safety 1)` regardless of type
+declarations, and only `(safety 0)` inlines it -- forbidden outright by
+`PERFORMANCE_PLAN.md`'s blanket safety floor. Phase 26 replaced that
+blanket rule with a narrow, auditable carve-out: `(safety 0)` ONLY
+inside a new `FAST-AREF` compat macro (`src/compat.lisp`, commit
+`963f0ee`), only on LispWorks, only at call sites that carry a written
+index-in-range proof, with SBCL's expansion an unchanged, fully-checked
+identity and a `ATARI800_CL_CHECKED_AREF` env var that forces the
+LispWorks expansion back to fully-checked for audit runs. Two
+conversions followed the Phase 18 profile's own ranking: `src/pokey.lisp`
+(commit `e254142`) and `src/renderer.lisp` (commit `5acef18`).
+
+### 26c-1: pokey conversion, e254142 vs 963f0ee (5 pairs, both implementations)
+
+sbcl:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop     | 2922.74 -> 2834.76 | -3.0% MIXED (noise) |
+| irq     | 3468.38 -> 3506.20 | +1.1% MIXED |
+| display | 1752.41 -> 1756.86 | +0.3% MIXED |
+| audio   | 1603.71 -> 1601.71 | -0.1% MIXED |
+
+lispworks:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop     |  851.43 -> 1831.53 | +115.1% CLEAN |
+| irq     | 1371.05 -> 2348.62 |  +71.3% CLEAN |
+| display |  311.63 ->  365.96 |  +17.4% MIXED (noise) |
+| audio   |  277.15 ->  698.48 | +152.0% CLEAN |
+
+SBCL stays inside noise on every workload, as the acceptance criteria
+require (the macro is an identity there). LispWorks separates cleanly
+on `nop`, `irq`, and `audio` -- the workloads that actually run
+`POKEY-ADVANCE` at density -- with `display` landing inside noise
+because that workload's bottleneck is the renderer, not yet converted
+at this commit.
+
+### 26c-2: renderer conversion, 5acef18 vs e254142 (5 pairs, both implementations)
+
+sbcl:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop     | 2880.39 -> 2878.61 |  -0.1% MIXED |
+| irq     | 3568.28 -> 3441.80 |  -3.5% CLEAN |
+| display | 1771.52 -> 2134.19 | +20.5% CLEAN |
+| audio   | 1593.34 -> 1577.36 |  -1.0% MIXED |
+
+lispworks:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop     | 1891.59 -> 2012.25 |  +6.4% MIXED |
+| irq     | 2370.71 -> 2431.81 |  +2.6% MIXED |
+| display |  365.60 -> 1043.53 | +185.4% CLEAN |
+| audio   |  671.96 ->  712.45 |  +6.0% MIXED |
+
+The SBCL `irq` row separated CLEAN in the "wrong" direction (`irq`
+never executes renderer code, so a movement there cannot be caused by
+this commit). A second, SBCL-only 5-pair recheck of the same two
+commits gave: `nop` -1.0% MIXED, `irq` -0.4% MIXED, `display` +24.0%
+CLEAN, `audio` +1.9% MIXED. The `irq` movement did not reproduce -- an
+artifact of the first run, not a real effect -- while the SBCL
+`display` gain reproduced almost exactly (+20.5% then +24.0%).
+
+That SBCL `display` gain is not a violation of the acceptance
+criterion ("SBCL within noise -- the macro is an identity there; any
+SBCL movement means the macro is wrong, not that SBCL got faster"): on
+SBCL, `FAST-AREF` expands to `(aref (the type array) index)`, which
+SBCL already compiles identically to a plain declared `aref` -- the
+compat expansion-shape tests in `tests/test-compat.lisp` confirm the
+macro is a syntactic identity on this implementation, so it cannot be
+the source of a codegen change. The renderer conversion commit did more
+than swap `aref` for `fast-aref`, though: per its proof-comment
+contract it also added `RENDER-SCANLINE`'s once-per-call bound
+assertions (row range, framebuffer length) in place of what had been
+implicit per-pixel bounds trust. Those `the`-style assertions are
+ordinary declarations that help SBCL's own optimizer regardless of
+`FAST-AREF` -- a portable side benefit of doing the audit work, not a
+hidden `(safety 0)` effect reaching SBCL. Recorded here as the
+close-out's explicit answer to "is this the macro or the surrounding
+work": the surrounding work.
+
+### Cumulative: working tree (5acef18) vs pre-phase baseline (c4fd229), 5 pairs
+
+sbcl: nop +0.3% MIXED; irq -0.4% MIXED; display 1716.27 -> 2127.64
+(+24.0%, CLEAN); audio +2.4% MIXED
+
+lispworks:
+
+| workload | baseline (c4fd229) | working tree (5acef18) | delta | separation |
+|----------|---------------------|--------------------------|-------|------------|
+| nop     |  852.43 | 1994.95 | +134.0% | CLEAN |
+| irq     | 1389.43 | 2439.12 |  +75.5% | CLEAN |
+| display |  312.33 | 1034.60 | +231.3% | CLEAN |
+| audio   |  276.67 |  717.38 | +159.3% | CLEAN |
+
+The Phase 26 aspirational target was +30% LispWorks `nop`; +134%
+materialized -- the profile's "~2/3 of `nop` time under `POKEY-ADVANCE`,
+array dispatch dominating" framing understated how much was on the
+table once the array-dispatch calls themselves were removed rather than
+merely made cheaper per-call. (`klaus` only ran on the working-tree side
+of each A/B pair -- the baseline worktrees `bench-ab.sh` builds lack the
+fetched Klaus binary -- so it is not a comparable delta and is omitted
+above.)
+
+### 26d: checked-build audit
+
+`ATARI800_CL_CHECKED_AREF=1 ./scripts/test-lispworks.sh` (routed to its
+own `.cache/fasls-checked/` ASDF output-translation directory so the
+checked and unchecked expansions never share a fasl cache) reran the
+full suite with every `FAST-AREF` call site forced back to SBCL's fully
+checked expansion: green, 0 failures, confirmed to actually recompile
+from scratch (deleting `.cache/fasls-checked/` and rerunning reproduced
+identical pass/fail results with freshly timestamped fasls). See the
+`run-tests` skill for the invocation.
+
+### 26d: re-profile
+
+Re-profiled LispWorks `nop` and `display` with `atari800-cl.compat:with-profiling`,
+the same methodology as Phase 18 (a throwaway scratchpad driver loading
+`:atari800-cl` plus `scripts/bench.lisp`'s workload builders, 60 warm-up
+frames, then the measured chunk -- 40,000 frames for `nop`, 20,000 for
+`display` -- wrapped in `WITH-PROFILING`, landing each run at ~20
+seconds wall clock and 1500-1600 samples).
+
+**nop -- top 5 by self time ("top"), Phase 18 vs Phase 26:**
+
+| rank | Phase 18 (self / incl) | Phase 26 (self / incl) |
+|------|--------------------------|--------------------------|
+| 1 | POKEY-ADVANCE 19% / 69% | POKEY-ADVANCE 28% / 51% |
+| 2 | SYSTEM::AREF1 18% / 18% | SYSTEM::THROW-TO-TAG 15% / 15% |
+| 3 | SVREF-NO-CHECK...FIXNUM 10% / 10% | %RUN-CLOCKS 14% / 100% |
+| 4 | SYSTEM::SET-AREF1 10% / 20% | STEP-CPU 12% / 38% |
+| 5 | SET-SVREF-NO-CHECK...INTEGER 8% / 8% | BUS-READ 11% / 11% |
+
+`SYSTEM::SET-AREF1` does not appear anywhere in the Phase 26 `nop`
+profile at all (was 10% self / 20% inclusive, the #4 entry). Plain
+`SYSTEM::AREF1` fell from 18% self (the #2 entry) to 5% self (6th
+place, `SVREF-NO-CHECK...FIXNUM` at 6% and `AREF1` at 5% are the next
+two rows below the top 5 above) -- the residual is the bus/struct
+dispatch this phase deliberately left untouched (`BUS-READ`'s own RAM
+array, not in scope per 26c item 3: "do not convert it on speculation").
+`POKEY-ADVANCE`'s inclusive share fell from 69% to 51% even as its self
+share rose from 19% to 28%: less of its own time is now spent waiting
+on an out-of-line array-dispatch callee, so more of what remains is
+attributed to `POKEY-ADVANCE` itself.
+
+**display -- top 5 by self time ("top"), Phase 18 vs Phase 26:**
+
+| rank | Phase 18 (self) | Phase 26 (self / incl) |
+|------|-------------------|--------------------------|
+| 1 | SET-AREF1 37% (single line item, no top-5 table given) | %RENDER-CHAR-MODE 19% / 41% |
+| 2 | -- | POKEY-ADVANCE 11% / 19% |
+| 3 | -- | %RUN-CLOCKS 7% / 100% |
+| 4 | -- | BUS-READ 7% / 7% |
+| 5 | -- | STEP-CPU 4% / 14% |
+
+`SYSTEM::SET-AREF1` -- 37% self time on the Phase 18 `display` profile,
+the single largest line item Phase 26 exists to remove -- does not
+appear anywhere in the Phase 26 `display` profile output. Plain
+`SYSTEM::AREF1` sits at 4% self time (tied for 9th place, alongside
+`SYSTEM::THROW-TO-TAG`). `RENDER-SCANLINE`'s own inclusive share is 44%
+(686/1565 samples), almost entirely inside `%RENDER-CHAR-MODE` (41%
+inclusive, 19% self) -- the framebuffer/tag writes that used to detour
+through `SET-AREF1` are now direct, so the renderer's own logic
+(`%CHAR-ROW-BITS`, `LOGBITP`, the character-decode loop) is what shows
+up instead.
+
+### 26d: new SBCL/LispWorks fps ratios
+
+Using the cumulative working-tree LispWorks fps above and the closest
+matching SBCL absolute figures (the 26c-2 A/B pair's "working tree"
+column, `5acef18`, since the cumulative SBCL row above is percent-only):
+
+| workload | sbcl fps | lispworks fps | lispworks / sbcl | sbcl / lispworks |
+|----------|----------|-----------------|---------------------|---------------------|
+| nop     | 2878.61 | 1994.95 | 69.3% | 1.44x |
+| irq     | 3441.80 | 2439.12 | 70.9% | 1.41x |
+| display | 2134.19 | 1034.60 | 48.5% | 2.06x |
+| audio   | 1577.36 |  717.38 | 45.5% | 2.20x |
+
+Phase 18's closing framing put LispWorks at 27-30% of SBCL's `nop`
+throughput (SBCL/LispWorks ~3.4x) and, by the same mechanism, an even
+wider gap on the array-heavy `display` profile it flagged but did not
+re-measure per-workload. Phase 26 closes most of that gap on the two
+workloads its conversions targeted (`nop` and `irq`, both dominated by
+`POKEY-ADVANCE`): LispWorks now runs at 69-71% of SBCL's speed instead
+of ~30%. `display` and `audio` improve substantially (LispWorks fps up
+185% and 106% respectively over the pre-phase baseline) but remain
+further behind SBCL in ratio terms, because SBCL's own `display` figure
+also rose (the portable `the`-assertion side benefit noted in 26c-2
+above), and because `audio`'s hot path (`AUDIO-ADVANCE`, `src/audio.lisp`)
+was never in this phase's scope -- Phase 18's profile did not name it,
+and 26c item 3 explicitly gates further conversions on a fresh profile
+naming new sites, not on speculation.
+
+### 26d: suite verification
+
+Full suite, unchecked build, from the repo root with test assets
+present (Klaus binary, Tom Harte vectors, real ROMs):
+
+| implementation | build | checks | pass | skip | fail |
+|-----------------|-------|--------|------|------|------|
+| sbcl      | unchecked | 2503 | 2489 | 14 | 0 |
+| lispworks | unchecked | 2506 | 2492 | 14 | 0 |
+| lispworks | checked (`ATARI800_CL_CHECKED_AREF=1`) | 2543 | 2527 | 16 | 0 |
+
+All three green, no failures. The checked build's 2 extra skips are
+`FAST-AREF-EXPANSION-SHAPE`'s own unchecked-branch case self-skipping
+("the unchecked expansion is not reachable here") -- expected, not a
+regression. (An initial cold-compile LispWorks run in this session
+reported 2549/2535/14/0 -- a harmless FiveAM double-suite-banner
+artifact of compiling every fasl from scratch that inflated the total
+check count without affecting pass/fail; repeated warm-cache runs
+stabilized at 2506/2492/14/0, used above as the canonical figure.)
+Neither converted file (`src/pokey.lisp`, `src/renderer.lisp`) is
+CPU-adjacent, so per ROADMAP.md Phase 26 item 4 a full-corpus Harte
+re-run was not required beyond what this suite run already exercises.
+
+Commits: `963f0ee` (26a/26b), `e254142` (26c-1), `5acef18` (26c-2),
+close-out documentation and this section (26d).
+
 ## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
 
 SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction

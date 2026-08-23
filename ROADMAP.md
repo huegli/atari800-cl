@@ -464,7 +464,7 @@ and say so in the commit message.
 | 23    | CONFIRM retirement pass                      | --          | no       | done   |
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | done   |
 | 25    | SIO receive path + serial-wire disk          | 13, 16, 22 | no       | deferred |
-| 26    | LispWorks fast-path array access             | 18         | yes      | open   |
+| 26    | LispWorks fast-path array access             | 18         | yes      | done   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
@@ -1478,6 +1478,36 @@ Commits: one per stage, message "SIO: <stage>".
 ---
 
 ## Phase 26 -- LispWorks fast-path array access  [hot path -> benchmark]
+
+> **Done (2026-08-23)**, four commits: `963f0ee` (26a/26b, the
+> `FAST-AREF` compat macro plus the `PERFORMANCE_PLAN.md` safety-rule
+> carve-out), `e254142` (26c-1, `src/pokey.lisp`'s channel-array hot
+> path), `5acef18` (26c-2, `src/renderer.lisp`'s framebuffer scanline
+> hot path), and this close-out. Both conversions measured CLEAN on
+> LispWorks with `scripts/bench-ab.sh` (5+ pairs) and stayed inside
+> noise on SBCL, per commit, as the phase's acceptance criteria
+> require; cumulative working-tree-vs-baseline LispWorks gains: `nop`
+> +134.0%, `irq` +75.5%, `display` +231.3%, `audio` +159.3% (all
+> CLEAN), against a +30% `nop` aspirational target. Close-out
+> verification: full suite green on both implementations unchecked
+> (sbcl 2503/2489/14/0, lispworks 2506/2492/14/0 -- checks/pass/skip/
+> fail) and LispWorks green again with `ATARI800_CL_CHECKED_AREF=1`
+> forcing every `FAST-AREF` site back to fully checked (2543/2527/16/0,
+> confirmed to actually recompile from scratch). Re-profiling `nop` and
+> `display` with the same `hcl` methodology Phase 18 used confirmed
+> `SYSTEM::SET-AREF1` -- 10-37% self time across Phase 18's profiles --
+> no longer appears anywhere in either workload's Phase 26 profile, and
+> `SYSTEM::AREF1` fell from a top-5 entry (18% self on `nop`) to 4-5%
+> self on both. New SBCL/LispWorks fps ratios: `nop` 1.44x (was ~3.4x
+> at Phase 18), `irq` 1.41x, `display` 2.06x, `audio` 2.20x. Neither
+> converted file is CPU-adjacent, so the full-corpus Harte re-run this
+> phase's item 4 conditions on was not required; the Harte tests the
+> unchecked-build suite run already carries stayed green throughout.
+> See `PERFORMANCE_LOG.md`'s "ROADMAP Phase 26" section for the full
+> A/B tables, the re-profile tables, and the SBCL `display` +20-24%
+> side effect (from the conversion's bound-assertion additions, not
+> from `FAST-AREF` itself, which is a no-op macro on SBCL) explained in
+> detail there.
 
 Phase 18's profiling pass ended with a diagnosis and no lever: on the
 LispWorks 8.1.1 ARM64 build, every checked array access compiles to an

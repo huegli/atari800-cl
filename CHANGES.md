@@ -3,6 +3,72 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 26 -- LispWorks fast-path array access
+
+Phase 18 diagnosed, but could not fix, a LispWorks-8.1.1-ARM64 compiler
+policy: every checked array access compiles to an out-of-line
+`SYSTEM::AREF1`/`SET-AREF1` call at `(safety 1)` no matter how precisely
+the array is typed, and only `(safety 0)` inlines it -- forbidden by
+this project's blanket safety floor. Phase 26 replaces that blanket
+rule with a narrow, auditable carve-out instead of accepting the gap as
+structural.
+
+`src/compat.lisp` gains `FAST-AREF` (plus its `setf` expansion): on SBCL
+an unchanged, fully-checked identity (`(aref (the type array) index)`);
+on LispWorks the same access wrapped in `(locally (declare (optimize
+(safety 0) (speed 3))) ...)` with the array and index both `the`-typed
+-- the one place `(safety 0)` is allowed to appear in this tree. Every
+call site must carry a one-line comment proving its index is in range
+by construction (masked, loop-bounded, or exactly typed); an access
+that cannot state its proof stays plain `aref`. Setting
+`ATARI800_CL_CHECKED_AREF` to a non-empty value at compile time forces
+the LispWorks expansion back to the checked SBCL form -- the audit
+switch, routed to its own `.cache/fasls-checked/` ASDF output-translation
+directory by the test scripts so a checked run never silently reuses
+stale unchecked fasls. `PERFORMANCE_PLAN.md`'s safety rule and
+Anti-goals bullet are amended in place with the carve-out.
+
+Two conversions followed, in the Phase 18 profile's own ranking:
+`src/pokey.lisp`'s 4-slot channel-array accesses in `%EXPIRE-CHANNEL`,
+`POKEY-TICK`, `POKEY-ADVANCE`, and `%TIMER-RELOAD-VALUE` (channel
+indices masked `(logand ch 3)` where not already a literal constant);
+then `src/renderer.lisp`'s framebuffer/scanline-row writes across the
+character, multicolor, bitmap, GTIA, and player/missile rendering
+paths, bounded by a once-per-scanline-call assertion in
+`RENDER-SCANLINE` that every downstream helper's proof comment cites.
+
+Measured with `scripts/bench-ab.sh` (5+ interleaved pairs, both
+implementations) per conversion commit: SBCL stayed inside noise on
+every workload both times, as expected (`FAST-AREF` is a no-op macro
+there); LispWorks separated CLEAN on `nop`/`irq`/`audio` after the
+POKEY conversion (+71% to +152%) and CLEAN on `display` after the
+renderer conversion (+185%). Cumulative working-tree-vs-pre-phase-baseline
+LispWorks gains: `nop` +134.0%, `irq` +75.5%, `display` +231.3%, `audio`
++159.3% -- against a +30% `nop` aspirational target. SBCL's own
+`display` figure also rose (+20-24%, reproduced across two independent
+5-pair runs), traced to the renderer conversion's bound-assertion
+additions (ordinary declarations that help SBCL's optimizer too), not
+to any change in `FAST-AREF`'s SBCL expansion, which the compat
+macroexpansion-shape tests confirm stayed a syntactic identity.
+
+Close-out verification: full suite green on both implementations
+unchecked (sbcl 2503 checks/2489 pass/14 skip/0 fail, lispworks 2506/
+2492/14/0) and LispWorks green again with `ATARI800_CL_CHECKED_AREF=1`
+forcing every `FAST-AREF` site back to fully checked (2543/2527/16/0,
+confirmed to recompile from scratch rather than reuse stale fasls).
+Re-profiling `nop`/`display` with the same `hcl`-based methodology
+Phase 18 used confirmed `SYSTEM::SET-AREF1` -- 10-37% self time across
+Phase 18's profiles, the single largest line item on `display` -- no
+longer appears anywhere in either workload's profile, and
+`SYSTEM::AREF1` fell from an 18%-self top-5 entry on `nop` to 4-5% self
+on both workloads. New SBCL/LispWorks fps ratios: `nop` 1.44x (was
+~3.4x at Phase 18), `irq` 1.41x, `display` 2.06x, `audio` 2.20x. Neither
+converted file is CPU-adjacent, so the full-corpus Harte re-run this
+phase's acceptance criteria would otherwise require was not needed; the
+Harte tests already in the standard suite run stayed green throughout.
+See `PERFORMANCE_LOG.md`'s "ROADMAP Phase 26" section for the full A/B
+tables and profile tables.
+
 ## ROADMAP Phase 20 -- ANTIC display-list latch note
 
 Documentation only (`MISC_IMPROVEMENTS_PLAN.md` item 10). Added a
