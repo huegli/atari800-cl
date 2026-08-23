@@ -465,6 +465,11 @@ and say so in the commit message.
 | 24    | Acid800 gate (CPU + ANTIC subsets)           | 21         | no       | done   |
 | 25    | SIO receive path + serial-wire disk          | 13, 16, 22 | no       | deferred |
 | 26    | LispWorks fast-path array access             | 18         | yes      | done   |
+| 27    | Idle benchmark workloads (idle, serve)       | --          | no       | open   |
+| 28    | AESP push economics (gate, reuse, dedup)     | 27         | yes      | open   |
+| 29    | Dirty-frame render skip (conditional)        | 27, 28     | yes      | open   |
+| 30    | Deferred POKEY advance                       | 27         | yes      | open   |
+| 31    | Spin-loop fast-forward (conditional, opt-in) | 28, 30     | yes      | open   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
@@ -1620,6 +1625,411 @@ gap on `nop` -- the profile puts ~2/3 of LispWorks' `nop` time under
 `nop` fps is plausible; log whatever materializes.
 
 Commits: as listed per stage.
+
+---
+
+## Phases 27-31 -- Idle-operation tranche (shared ground rules)
+
+An idle machine -- one spinning in a tight loop and/or displaying an
+unchanging screen, e.g. parked at the BASIC READY prompt while served
+over AESP -- currently pays full price every frame for work whose
+output cannot differ from the previous frame's. Reading the code (not
+profiling -- Phase 27 adds the measurement) identifies four layers of
+idle waste:
+
+1. Full CPU emulation of ~29,868 clocks of busy-wait code per frame.
+2. `POKEY-ADVANCE` called after every instruction from `%RUN-CLOCKS`,
+   even when no timer IRQ is enabled and audio is detached; the
+   Phase 26 close-out profile still has it at 28% LispWorks / 32%
+   SBCL self time on `nop`.
+3. All 240 `RENDER-SCANLINE` calls re-render an unchanged screen; the
+   `scanline-fn` wired by `START-AESP-SERVER` runs even with zero
+   video clients connected.
+4. `%PUSH-VIDEO-FRAME` allocates and fills a fresh ~322 KB BGRA
+   payload via `%RGB24->BGRA32-CROPPED` BEFORE checking the client
+   list, then sends identical bytes to every client every frame; the
+   runner's serve loop paces with a fixed `(sleep 0.016)`.
+
+Shared rules for the tranche, inherited from Phase 26's discipline:
+every hot-path commit is measured with `scripts/bench-ab.sh` against
+the previous commit, 5+ interleaved pairs, BOTH implementations;
+`PERFORMANCE_LOG.md` gets rows either way; a change that does not
+separate from noise where its claim says it should gets reverted, not
+kept. Suites green on SBCL and LispWorks after every commit (checked
+LispWorks build too if a commit touches a `FAST-AREF` site). All new
+`FAST-AREF` call sites carry the Phase 26 proof-comment contract.
+Markdown stays ASCII-only.
+
+Execution order: 27 -> 28 -> 30 unconditionally; 29 and 31 are
+conditional on what the re-measured idle profile still shows after
+that, in that order.
+
+---
+
+## Phase 27 -- Idle benchmark workloads
+
+Measurement first: none of the five existing workloads has the idle
+shape. `nop` executes a NOP sled (memory-crossing work every 2
+cycles, no renderer), `display` renders but also runs the sled, and
+nothing at all exercises the AESP push path, where most of the
+layer-3/4 waste lives. This phase adds two workloads and records the
+tranche's baseline. No hot-path changes; no acceptance deltas.
+
+**27a -- the `idle` workload.** In `scripts/bench.lisp`:
+
+1. `MAKE-IDLE-ROM`: build with `%MAKE-ROM` like `MAKE-NOP-ROM`, but
+   the reset code is a single `JMP *` (opcode `#x4C` targeting its own
+   address) and the NMI/IRQ vectors point at plain `RTI` stubs. This
+   is the canonical parked-machine CPU load.
+2. Register `:idle` in `RUN-BENCHMARKS` (and its docstring / default
+   workload list): run `MAKE-IDLE-ROM` with
+   `%SETUP-DISPLAY-WORKLOAD` as the `:setup-fn`, so the machine
+   displays the same static 24-line mode-2 screen every frame with
+   the pixel renderer attached -- spin loop + unchanging screen.
+3. Expected shape (verify, do not assume): `idle` fps should land
+   near `display` fps today, because rendering dominates once the
+   CPU is just spinning.
+
+**27b -- the `serve` workload.** Same machine setup as `:idle`, plus
+the AESP push path:
+
+1. In the workload setup, `START-AESP-SERVER` on host 127.0.0.1 with
+   all three ports 0 (OS-assigned; read back from the accessors),
+   then connect ONE video client via the compat TCP layer and start a
+   background thread that loops `READ-AESP-MESSAGE`, discarding
+   payloads, until told to stop. Measure `MACHINE-RUN-FRAME`
+   throughput with the post-frame push active. Teardown:
+   stop the drain thread, close the client, `STOP-AESP-SERVER`.
+2. Sandbox caveat: `TCP-LISTEN` can fail with EPERM in the sandboxed
+   environment (the run-tests skill documents the same issue for the
+   test suite). The workload must catch listener startup failure and
+   SKIP with a printed reason, exactly as `:klaus` skips when its
+   binary is missing. `bench-ab.sh` already renders a workload
+   missing on the baseline side as "new workload"; that is fine.
+3. Update the `benchmark` skill file
+   (`.claude/skills/benchmark/SKILL.md`) with both new workloads.
+
+**27c -- baseline rows.** Run `./scripts/bench-sbcl.sh` and
+`./scripts/bench-lispworks.sh`; record `idle` and `serve` fps for
+both implementations in `PERFORMANCE_LOG.md` as the tranche baseline.
+If practical, also note allocation per served frame (SBCL: consing
+reported by `TIME` around a frame loop; LispWorks: `EXTENDED-TIME` or
+`ROOM` deltas) -- the ~322 KB/frame payload allocation predicts
+roughly 19 MB/s of garbage at 60 fps, worth confirming before
+Phase 28 claims to remove it.
+
+Suites green on both implementations (nothing in `src/` changes, but
+run them anyway -- the bench file is loaded by the harness scripts).
+
+Commits: `bench: idle workload (JMP-self + static display)`,
+`bench: serve workload (AESP push path with one video client)`.
+
+---
+
+## Phase 28 -- AESP push economics  [hot path -> benchmark]
+
+Output-side only: nothing in this phase touches emulation state, so
+there is zero accuracy risk (GTIA collisions live in `src/gtia.lisp`;
+the renderer is pure presentation). The one contract to respect is
+spelled out in `%PUSH-AUDIO-FRAME`'s docstring: the Nth `AUDIO_PCM`
+pairs with the Nth `FRAME_RAW`, and A/V capture depends on that 1:1
+cadence -- so dedup may skip WORK, never FRAMES.
+
+**28a -- gate rendering and conversion on subscribers.**
+
+1. Give `AESP-SERVER` a `video-active-p` boolean (or use the client
+   count), updated under the server lock in `%REGISTER-VIDEO-CLIENT`
+   / `%UNREGISTER-VIDEO-CLIENT`.
+2. The `scanline-fn` closure wired in `START-AESP-SERVER` early-returns
+   when no video client is connected (one slot read per scanline, 240
+   per frame -- negligible; verify with the `display` workload
+   staying in noise).
+3. `%PUSH-VIDEO-FRAME` snapshots the client list FIRST and returns
+   before any conversion when it is empty.
+4. A client that connects mid-frame would otherwise see one partially
+   rendered frame: set a `needs-full-render` flag in
+   `%REGISTER-VIDEO-CLIENT` that forces rendering for the next full
+   frame before the first push to that client. Mirror the shape of
+   the existing `%SYNC-AUDIO-ATTACHMENT` mechanism, which already
+   solves the same connect/disconnect problem for audio.
+
+**28b -- reuse the FRAME_RAW payload buffer.**
+
+1. Preallocate a `payload-buffer` slot on `AESP-SERVER` of size
+   `(* +aesp-frame-raw-width+ 240 4)`; add
+   `%RGB24->BGRA32-INTO` (same loop as `%RGB24->BGRA32-CROPPED`,
+   writing into the supplied buffer) and use it from
+   `%PUSH-VIDEO-FRAME`.
+2. BEFORE reusing, verify the write path does not retain the payload
+   after `WRITE-AESP-MESSAGE` returns (writes are synchronous on the
+   emulator thread; read `WRITE-AESP-MESSAGE` and the transport code
+   in `src/transport.lisp` to confirm no queuing keeps a reference).
+   State the finding in the commit message.
+
+**28c -- dedup unchanged frames at the push boundary.**
+
+1. Keep a `prev-frame` copy of the RGB framebuffer plus a
+   `payload-valid-p` flag on the server. After the frame's render, an
+   `%FRAME-UNCHANGED-P` function byte-compares the framebuffer
+   against `prev-frame` (plain `AREF` first; convert to `FAST-AREF`
+   with a loop-bound proof only if a profile names the loop).
+2. Unchanged and `payload-valid-p` -> skip the copy and the
+   conversion, resend the cached payload to every client (resending
+   preserves the 1:1 A/V pairing and client cadence; suppressing
+   frames entirely is out of scope and would need a protocol note in
+   the Attic project's docs/PROTOCOL.md first). Changed -> copy the
+   framebuffer into `prev-frame`, convert once into the payload
+   buffer, send.
+3. Keep the comparison behind `%FRAME-UNCHANGED-P` as a single seam:
+   Phase 29, if it lands, replaces the byte compare with a free
+   dirty flag, and that swap should be one line.
+4. Honest cost note for the log: the compare touches 2x ~276 KB on
+   changed frames -- the win only materializes on unchanged frames,
+   which is exactly the idle case. `serve` must improve; `display`
+   (no AESP attached) must stay in noise.
+
+**28d -- deadline-corrected serve pacing.** In `scripts/runner.lisp`
+`RUN-FRAMES-AND-SERVE`: replace the fixed `(sleep 0.016)` with a
+deadline accumulator -- `next-deadline += 1/59.92 s` per frame, sleep
+`(max 0 (- deadline now))`, and clamp the deadline to now when behind
+so a slow stretch does not trigger a catch-up spiral. This is a
+pacing-correctness fix, not a throughput claim: verify by eye that a
+served session holds ~59.92 fps; exclude it from bench-ab claims.
+(`MACHINE-RUN-LOOP` itself needs no change -- it already parks on the
+mailbox condvar when paused.)
+
+Acceptance per commit: bench-ab vs the previous commit, 5+ pairs,
+both implementations. `serve` improves where the stage claims it
+(28a with zero clients connected is not measurable by `serve`, which
+always has one client -- its claim is covered by `idle` staying flat
+and the code being obviously gated; 28b and 28c must move `serve`),
+and `nop`/`irq`/`display`/`audio` stay within noise on BOTH
+implementations -- nothing in this phase touches emulation. Suites
+green both implementations. `PERFORMANCE_LOG.md` rows per commit.
+
+Commits: `aesp: gate rendering and conversion on video subscribers`,
+`aesp: reuse the FRAME_RAW payload buffer`,
+`aesp: dedup unchanged frames at the push boundary`,
+`runner: deadline-corrected serve pacing`.
+
+---
+
+## Phase 29 -- Dirty-frame render skip  [hot path -> benchmark]  (conditional)
+
+Gate: run this phase ONLY if, after Phases 27/28/30, a fresh profile
+of the `idle` workload (Phase 18 methodology) still shows
+`RENDER-SCANLINE` / `%RENDER-CHAR-MODE` dominating. If `idle` fps is
+already near `nop` fps on both implementations, close the phase with
+a not-needed status note instead.
+
+The idea: track, per frame, whether anything that feeds the renderer
+changed; when nothing did, skip all 240 `RENDER-SCANLINE` calls and
+feed `%FRAME-UNCHANGED-P` (Phase 28c) for free. The risk: the
+tracking store sits on the bus RAM write path, which is hot -- the
+Phase 22 lesson (an extra inner-loop test once cost ~7% on `nop`)
+applies, and the acceptance criteria below treat any `nop`/`irq`
+movement as a veto.
+
+**29a -- instrument first (throwaway, not committed to src).** Under
+the real OS ROM parked at the READY prompt, establish which 256-byte
+pages RAM writes actually touch per frame over ~600 frames (a scratch
+script may wrap or copy the bus write path; it does not ship).
+Hypothesis to confirm before building anything: the display list,
+screen RAM, and charset pages are untouched frame-to-frame at READY,
+while OS shadow pages (0/2/3) are written every VBI -- which is
+exactly why a single global "any RAM write" boolean is useless and
+page granularity is the minimum. Record the findings in the phase
+status note.
+
+**29b -- per-page dirty map.** `src/bus.lisp`: add a 256-entry
+`(simple-array (unsigned-byte 8) (256))` page-dirty vector; the RAM
+write path gains ONE store,
+`(setf (aref dirty (ldb (byte 8 8) addr)) 1)` (a `FAST-AREF`
+candidate with the index provably in range by `(ldb (byte 8 8) ...)`
+construction -- carry the proof comment). Chip-register writes that
+affect rendering set a single `regs-dirty` boolean from their
+EXISTING (cold) write closures instead: enumerate the registers in
+the commit message -- ANTIC `DMACTL/CHACTL/DLISTL/DLISTH/HSCROL/
+VSCROL/PMBASE/CHBASE`, GTIA colors `COLPM0-3/COLPF0-3/COLBK`, `PRIOR`,
+`GRAFP0-3/GRAFM`, `HPOSP0-3/HPOSM0-3`, `SIZEP0-3/SIZEM`, `GRACTL`,
+plus P/M DMA state. When in doubt whether a register can affect
+pixels, include it -- false dirt costs one redundant render, false
+clean costs a wrong frame.
+
+**29c -- consult at frame end.** In the post-frame path (before
+`%PUSH-VIDEO-FRAME`): compute the frame's watched-page set from ANTIC
+state -- the display-list pages the walk covered, the LMS screen
+regions, `CHBASE` character-set pages, and `PMBASE` pages when P/M
+DMA is on (ANTIC walks the display list every frame already; record
+pages during the walk or recompute from latched state, whichever is
+cheaper to keep exact). The frame is CLEAN iff no watched page is
+dirty, `regs-dirty` is clear, and the previous frame was actually
+rendered. CLEAN -> the `scanline-fn` gate from Phase 28a skips
+rendering next frame and `%FRAME-UNCHANGED-P` returns T without
+comparing. Any doubt (display-list walk anomaly, GTIA mode change
+mid-frame) -> render; the displayed frame's correctness must never
+depend on the map being precise, only the skip does. Clear the map
+and flags after the decision.
+
+**29d -- tests + acceptance.** `renderer-suite` (or `machine-suite`
+where the full machine is needed): (1) poke one screen-memory byte
+through the bus -> next frame re-renders and differs; (2) poke an
+unrelated RAM page -> skip engages (assert via a render-call counter
+hook) and the framebuffer is byte-identical; (3) write a color
+register -> re-render. Suites green both implementations. bench-ab:
+`idle` improves CLEAN on both implementations; `nop` and `irq` MUST
+stay within noise on both -- if the dirty-map store separates cleanly
+as a regression on either, the phase is reverted per the tranche
+rule; `display` within noise or better.
+
+Commits: `bus: per-page RAM write dirty map`,
+`renderer: skip rendering clean frames`.
+
+---
+
+## Phase 30 -- Deferred POKEY advance  [hot path -> benchmark]
+
+The Phase 26 close-out profile still puts `POKEY-ADVANCE` first on
+LispWorks `nop` (28% self) and SBCL `nop` (32% self). The cost is no
+longer array dispatch: `POKEY-ADVANCE` already event-skips WITHIN a
+call (it jumps between sub-counter expiries; see its docstring). What
+remains is the call pattern -- `%RUN-CLOCKS` invokes it after EVERY
+instruction in 2-7 cycle chunks, so the function-call overhead and
+chunk bookkeeping run ~15-50x per scanline. When nothing observable
+can happen, those calls are pure overhead, and batching them is
+EXACT: `POKEY-ADVANCE` by A then by B is bit-identical to one advance
+by A+B (each is equivalent to that many `POKEY-TICK`s -- the property
+`pokey-tick-vs-advance-equivalence` already pins), so the ONLY ways
+deferral could be observed are (a) the CPU touching a POKEY register
+mid-line, or (b) POKEY raising an IRQ mid-line. (a) gets a sync; (b)
+is excluded by the gate. This mirrors the chip's existing lazy-RNG
+design: `POKEY-RNG-LAG` + `%SYNC-RNG` already defer LFSR stepping to
+the next `RANDOM` read -- this phase applies the same idea one level
+up.
+
+**30a -- sync-on-access plumbing.**
+
+1. The machine (or the scheduler's line loop) keeps a `pokey-lag`
+   fixnum: cycles POKEY is behind the CPU within the current line.
+   `%MACHINE-SYNC-POKEY`: when the lag is positive, `POKEY-ADVANCE`
+   by it and zero it.
+2. In `MAKE-ATARI-MACHINE`'s bus wiring, wrap the POKEY read AND
+   write closures registered for `$D200-$D2FF` so every access syncs
+   first -- `RANDOM`, `IRQST`, `STIMER`, `IRQEN`, `AUDF*`, `AUDC*`,
+   `AUDCTL`, `SKCTL` and friends then always see exact state.
+3. Audit every path that reads or mutates POKEY state WITHOUT going
+   through the bus: `ATTACH-POKEY-INPUT`, `MACHINE-ATTACH-AUDIO`,
+   AESP's `%SYNC-AUDIO-ATTACHMENT`, REPL instrumentation, tests.
+   Each either provably runs between frames -- where the lag is zero
+   because of the line-end sync in 30b -- or must call
+   `%MACHINE-SYNC-POKEY` itself. List each audited path and its
+   disposition in the commit message.
+
+**30b -- the scheduler gate.** In `%RUN-CLOCKS`:
+
+1. Once PER LINE compute
+   `defer-p = (and (null audio-attachment) (zerop pending)
+   (zerop (logand (pokey-irqen pokey)
+                  (logior +irq-timer1+ +irq-timer2+ +irq-timer4+))))`.
+   With `defer-p`: skip the per-instruction `POKEY-ADVANCE` call and
+   accumulate the instruction's cycles into the lag instead; the
+   existing "top POKEY up to exactly this line's cycle count" step at
+   line end becomes the sync point (its `pokey-remaining` arithmetic
+   already advances whatever the per-instruction path did not).
+   Without `defer-p`: byte-for-byte today's behavior.
+2. A mid-line `$D2xx` WRITE can invalidate the gate (enable a timer
+   IRQ, set `PENDING`, start audio): the write wrapper from 30a, in
+   addition to syncing, clears `defer-p` for the remainder of the
+   line -- the simple, obviously-correct rule; do not try to
+   recompute eligibility mid-line.
+3. Heed the Phase 22 lesson quoted in `POKEY-ADVANCE`'s own
+   docstring: an extra test in this inner loop once cost ~7% on
+   `nop`. The defer test must be hoisted out of the per-instruction
+   loop -- split the instruction loop into defer and no-defer
+   variants (the same shape `advance-loop` uses to split on audio)
+   so the deferring loop contains NO new per-instruction test at all.
+
+**30c -- proof and tests.**
+
+1. Because `defer-p` requires all timer IRQ enables clear, no IRQ can
+   be delayed by deferral -- state this invariant where the gate is
+   computed.
+2. Machine-level equivalence test: a debug flag (test-only slot or
+   special) forces deferral off; run a synthetic-ROM machine N frames
+   both ways -- including mid-run `AUDF`/`AUDCTL`/`STIMER`/`IRQEN`
+   pokes through the bus -- and compare the complete POKEY struct
+   state, CPU state, and IRQ delivery counts each frame. Byte-identical
+   or the phase is wrong.
+3. A test asserting deferral never engages while a timer IRQ enable
+   bit is set (expose an engagement counter under the debug flag).
+4. Full suites both implementations; the CPU core is untouched so no
+   Harte re-run beyond the standard suite is required.
+
+**30d -- measurement.** bench-ab vs the previous commit, 5+ pairs,
+both implementations. Expectations: `nop` and `idle` improve on BOTH
+implementations -- this is the rare phase where SBCL is supposed to
+move too (32% self time is the prize); `irq` within noise (the gate
+disengages under timer IRQs; only the once-per-line test is added);
+`audio` within noise (audio attached -> defer off); `display`/`serve`
+inherit the spin-side gain. `PERFORMANCE_LOG.md` rows; re-profile
+LispWorks `nop` and record the new top-5 -- `POKEY-ADVANCE`'s share
+should collapse toward the CPU core's.
+
+Commits: `machine: sync-on-access plumbing for deferred POKEY`,
+`machine: defer per-instruction POKEY advance when unobservable`.
+
+---
+
+## Phase 31 -- Spin-loop fast-forward  [hot path -> benchmark]  (conditional, opt-in)
+
+Gate: run this phase ONLY if, after Phases 28 and 30, the `idle`
+workload remains materially below `nop` on either implementation AND
+a profile blames the CPU spin itself. Otherwise close with a
+not-needed note. This is the one phase in the tranche that can bend
+timing, so it ships OFF by default and stays deliberately minimal.
+
+Design -- detect exactly `JMP *`, nothing more:
+
+1. `ATARI-MACHINE` gains an `idle-skip-p` flag, default NIL. Exposed
+   as a keyword on the `a800` facade constructor only; no AESP
+   control message, no env var -- keep the surface minimal.
+2. In `%RUN-CLOCKS`' instruction loop, when the flag is on: remember
+   the PC before `STEP-CPU`; afterwards, if the PC is unchanged AND
+   the opcode byte at that PC is `#x4C` (read it via `CPU-BUS-READ`
+   ONLY when the PC lies outside `$D000-$D7FF`; a PC inside I/O
+   space aborts the check rather than risk a side-effecting read),
+   the CPU is in a zero-side-effect absolute-jump-to-self loop: set
+   `cpu-budget` to 0. The line's remaining budget is burned without
+   stepping -- no instruction is simulated or skipped, the loop
+   simply stops iterating this line. Do NOT match branch-to-self or
+   anything else: an instruction that leaves PC unchanged but has
+   side effects (contrived `RTS`-to-self stack tricks) must keep
+   executing, and the `#x4C` opcode check is what excludes them.
+3. What stays exact: all per-line ANTIC/POKEY/renderer processing
+   (scanline granularity is untouched); the machine's architectural
+   state, because `JMP *` iterations have no effects. What bends:
+   a pending IRQ/NMI is serviced by `STEP-CPU` at the next line's
+   first step instead of mid-line, so interrupt latency can grow by
+   up to ~113 cycles -- ONLY while the flag is on and ONLY inside a
+   `JMP *` loop. State this in the flag's docstring and in
+   README.md's known-limitations list.
+
+Tests (`machine-suite`): (1) a `JMP *` ROM run N frames with the flag
+on vs off yields identical architectural state -- CPU registers,
+memory, chip registers, framebuffer (compare state, not internal
+budget/cycle bookkeeping); (2) an IRQ raised during the spin is
+serviced within one scanline under both settings; (3) the flag
+defaults to NIL and the whole suite runs with it off -- the suite
+itself is the no-behavior-change proof.
+
+Measurement: report `idle` with the flag on as a separate BENCH line
+(an `idle-skip` variant in `scripts/bench.lisp`) so the default
+`idle` row stays honest; `nop`/`irq`/`display`/`audio` with the flag
+off must sit within noise on both implementations (the flag test in
+the instruction loop is the only added cost -- if it separates as a
+regression, hoist it the way 30b hoists `defer-p`, or revert).
+
+Commit: `machine: opt-in JMP-self spin-loop fast-forward`.
 
 ---
 
