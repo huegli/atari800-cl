@@ -357,6 +357,92 @@ handler clears NEEDS-FULL-RENDER-P and the client receives a FRAME_RAW."
                         (length (cdr msg))))))
           (%stop-video-drain conn drain-th))))))
 
+(test aesp-server-dedups-unchanged-frames-but-still-sends-both
+  "Two frames with an unchanged screen both get pushed -- dedup skips the
+convert-and-copy WORK, never the FRAME itself (see %PUSH-AUDIO-FRAME's
+docstring on the 1:1 A/V pairing) -- and their payloads are byte-
+identical, because the second push resends PAYLOAD-BUFFER verbatim
+instead of reconverting.  A GTIA COLBK write that changes what
+RENDER-SCANLINE actually paints makes the very next push's payload
+differ."
+  (with-aesp-server (m srv s)
+    (let* ((conn (atari800-cl.transport:tcp-connect
+                  "127.0.0.1" (atari800-cl.aesp:aesp-server-video-port srv)))
+           (stream (atari800-cl.transport:tcp-stream conn)))
+      (is-true (%wait-until
+                (lambda () (atari800-cl.aesp::aesp-server-video-clients srv))))
+      (multiple-value-bind (drain-th lock box) (%spawn-video-drain stream)
+        (unwind-protect
+             (progn
+               ;; First push completes the connect-time full render.
+               (%run-frames-via-mailbox m 1)
+               (is-true (%wait-until (lambda () (>= (%video-drain-count lock box) 1))))
+               (is-true (atari800-cl.aesp::aesp-server-payload-valid-p srv)
+                        "a real push must validate the cached payload")
+               ;; Second push: unchanged screen -> resend, byte-identical.
+               (%run-frames-via-mailbox m 1)
+               (is-true (%wait-until (lambda () (>= (%video-drain-count lock box) 2))))
+               ;; Change what the renderer paints (background color) so the
+               ;; THIRD push differs; do this before running frame 3.
+               (atari800-cl.bus:bus-write
+                (atari800-cl.machine:atari-machine-bus m) #xD01A #x28)
+               (%run-frames-via-mailbox m 1)
+               (is-true (%wait-until (lambda () (>= (%video-drain-count lock box) 3))))
+               (destructuring-bind (msg1 msg2 msg3) (%video-drain-messages lock box)
+                 (is (= atari800-cl.aesp:+aesp-frame-raw+ (car msg1) (car msg2) (car msg3)))
+                 (is (equalp (cdr msg1) (cdr msg2))
+                     "an unchanged screen must resend a byte-identical payload")
+                 (is (not (equalp (cdr msg1) (cdr msg3)))
+                     "a genuine background-color change must produce a different payload")))
+          (%stop-video-drain conn drain-th))))))
+
+(test aesp-server-video-disconnect-invalidates-cached-payload
+  "Disconnecting the last video client invalidates PAYLOAD-VALID-P (Phase
+28c's reconnect-invalidation rule): once the gate closes, the
+framebuffer stops tracking live machine state, so a later reconnect must
+never resend a cached payload of unknown vintage -- the first push after
+a reconnect must reconvert from a freshly rendered framebuffer instead
+(see %UNREGISTER-VIDEO-CLIENT and the AESP-SERVER docstring)."
+  (with-aesp-server (m srv s)
+    (let* ((conn (atari800-cl.transport:tcp-connect
+                  "127.0.0.1" (atari800-cl.aesp:aesp-server-video-port srv)))
+           (stream (atari800-cl.transport:tcp-stream conn)))
+      (is-true (%wait-until
+                (lambda () (atari800-cl.aesp::aesp-server-video-clients srv))))
+      (multiple-value-bind (drain-th lock box) (%spawn-video-drain stream)
+        (%run-frames-via-mailbox m 1)
+        (is-true (%wait-until (lambda () (plusp (%video-drain-count lock box)))))
+        (is-true (atari800-cl.aesp::aesp-server-payload-valid-p srv)
+                  "a real push must have validated the cached payload")
+        (%stop-video-drain conn drain-th))
+      (is-true (%wait-until
+                (lambda () (null (atari800-cl.aesp::aesp-server-video-clients srv))))
+               "the reader thread must unregister the closed video client")
+      (is-false (atari800-cl.aesp::aesp-server-payload-valid-p srv)
+                "PAYLOAD-VALID-P must be cleared once the last video client disconnects")
+      ;; Reconnect: a fresh client forces one full render (28a) and the
+      ;; very first push after it must be a genuine conversion, not a
+      ;; resend of the stale cached payload.
+      (let* ((conn2 (atari800-cl.transport:tcp-connect
+                     "127.0.0.1" (atari800-cl.aesp:aesp-server-video-port srv)))
+             (stream2 (atari800-cl.transport:tcp-stream conn2)))
+        (is-true (%wait-until
+                  (lambda () (atari800-cl.aesp::aesp-server-video-clients srv))))
+        (is-false (atari800-cl.aesp::aesp-server-payload-valid-p srv)
+                  "invalidation must still hold at reconnect time, before any push")
+        (multiple-value-bind (drain-th2 lock2 box2) (%spawn-video-drain stream2)
+          (unwind-protect
+               (progn
+                 (%run-frames-via-mailbox m 2)
+                 (is-true (%wait-until (lambda () (plusp (%video-drain-count lock2 box2)))))
+                 (let ((msg (first (%video-drain-messages lock2 box2))))
+                   (is (= atari800-cl.aesp:+aesp-frame-raw+ (car msg)))
+                   (is (= (* atari800-cl.aesp::+aesp-frame-raw-width+ 240 4)
+                          (length (cdr msg)))))
+                 (is-true (atari800-cl.aesp::aesp-server-payload-valid-p srv)
+                          "the reconnect push must validate a fresh payload"))
+            (%stop-video-drain conn2 drain-th2)))))))
+
 (test aesp-server-unknown-type-errors
   "An unknown message type yields ERROR with the not-implemented code."
   (with-aesp-server (m srv s)

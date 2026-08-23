@@ -322,7 +322,35 @@ Extra slots for rendering:
                         by every push instead of allocating a fresh
                         ~322 KB vector per frame (Phase 28b; see
                         %RGB24->BGRA32-INTO and the 28b commit message
-                        for why reuse is safe)."
+                        for why reuse is safe).
+  PREV-FRAME          — a copy of the FRAMEBUFFER contents at the time
+                        PAYLOAD-BUFFER was last (re)converted, used by
+                        %FRAME-UNCHANGED-P to detect an unchanged screen
+                        (Phase 28c) so an idle machine's push can resend
+                        PAYLOAD-BUFFER unchanged instead of reconverting.
+  PAYLOAD-VALID-P     — true when PREV-FRAME/PAYLOAD-BUFFER describe a
+                        frame that was genuinely converted and sent, and
+                        can therefore be trusted as the comparison base
+                        and resent verbatim on a match.  Invalidation
+                        rule: %UNREGISTER-VIDEO-CLIENT clears this the
+                        moment the LAST video client leaves (VIDEO-
+                        ACTIVE-P goes false), because that is exactly
+                        when the scanline-fn gate stops keeping
+                        FRAMEBUFFER current -- while the gate is closed,
+                        FRAMEBUFFER is frozen at whatever it last held
+                        and no longer reflects live machine state, so
+                        PREV-FRAME/PAYLOAD-BUFFER (a snapshot of some
+                        earlier, still-current frame) can no longer be
+                        trusted as a valid comparison base or resend
+                        candidate for whatever FRAMEBUFFER will contain
+                        after a future reconnect.  Clearing PAYLOAD-
+                        VALID-P forces the first push after any reconnect
+                        to always take the copy+convert+send path (never
+                        the cached-resend path), and that push is
+                        guaranteed to see a freshly, completely rendered
+                        FRAMEBUFFER courtesy of NEEDS-FULL-RENDER-P
+                        above -- so a reconnecting client can never be
+                        handed a cached payload of unknown vintage."
   machine
   host
   control-listener video-listener audio-listener
@@ -337,7 +365,9 @@ Extra slots for rendering:
   (audio-unit    nil)
   (video-active-p      nil)
   (needs-full-render-p nil)
-  (payload-buffer nil))
+  (payload-buffer nil)
+  (prev-frame      nil)
+  (payload-valid-p nil))
 
 (defun %add-thread (server th)
   (with-lock ((aesp-server-lock server)) (push th (aesp-server-threads server)))
@@ -363,10 +393,16 @@ opened -- see the AESP-SERVER docstring)."
 
 (defun %unregister-video-client (server conn)
   "Unregister a video-port connection.  Clears VIDEO-ACTIVE-P (closing the
-scanline-fn rendering gate) once the last video client is gone."
+scanline-fn rendering gate) once the last video client is gone, and along
+with it PAYLOAD-VALID-P (Phase 28c's invalidation rule -- see the
+AESP-SERVER docstring's PAYLOAD-VALID-P entry: once the gate closes,
+FRAMEBUFFER stops tracking live machine state, so PREV-FRAME/
+PAYLOAD-BUFFER can no longer be trusted once it reopens)."
   (with-lock ((aesp-server-lock server))
     (setf (aesp-server-video-clients server)
           (remove conn (aesp-server-video-clients server)))
+    (unless (aesp-server-video-clients server)
+      (setf (aesp-server-payload-valid-p server) nil))
     (setf (aesp-server-video-active-p server)
           (and (aesp-server-video-clients server) t))))
 
@@ -462,6 +498,18 @@ reused PAYLOAD-BUFFER instead."
   (%rgb24->bgra32-into rgb full-width height
                        (%make-octets (* +aesp-frame-raw-width+ height 4))))
 
+(defun %frame-unchanged-p (fb prev-frame)
+  "T if FB (the live 24-bit RGB framebuffer) is byte-identical to
+PREV-FRAME (a same-size snapshot).  Plain AREF -- this is Phase 28c's
+single comparison seam; if Phase 29 lands a per-page dirty map, only
+this function's body needs to change to consult it instead of
+byte-comparing (converting to FAST-AREF would need its own loop-bound
+proof; nothing here has profiled hot enough to justify that yet)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) fb prev-frame))
+  (dotimes (i (length fb) t)
+    (unless (= (aref fb i) (aref prev-frame i))
+      (return-from %frame-unchanged-p nil))))
+
 (defun %push-video-frame (server machine)
   "Encode and send the current framebuffer to all video-port clients as
 FRAME_RAW (BGRA8888, no frame-number prefix -- see docs/PROTOCOL.md in
@@ -476,11 +524,21 @@ to convert anyway.  Also holds off pushing while NEEDS-FULL-RENDER-P is
 set: a client that just connected mid-frame would otherwise receive a
 torn frame (see AESP-SERVER's docstring and %REGISTER-VIDEO-CLIENT).
 
-Converts into AESP-SERVER's preallocated PAYLOAD-BUFFER (Phase 28b)
-rather than consing a fresh ~322 KB buffer per push -- safe because
-WRITE-AESP-MESSAGE writes it out synchronously via WRITE-SEQUENCE +
-FORCE-OUTPUT and retains no reference to it after returning (see the
-28b commit message for the trace through src/transport.lisp)."
+Dedup (Phase 28c): when PAYLOAD-VALID-P and the freshly rendered
+FRAMEBUFFER compares %FRAME-UNCHANGED-P against PREV-FRAME, this push
+resends the existing PAYLOAD-BUFFER verbatim -- no copy, no conversion.
+Every OTHER case (changed, or PAYLOAD-VALID-P false because a reconnect
+just invalidated it -- see %UNREGISTER-VIDEO-CLIENT) copies FRAMEBUFFER
+into PREV-FRAME, converts once via %RGB24->BGRA32-INTO into
+AESP-SERVER's preallocated PAYLOAD-BUFFER (Phase 28b -- reused across
+pushes rather than consing a fresh ~322 KB buffer each time; safe
+because WRITE-AESP-MESSAGE writes it out synchronously via
+WRITE-SEQUENCE + FORCE-OUTPUT and retains no reference to it after
+returning, see the 28b commit message), and sets PAYLOAD-VALID-P.  A
+frame is NEVER suppressed outright -- every call that gets past the
+gates above sends exactly one FRAME_RAW to every client, dedup only
+skips the WORK, because %PUSH-AUDIO-FRAME's docstring pins the Nth
+AUDIO_PCM to the Nth FRAME_RAW and A/V capture depends on that cadence."
   (declare (ignore machine))
   ;; Snapshot the list under lock, then write outside the lock so a slow
   ;; client doesn't block the emulator thread indefinitely.
@@ -491,10 +549,20 @@ FORCE-OUTPUT and retains no reference to it after returning (see the
       (return-from %push-video-frame nil))
     (let ((fb (aesp-server-framebuffer server)))
       (when (null fb) (return-from %push-video-frame nil))
-      (let ((payload (%rgb24->bgra32-into
+      (let* ((prev (aesp-server-prev-frame server))
+             (payload
+               (if (and (aesp-server-payload-valid-p server)
+                        prev
+                        (%frame-unchanged-p fb prev))
+                   (aesp-server-payload-buffer server)
+                   (progn
+                     (replace prev fb)
+                     (%rgb24->bgra32-into
                       fb atari800-cl.renderer:+framebuffer-width+
                       atari800-cl.renderer:+framebuffer-height+
-                      (aesp-server-payload-buffer server))))
+                      (aesp-server-payload-buffer server))
+                     (setf (aesp-server-payload-valid-p server) t)
+                     (aesp-server-payload-buffer server)))))
         (dolist (conn clients)
           (handler-case
               (write-aesp-message (tcp-stream conn) +aesp-frame-raw+ payload)
@@ -660,7 +728,8 @@ AESP-SERVER-*-PORT accessors)."
                          :audio-port   (tcp-listener-port al)
                          :framebuffer  (atari800-cl.renderer:make-framebuffer)
                          :payload-buffer (%make-octets
-                                          (* +aesp-frame-raw-width+ 240 4)))))
+                                          (* +aesp-frame-raw-width+ 240 4))
+                         :prev-frame   (atari800-cl.renderer:make-framebuffer))))
             ;; Wire the scanline and post-frame callbacks into the machine.
             ;; The scanline-fn early-returns when no video client is
             ;; connected (Phase 28a): rendering to a framebuffer nobody
