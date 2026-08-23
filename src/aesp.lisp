@@ -316,7 +316,13 @@ Extra slots for rendering:
                         open, guaranteeing the following push is a clean
                         top-to-bottom render.  Mirrors the shape of
                         %SYNC-AUDIO-ATTACHMENT's connect/disconnect fix
-                        for audio."
+                        for audio.
+  PAYLOAD-BUFFER      — a preallocated BGRA8888 scratch buffer
+                        ((* +AESP-FRAME-RAW-WIDTH+ 240 4) bytes), reused
+                        by every push instead of allocating a fresh
+                        ~322 KB vector per frame (Phase 28b; see
+                        %RGB24->BGRA32-INTO and the 28b commit message
+                        for why reuse is safe)."
   machine
   host
   control-listener video-listener audio-listener
@@ -330,7 +336,8 @@ Extra slots for rendering:
   (audio-clients '())
   (audio-unit    nil)
   (video-active-p      nil)
-  (needs-full-render-p nil))
+  (needs-full-render-p nil)
+  (payload-buffer nil))
 
 (defun %add-thread (server th)
   (with-lock ((aesp-server-lock server)) (push th (aesp-server-threads server)))
@@ -414,15 +421,27 @@ FRAME_RAW.  Clients that error during the write are silently dropped."
                 (%unregister-audio-client server conn)
                 (ignore-errors (tcp-close conn))))))))))
 
-(defun %rgb24->bgra32-cropped (rgb full-width height)
+(defun %rgb24->bgra32-into (rgb full-width height out)
   "Crop RGB (row-major, FULL-WIDTH x HEIGHT x 3 bytes/pixel) to the
 Attic-compatible +AESP-FRAME-RAW-WIDTH+-column visible area (dropping
-+AESP-FRAME-RAW-X1+ columns off each edge) and convert to BGRA8888
-(4 bytes/pixel, alpha 0xFF) for the FRAME_RAW wire format.  The
++AESP-FRAME-RAW-X1+ columns off each edge), convert to BGRA8888
+(4 bytes/pixel, alpha 0xFF), and write the result into the caller-
+supplied OUT buffer (sized (* +AESP-FRAME-RAW-WIDTH+ HEIGHT 4)) instead
+of allocating a fresh one -- Phase 28b, so a push can reuse one scratch
+buffer across frames rather than consing ~322 KB per push.  The
 renderer's internal framebuffer stays full-width 24-bit RGB; both the
-crop and the channel conversion happen only at this AESP push boundary."
-  (let* ((out-width +aesp-frame-raw-width+)
-         (out (%make-octets (* out-width height 4))))
+crop and the channel conversion happen only at this AESP push boundary.
+Returns OUT.
+
+RGB and OUT are declared (SIMPLE-ARRAY (UNSIGNED-BYTE 8) (*)): OUT
+arrives as a parameter (the reused PAYLOAD-BUFFER), so without the
+declaration the compiler cannot infer its element type the way it could
+when the buffer was allocated locally, and SBCL falls back to generic
+AREF dispatch across the ~322K writes per frame (measured -26% on the
+serve workload before the declaration was added)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) rgb out)
+           (type fixnum full-width height))
+  (let ((out-width +aesp-frame-raw-width+))
     (dotimes (y height)
       (let ((row-src (* y full-width 3))
             (row-dst (* y out-width 4)))
@@ -434,6 +453,14 @@ crop and the channel conversion happen only at this AESP push boundary."
                   (aref out (+ di 2)) (aref rgb si)            ; R
                   (aref out (+ di 3)) 255)))))                 ; A
     out))
+
+(defun %rgb24->bgra32-cropped (rgb full-width height)
+  "Like %RGB24->BGRA32-INTO but allocates and returns a fresh output
+buffer.  Kept for callers (tests, tools) that want a one-off conversion;
+%PUSH-VIDEO-FRAME itself uses %RGB24->BGRA32-INTO with AESP-SERVER's
+reused PAYLOAD-BUFFER instead."
+  (%rgb24->bgra32-into rgb full-width height
+                       (%make-octets (* +aesp-frame-raw-width+ height 4))))
 
 (defun %push-video-frame (server machine)
   "Encode and send the current framebuffer to all video-port clients as
@@ -447,7 +474,13 @@ work when it is empty (Phase 28a) -- with no video subscribers, the
 scanline-fn gate already skipped rendering, so there is nothing correct
 to convert anyway.  Also holds off pushing while NEEDS-FULL-RENDER-P is
 set: a client that just connected mid-frame would otherwise receive a
-torn frame (see AESP-SERVER's docstring and %REGISTER-VIDEO-CLIENT)."
+torn frame (see AESP-SERVER's docstring and %REGISTER-VIDEO-CLIENT).
+
+Converts into AESP-SERVER's preallocated PAYLOAD-BUFFER (Phase 28b)
+rather than consing a fresh ~322 KB buffer per push -- safe because
+WRITE-AESP-MESSAGE writes it out synchronously via WRITE-SEQUENCE +
+FORCE-OUTPUT and retains no reference to it after returning (see the
+28b commit message for the trace through src/transport.lisp)."
   (declare (ignore machine))
   ;; Snapshot the list under lock, then write outside the lock so a slow
   ;; client doesn't block the emulator thread indefinitely.
@@ -458,9 +491,10 @@ torn frame (see AESP-SERVER's docstring and %REGISTER-VIDEO-CLIENT)."
       (return-from %push-video-frame nil))
     (let ((fb (aesp-server-framebuffer server)))
       (when (null fb) (return-from %push-video-frame nil))
-      (let ((payload (%rgb24->bgra32-cropped
+      (let ((payload (%rgb24->bgra32-into
                       fb atari800-cl.renderer:+framebuffer-width+
-                      atari800-cl.renderer:+framebuffer-height+)))
+                      atari800-cl.renderer:+framebuffer-height+
+                      (aesp-server-payload-buffer server))))
         (dolist (conn clients)
           (handler-case
               (write-aesp-message (tcp-stream conn) +aesp-frame-raw+ payload)
@@ -624,7 +658,9 @@ AESP-SERVER-*-PORT accessors)."
                          :control-port (tcp-listener-port cl)
                          :video-port   (tcp-listener-port vl)
                          :audio-port   (tcp-listener-port al)
-                         :framebuffer  (atari800-cl.renderer:make-framebuffer))))
+                         :framebuffer  (atari800-cl.renderer:make-framebuffer)
+                         :payload-buffer (%make-octets
+                                          (* +aesp-frame-raw-width+ 240 4)))))
             ;; Wire the scanline and post-frame callbacks into the machine.
             ;; The scanline-fn early-returns when no video client is
             ;; connected (Phase 28a): rendering to a framebuffer nobody
