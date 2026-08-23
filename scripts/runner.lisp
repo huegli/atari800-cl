@@ -251,11 +251,34 @@ wait loop ever falls through."
              ;; The emulator advances past FRAME-COUNT, but for a program
              ;; that has finished drawing the image is unchanged.
              (let ((vc-sym (sym "ATARI800-CL.AESP" "AESP-SERVER-VIDEO-CLIENTS"))
-                   (dbg-i 0))
+                   (dbg-i 0)
+                   ;; Deadline-corrected pacing at ~59.92 fps (ROADMAP.md
+                   ;; Phase 28d), replacing a fixed (SLEEP 0.016).
+                   ;; NEXT-DEADLINE accumulates by one frame period every
+                   ;; iteration rather than sleeping a constant amount, so
+                   ;; per-frame jitter (GC, scheduling, a slow client
+                   ;; write) does not compound across frames the way a
+                   ;; fixed sleep would.  Sleeping only
+                   ;; (max 0 (- next-deadline now)) means a frame that ran
+                   ;; fast waits out the rest of its period and a frame
+                   ;; that ran slow simply doesn't sleep; clamping
+                   ;; NEXT-DEADLINE up to NOW whenever it has fallen
+                   ;; behind stops a bad stretch (e.g. a blocked client
+                   ;; write) from making the loop "catch up" afterward by
+                   ;; firing a burst of frames with no sleep at all.
+                   (frame-period (/ (coerce internal-time-units-per-second
+                                            'double-float)
+                                    59.92d0))
+                   (next-deadline (get-internal-real-time)))
                (loop
                  (machine-run-frame machine)
-                 ;; ~60 fps pacing so we don't burn a core while waiting.
-                 (sleep 0.016)
+                 (incf next-deadline frame-period)
+                 (let ((now (get-internal-real-time)))
+                   (when (< next-deadline now)
+                     (setf next-deadline now))
+                   (let ((remaining (- next-deadline now)))
+                     (when (plusp remaining)
+                       (sleep (/ remaining internal-time-units-per-second)))))
                  (when dbg-on
                    (incf dbg-i)
                    (when (zerop (mod dbg-i 60))
