@@ -519,3 +519,166 @@ itself still propagates normally afterward.
      (warn "atari800-cl.compat: WITH-PROFILING has no profiler implementation for ~A; running BODY unprofiled."
            (lisp-implementation-type))
      ,@body))
+
+;;; ---------------------------------------------------------------------------
+;;; FAST-AREF -- a scoped, auditable (safety 0) array access
+;;; (PERFORMANCE_PLAN.md's carve-out; ROADMAP.md Phase 26)
+;;;
+;;; Phase 18's profiling pass found that on LispWorks 8.1.1 (ARM64), every
+;;; checked array access -- no matter how precisely its element type and
+;;; dimensions are declared -- compiles to an out-of-line SYSTEM::AREF1 /
+;;; SET-AREF1 call at (safety 1); only (safety 0) gets LispWorks to inline
+;;; the access. SBCL's ARM64 backend already inlines the identical
+;;; bounds-checked access at (safety 1), so SBCL never needs the trapdoor.
+;;;
+;;; FAST-AREF is that trapdoor, narrowed as far as it can go: it is a
+;;; single macro, defined only here, and its unchecked form is only ever
+;;; reached on LispWorks. Everywhere else in the tree -- SBCL entirely,
+;;; and LispWorks under ATARI800_CL_CHECKED_AREF -- FAST-AREF expands to
+;;; the exact same checked (AREF (THE type array) index) form a caller
+;;; would have written by hand. Nothing about FAST-AREF changes what gets
+;;; modelled; it only changes how one array read/write is compiled.
+;;;
+;;; %CHECKED-AREF-P below is called at macroexpansion time, i.e. compile
+;;; time -- not at run time -- so the choice between the checked and
+;;; unchecked expansion is baked into the fasl. That is exactly why the
+;;; fasl-cache directory matters: ASDF decides whether to recompile a file
+;;; by comparing source/fasl timestamps, never by diffing environment
+;;; variables, so a checked (ATARI800_CL_CHECKED_AREF=1) run launched
+;;; after an ordinary run would silently reuse the *unchecked* fasls it
+;;; finds sitting in .cache/fasls/ and prove nothing. scripts/test-
+;;; lispworks.lisp (and, for symmetry, scripts/test-sbcl.sh) route
+;;; ATARI800_CL_CHECKED_AREF runs to a separate .cache/fasls-checked/
+;;; output-translation directory instead, so a checked run always starts
+;;; from a from-scratch compile and can never observe a stale unchecked
+;;; fasl.
+
+(defun %checked-aref-env-value ()
+  "Return the value of the ATARI800_CL_CHECKED_AREF environment variable as
+a string, or NIL if it is unset. Read at macroexpansion (i.e. compile)
+time by FAST-AREF and its SETF expander -- never at run time -- so the
+checked/unchecked decision is fixed when the fasl is produced. See the
+section comment above for why that makes the output-translation cache
+directory part of this mechanism's contract, not an implementation detail."
+  #+sbcl       (sb-ext:posix-getenv "ATARI800_CL_CHECKED_AREF")
+  #+lispworks  (lispworks:environment-variable "ATARI800_CL_CHECKED_AREF")
+  #-(or sbcl lispworks) (uiop:getenv "ATARI800_CL_CHECKED_AREF"))
+
+(defun %checked-aref-p ()
+  "True when ATARI800_CL_CHECKED_AREF is set to a non-empty string. On
+LispWorks this forces FAST-AREF's normally-unchecked expansion back to the
+fully checked (AREF (THE type array) index) form used on SBCL -- the audit
+switch a checked LispWorks build is one env var (and one from-scratch
+recompile; see above) away from."
+  (let ((v (%checked-aref-env-value)))
+    (and v (plusp (length v)))))
+
+(defun %fast-aref-read-form (type array index)
+  "Return the form (FAST-AREF TYPE ARRAY INDEX) expands to, given already-
+evaluated (or safely re-evaluable) ARRAY and INDEX forms. Shared by the
+FAST-AREF macro and its SETF expander so the read path and the write
+path's read-modify never disagree about which expansion is in effect."
+  (let ((checked-form `(aref (the ,type ,array) ,index)))
+    #+sbcl
+    checked-form
+    #+lispworks
+    (if (%checked-aref-p)
+        checked-form
+        ;; The one (safety 0) site in the whole tree. SPEED 3 is what
+        ;; actually gets LispWorks to inline AREF1 instead of calling out
+        ;; to SYSTEM::AREF1; SAFETY 0 is what lets it skip the bounds
+        ;; check that call performs. DEBUG is deliberately left at the
+        ;; file's ambient policy ("debug per file" in the ROADMAP text)
+        ;; rather than pinned here.
+        `(locally (declare (optimize (safety 0) (speed 3)))
+           (aref (the ,type ,array) (the fixnum ,index))))
+    #-(or sbcl lispworks)
+    checked-form))
+
+(defun %fast-aref-write-form (type array index value)
+  "Return the form (SETF (FAST-AREF TYPE ARRAY INDEX) VALUE) expands to,
+given already-evaluated (or safely re-evaluable) ARRAY, INDEX, and VALUE
+forms. Mirrors %FAST-AREF-READ-FORM's checked/unchecked decision exactly;
+see its docstring."
+  (let ((checked-form `(setf (aref (the ,type ,array) ,index) ,value)))
+    #+sbcl
+    checked-form
+    #+lispworks
+    (if (%checked-aref-p)
+        checked-form
+        `(locally (declare (optimize (safety 0) (speed 3)))
+           (setf (aref (the ,type ,array) (the fixnum ,index)) ,value)))
+    #-(or sbcl lispworks)
+    checked-form))
+
+(defmacro fast-aref (type array index)
+  "Read ARRAY at INDEX, asserting ARRAY is of the literal array TYPE (e.g.
+(SIMPLE-ARRAY FIXNUM (4))). (SETF FAST-AREF) is also defined, so
+`(setf (fast-aref type array index) v)` works and, like SETF of AREF,
+returns V.
+
+CONTRACT -- read this before writing a call site: a FAST-AREF call site
+MUST make INDEX provably in range *by construction*, independent of
+whatever bounds check this macro may or may not perform underneath it --
+e.g. masked with LOGAND against the array's size, bounded by a LOOP whose
+trip count is the array's LENGTH, or typed to exactly the array's
+dimension. The call site MUST carry a one-line comment naming that proof
+(\"index masked to 4 slots\", \"loop bound is (length buf)\", etc.). An
+access that cannot state its proof in one line stays plain AREF -- do not
+reach for FAST-AREF just because a loop is hot.
+
+The two hosts this project targets need this guarantee to different
+degrees, which is exactly what makes it worth stating explicitly rather
+than trusting the compiler:
+
+  * SBCL: FAST-AREF expands to (AREF (THE type array) index) -- fully
+    bounds-checked, unchanged semantics. SBCL's ARM64 backend already
+    inlines this at the project's (safety 1) floor, so on SBCL the macro
+    is an identity in both semantics and performance; SBCL never sees the
+    unchecked expansion described below.
+
+  * LispWorks: FAST-AREF expands to the same access wrapped in
+    (locally (declare (optimize (safety 0) (speed 3))) ...), with both
+    ARRAY and INDEX THE-asserted -- ARRAY to TYPE, INDEX to FIXNUM. This
+    is the ONLY place in the codebase (safety 0) is allowed to appear
+    (PERFORMANCE_PLAN.md's floor is (safety 1) everywhere else, on both
+    hosts); it exists because LispWorks 8.1.1's ARM64 backend only
+    inlines AREF/SET-AREF1 at (safety 0), routing every (safety 1) access
+    through an out-of-line generic dispatch call regardless of how
+    precisely the array is typed (ROADMAP.md Phase 26, following the
+    Phase 18 profiling pass). Getting this wrong at a call site that
+    cannot actually prove its index in range is a real out-of-bounds
+    write, not a slowdown -- hence the contract above.
+
+CHECKED MODE -- the audit switch: with the environment variable
+ATARI800_CL_CHECKED_AREF set to any non-empty string AT COMPILE
+(macroexpansion) TIME, the LispWorks expansion becomes identical to the
+SBCL one (fully checked) -- i.e. a checked LispWorks build is one env var
+away. Because the checked/unchecked choice is baked into the fasl at
+compile time, not read at run time, ASDF's ordinary timestamp-based
+recompilation will NOT pick up a change to this env var by itself: a
+checked run launched after an ordinary run would silently reuse
+already-compiled unchecked fasls and prove nothing. scripts/test-
+lispworks.lisp (and scripts/test-sbcl.sh, for symmetry, though SBCL is
+always fully checked) route ATARI800_CL_CHECKED_AREF runs to a separate
+.cache/fasls-checked/ ASDF output-translation directory instead of the
+default .cache/fasls/, guaranteeing a from-scratch recompile every time
+the switch is set."
+  (%fast-aref-read-form type array index))
+
+(define-setf-expander fast-aref (type array index &environment env)
+  "SETF expansion for FAST-AREF -- see FAST-AREF's docstring for the full
+contract. Evaluates ARRAY and INDEX exactly once each (bound to fresh
+temporaries) regardless of how many times the underlying access form
+mentions them, matching ordinary SETF-of-AREF evaluation semantics; the
+stored value, like SETF of AREF, is the expansion's result."
+  (declare (ignore env))
+  (let ((array-var (gensym "FAST-AREF-ARRAY"))
+        (index-var (gensym "FAST-AREF-INDEX"))
+        (store-var (gensym "FAST-AREF-VALUE")))
+    (values
+     (list array-var index-var)
+     (list array index)
+     (list store-var)
+     (%fast-aref-write-form type array-var index-var store-var)
+     (%fast-aref-read-form type array-var index-var))))

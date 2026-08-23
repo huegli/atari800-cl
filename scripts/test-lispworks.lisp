@@ -20,9 +20,21 @@
         (merge-pathnames #P"quicklisp/dists/quicklisp/software/"
                          (user-homedir-pathname)))))
 
+(defun checked-aref-p ()
+  ;; ROADMAP.md Phase 26 / src/compat.lisp FAST-AREF: the checked/unchecked
+  ;; expansion is chosen at macroexpansion (compile) time from this env
+  ;; var, and ASDF will not recompile just because the var changed -- so a
+  ;; checked run must land in its own fasl cache (see below) to guarantee
+  ;; a from-scratch compile instead of silently reusing unchecked fasls.
+  (let ((v (getenv-or-nil "ATARI800_CL_CHECKED_AREF")))
+    (and v (plusp (length v)))))
+
 (defun configure-asdf-for-sandbox ()
   (let* ((root (project-root-pathname))
-         (cache (merge-pathnames #P".cache/fasls/" root))
+         (cache (merge-pathnames (if (checked-aref-p)
+                                      #P".cache/fasls-checked/"
+                                      #P".cache/fasls/")
+                                  root))
          (ql-software (quicklisp-software-pathname)))
     (ensure-directories-exist cache)
     (unless (probe-file ql-software)

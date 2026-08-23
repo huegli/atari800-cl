@@ -2,7 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CACHE="$ROOT/.cache/fasls"
+# ROADMAP.md Phase 26 / src/compat.lisp FAST-AREF: SBCL is always fully
+# checked (ATARI800_CL_CHECKED_AREF only changes LispWorks's expansion), so
+# this separate cache directory is for symmetry with test-lispworks.lisp
+# rather than a behavioral necessity here.
+if [ -n "${ATARI800_CL_CHECKED_AREF:-}" ]; then
+  CACHE="$ROOT/.cache/fasls-checked"
+else
+  CACHE="$ROOT/.cache/fasls"
+fi
 QL_SOFTWARE="${QUICKLISP_SOFTWARE:-$HOME/quicklisp/dists/quicklisp/software}"
 
 if ! command -v sbcl >/dev/null 2>&1; then

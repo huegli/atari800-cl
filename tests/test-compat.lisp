@@ -213,6 +213,97 @@ than being swallowed by the profiler set-up/tear-down."
       (/ 1 0))))
 
 ;;; ---------------------------------------------------------------------------
+;;; FAST-AREF (ROADMAP.md Phase 26 -- the scoped LispWorks (safety 0) array
+;;; access carve-out)
+;;;
+;;; These tests check FAST-AREF's observable contract -- read/write values
+;;; and SETF return value identical to plain AREF -- on both hosts, plus
+;;; the macroexpansion shape each host is supposed to produce. The
+;;; expansion-shape test below branches on *IMPLEMENTATION* at run time
+;;; (never on #+/#- reader conditionals, which CLAUDE.md reserves for
+;;; src/compat.lisp alone): LispWorks, run without ATARI800_CL_CHECKED_AREF
+;;; set, must show the unchecked (safety 0) LOCALLY form; SBCL must show
+;;; the plain checked access.
+
+(test fast-aref-reads-like-aref
+  "FAST-AREF reads the same values AREF would, on a fixnum array and on a
+differently-typed array, for every index."
+  (let ((fx (make-array 4 :element-type 'fixnum :initial-contents '(10 20 30 40)))
+        (u8 (make-byte-vector 4 :initial-element 0)))
+    (dotimes (i 4) (setf (aref u8 i) (* i 11)))
+    (dotimes (i 4)
+      (is (= (aref fx i) (fast-aref (simple-array fixnum (4)) fx i))
+          "index ~D: fast-aref should read the same fixnum AREF does" i)
+      (is (= (aref u8 i)
+             (fast-aref (simple-array (unsigned-byte 8) (4)) u8 i))
+          "index ~D: fast-aref should read the same byte AREF does" i))))
+
+(test fast-aref-setf-writes-like-aref-and-returns-value
+  "(SETF FAST-AREF) writes the same way (SETF AREF) would, and -- like
+(SETF AREF) -- the SETF form's own value is the stored value."
+  (let ((fx (make-array 4 :element-type 'fixnum :initial-element 0))
+        (u8 (make-byte-vector 4 :initial-element 0)))
+    (let ((result (setf (fast-aref (simple-array fixnum (4)) fx 2) 777)))
+      (is (= 777 result) "setf of fast-aref should return the stored value")
+      (is (= 777 (aref fx 2)) "the write should be visible through plain AREF too"))
+    (let ((result (setf (fast-aref (simple-array (unsigned-byte 8) (4)) u8 1) 200)))
+      (is (= 200 result))
+      (is (= 200 (aref u8 1))))))
+
+(test fast-aref-setf-evaluates-array-and-index-once
+  "The SETF expander must evaluate its ARRAY and INDEX subforms exactly
+once each, even though the expansion binds them to temporaries and reads
+them back out -- guards against a hand-written expander that accidentally
+duplicates a side-effecting subform."
+  (let ((arrays (list (make-array 4 :element-type 'fixnum :initial-element 0)
+                       (make-array 4 :element-type 'fixnum :initial-element 0)))
+        (array-calls 0)
+        (indices (list 0 1 2 3))
+        (index-calls 0))
+    (flet ((next-array () (incf array-calls) (pop arrays))
+           (next-index () (incf index-calls) (pop indices)))
+      (setf (fast-aref (simple-array fixnum (4)) (next-array) (next-index)) 42))
+    (is (= 1 array-calls) "array subform should be evaluated exactly once")
+    (is (= 1 index-calls) "index subform should be evaluated exactly once")))
+
+(test fast-aref-expansion-shape
+  "FAST-AREF's macroexpansion has the shape ROADMAP.md Phase 26 specifies
+for the running host. Dispatches on *IMPLEMENTATION* (a run-time value from
+this package) rather than a #+/#- reader conditional, since CLAUDE.md
+reserves reader conditionals for src/compat.lisp alone.
+
+  * :SBCL -- FAST-AREF is an identity: it expands to a plain checked
+    (AREF (THE type array) index), no LOCALLY/OPTIMIZE wrapper at all.
+
+  * :LISPWORKS, ATARI800_CL_CHECKED_AREF unset (the default this suite
+    runs under) -- the expansion must be wrapped in a LOCALLY declaring
+    (SAFETY 0) -- the one inlining trapdoor Phase 26 licenses -- with
+    both the array and the index THE-asserted. If the checked-mode env
+    var IS set in this process, the unchecked shape is unreachable and
+    this test skips rather than failing."
+  (let ((expansion (macroexpand-1 '(fast-aref (simple-array fixnum (4)) arr idx))))
+    (case *implementation*
+      (:sbcl
+       (is (equal '(aref (the (simple-array fixnum (4)) arr) idx) expansion)
+           "unexpected FAST-AREF expansion on SBCL: ~S" expansion))
+      (:lispworks
+       (let ((checked (uiop:getenv "ATARI800_CL_CHECKED_AREF")))
+         (if (and checked (plusp (length checked)))
+             (skip "ATARI800_CL_CHECKED_AREF is set in this process; the unchecked expansion is not reachable here.")
+             (progn
+               (is (eq 'locally (first expansion))
+                   "expected a LOCALLY wrapper; got ~S" expansion)
+               (let ((decl (find 'declare (rest expansion)
+                                  :key (lambda (f) (and (consp f) (first f))))))
+                 (is (not (null decl)) "expected a DECLARE form in the LOCALLY body")
+                 (let ((optimize-decl (find 'optimize (rest decl)
+                                             :key (lambda (f) (and (consp f) (first f))))))
+                   (is (not (null optimize-decl)) "expected an (OPTIMIZE ...) declaration")
+                   (is (member '(safety 0) (rest optimize-decl) :test #'equal)
+                       "expected (SAFETY 0) among ~S" optimize-decl)))))))
+      (t (skip "no FAST-AREF expansion-shape expectation for ~S" *implementation*)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; %SKIP-OR-FAIL self-test (ROADMAP.md Phase 21 -- the strict test gate)
 ;;;
 ;;; %SKIP-OR-FAIL (tests/test-helpers.lisp) is what turns the Klaus, Harte,

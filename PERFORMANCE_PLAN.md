@@ -38,7 +38,18 @@ suite green on BOTH implementations.
   before/after numbers from both implementations.
 - Safety floor: compiled code keeps `(safety 1)` minimum. Do not use
   `(safety 0)` anywhere -- this is a learning codebase and bounds checks
-  stay on.
+  stay on -- EXCEPT the single, narrow carve-out in `src/compat.lisp`'s
+  `fast-aref` macro (ROADMAP.md Phase 26): `(safety 0)` exists only
+  inside `fast-aref`'s LispWorks expansion, and only when a call site can
+  state, in a one-line comment, a proof that its index is in range by
+  construction (masked, loop-bounded, or exactly typed) -- an access that
+  cannot state that proof stays plain `aref`. SBCL keeps `(safety 1)`
+  everywhere, including through `fast-aref`, which is an identity there.
+  Setting the environment variable `ATARI800_CL_CHECKED_AREF` to any
+  non-empty string at compile time forces `fast-aref`'s LispWorks
+  expansion back to fully checked too -- see `src/compat.lisp` for the
+  macro and the separate `.cache/fasls-checked/` rebuild mechanism that
+  keeps a checked run from reusing stale unchecked fasls.
 - Do not change modelled behaviour. If an optimization needs a semantic
   change, it belongs in SCANLINE_ACCURACY_PLAN.md instead.
 - Ordering note: the single biggest win -- the scanline-granular scheduler --
@@ -255,4 +266,9 @@ Commit: "Add profiling helpers; record post-optimization profile".
   monolithic interpreter loop, no implementation-specific intrinsics
   outside compat. If a proposed change makes the code harder to read for
   a CL learner, the performance win has to be an order of magnitude, not
-  percent -- otherwise reject it.
+  percent -- otherwise reject it. The one exception to "no `(safety 0)`"
+  is `src/compat.lisp`'s `fast-aref` macro (ROADMAP.md Phase 26): a
+  single, auditable, LispWorks-only, proof-obligated carve-out, not a
+  general license -- see the ground rule above and `fast-aref`'s
+  docstring for the contract, and `ATARI800_CL_CHECKED_AREF` for the
+  audit switch that turns it back into `(safety 1)`.

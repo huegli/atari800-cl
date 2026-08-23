@@ -70,6 +70,7 @@
            #:write-binary-file
            #:without-gc-warnings
            #:with-profiling
+           #:fast-aref
            ;; Process / filesystem helpers
            #:current-process-id
            #:delete-file-if-exists
