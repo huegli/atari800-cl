@@ -336,11 +336,17 @@ the file header for provenance."
   (declare (type pokey pokey) (type fixnum ch))
   (let* ((audf   (pokey-audf pokey))
          (fast-p (= 1 (%channel-divisor pokey ch))))
+    ;; CH arrives 0-3 by construction (channel index) but is not a literal
+    ;; constant here; masked explicitly for FAST-AREF per its contract.
+    ;; (1+ CH) only happens when %LINKED-LOW-P holds, i.e. CH is 0 or 2, so
+    ;; the sum is 1 or 3 -- still masked for the same explicitness.
     (if (%linked-low-p pokey ch)
-        (+ (ash (aref audf (1+ ch)) 8)
-           (aref audf ch)
+        (+ (ash (fast-aref (simple-array (unsigned-byte 8) (4)) audf
+                            (logand (1+ ch) 3))
+                8)
+           (fast-aref (simple-array (unsigned-byte 8) (4)) audf (logand ch 3))
            (if fast-p +timer-reload-offset-fast-16bit+ 0))
-        (+ (aref audf ch)
+        (+ (fast-aref (simple-array (unsigned-byte 8) (4)) audf (logand ch 3))
            (if fast-p +timer-reload-offset-fast+ 0)))))
 
 (declaim (inline %underflow-owner-channel))
@@ -624,18 +630,24 @@ A linked pair's HIGH channel takes its clock from the low byte's borrow,
 which the pair's single 16-bit countdown already accounts for, so its
 own divided-clock expiry does nothing but reload the sub-counter."
   (declare (type pokey pokey) (type fixnum ch))
-  (setf (aref (pokey-sub-counters pokey) ch)
+  ;; CH arrives as 0-3 from POKEY-TICK/POKEY-ADVANCE's channel loops; not a
+  ;; literal constant at this scope, so masked explicitly at each
+  ;; channel-array access below per the FAST-AREF contract.
+  (setf (fast-aref (simple-array fixnum (4)) (pokey-sub-counters pokey)
+                    (logand ch 3))
         (%channel-divisor pokey ch))
   (cond
     ((%linked-high-p pokey ch) nil)
     (t
-     (let ((new (1- (aref (pokey-timer-counts pokey) ch))))
+     (let ((new (1- (fast-aref (simple-array fixnum (4))
+                                (pokey-timer-counts pokey) (logand ch 3)))))
        (declare (type fixnum new))
        (cond
          ((minusp new)
           ;; Underflow: reload, clock the audio output flip-flop, and try
           ;; to fire the responsible IRQ.
-          (setf (aref (pokey-timer-counts pokey) ch)
+          (setf (fast-aref (simple-array fixnum (4))
+                            (pokey-timer-counts pokey) (logand ch 3))
                 (%timer-reload-value pokey ch))
           (let ((owner (%underflow-owner-channel pokey ch)))
             (when audio
@@ -643,7 +655,9 @@ own divided-clock expiry does nothing but reload the sub-counter."
                        audio owner))
             (%fire-timer-irq pokey cpu owner)))
          (t
-          (setf (aref (pokey-timer-counts pokey) ch) new)
+          (setf (fast-aref (simple-array fixnum (4))
+                            (pokey-timer-counts pokey) (logand ch 3))
+                new)
           nil))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -713,8 +727,12 @@ set."
                  `(dotimes (ch 4)
                     (declare (type fixnum ch))
                     ;; Decrement the divider pre-counter; tick the timer
-                    ;; only when it expires.
-                    (when (zerop (decf (aref (pokey-sub-counters pokey) ch)))
+                    ;; only when it expires.  CH is the DOTIMES loop var,
+                    ;; 0-3 by trip count; masked explicitly for FAST-AREF
+                    ;; per its contract.
+                    (when (zerop (decf (fast-aref (simple-array fixnum (4))
+                                                   (pokey-sub-counters pokey)
+                                                   (logand ch 3))))
                       (when (%expire-channel pokey cpu ch ,audio-form)
                         (setf irq-raised t))))))
       (if (zerop pending)
@@ -778,14 +796,24 @@ the audio check alone lived in this position."
                  ;; splicing a non-empty hook.
                  `(loop while (plusp n)
                         do (let ((chunk (min n
-                                             (aref subs 0) (aref subs 1)
-                                             (aref subs 2) (aref subs 3))))
+                                             ;; Literal indices 0-3: in
+                                             ;; range by construction, no
+                                             ;; mask needed.
+                                             (fast-aref (simple-array fixnum (4)) subs 0)
+                                             (fast-aref (simple-array fixnum (4)) subs 1)
+                                             (fast-aref (simple-array fixnum (4)) subs 2)
+                                             (fast-aref (simple-array fixnum (4)) subs 3))))
                              (declare (type fixnum chunk))
                              (decf n chunk)
                              ,@audio-hook
                              (dotimes (ch 4)
                                (declare (type fixnum ch))
-                               (when (zerop (decf (aref subs ch) chunk))
+                               ;; CH is the DOTIMES loop var, 0-3 by trip
+                               ;; count; masked explicitly for FAST-AREF
+                               ;; per its contract.
+                               (when (zerop (decf (fast-aref (simple-array fixnum (4))
+                                                              subs (logand ch 3))
+                                                   chunk))
                                  (when (%expire-channel pokey cpu ch
                                                         ,(if audio-hook
                                                              'audio
