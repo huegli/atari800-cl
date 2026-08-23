@@ -8,7 +8,7 @@
 ;;;; approach as tests/test-helpers.lisp::%make-synthetic-os-rom, but
 ;;;; inlined here so the bench does not depend on the test system.
 ;;;;
-;;;; Six workloads:
+;;;; Seven workloads:
 ;;;;   NOP     — a NOP sled that loops back via a JMP at $FFF9, so the PC
 ;;;;             marches NOPs from $C000 to $FFF9 forever without running
 ;;;;             into the vector bytes.  Baseline CPU/memory path.
@@ -35,6 +35,13 @@
 ;;;;             renderer attached.  The canonical parked-machine load:
 ;;;;             spin loop + unchanging screen, e.g. a real OS sitting at
 ;;;;             the BASIC READY prompt.
+;;;;   SERVE   — the IDLE machine plus a real AESP server with one
+;;;;             connected video client draining FRAME_RAW on a
+;;;;             background thread, exercising the actual push path
+;;;;             (render -> BGRA convert -> TCP write) an idle served
+;;;;             session still pays for every frame.  Skips gracefully
+;;;;             (like KLAUS) if a loopback TCP listener cannot be bound
+;;;;             in this sandbox.
 ;;;;   KLAUS   — Klaus Dormann 6502 functional test binary loaded into
 ;;;;             RAM at $0000, run until the success trap at $3469.
 ;;;;             Skips gracefully if roms/6502_functional_test.bin is absent.
@@ -51,6 +58,7 @@
   (:export #:run-benchmarks
             #:run-workload
             #:run-klaus-workload
+            #:run-serve-workload
             #:*warmup-frames*
             #:*measured-frames*
             #:*ntsc-fps*))
@@ -372,6 +380,102 @@ found (prints a SKIP line instead)."
              (list line frames))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Serve workload
+;;;
+;;; Same idle-machine setup as :idle, plus the real AESP push path: a
+;;; running AESP server, one connected video client draining FRAME_RAW
+;;; messages on a background thread, and MACHINE-RUN-FRAME timed with
+;;; the post-frame render/convert/send active.  Measures the layer-3/4
+;;; idle waste ROADMAP.md's Phase 27-31 tranche targets: unconditional
+;;; per-scanline rendering and per-frame BGRA conversion/send even
+;;; though the screen and client never change.
+
+(defun %drain-video-client (stream stop-cell)
+  "Loop reading and discarding AESP messages from STREAM until (CAR
+STOP-CELL) is true or the read errors.  RUN-SERVE-WORKLOAD's teardown
+closes the socket out from under this loop (from the caller's thread)
+to unblock a pending read, so an error here is an expected exit, not a
+failure -- it is swallowed silently."
+  (handler-case
+      (loop until (car stop-cell)
+            do (atari800-cl.aesp:read-aesp-message stream))
+    (error () nil)))
+
+(defun run-serve-workload ()
+  "Run the :serve workload: build a machine on MAKE-IDLE-ROM with
+%SETUP-DISPLAY-WORKLOAD applied (the same static 24-line mode-2 screen
+:idle uses), start a real AESP server on 127.0.0.1 with all three ports
+OS-assigned, connect one video client through the project's own TCP
+transport (atari800-cl.transport, the layer tests/test-aesp.lisp uses),
+and drain it on a background thread while timing *measured-frames*
+worth of MACHINE-RUN-FRAME with the post-frame FRAME_RAW/AUDIO_PCM push
+active (START-AESP-SERVER wires its own scanline-fn/post-frame-fn over
+%SETUP-DISPLAY-WORKLOAD's, exactly as it does for a real served
+machine).  Prints and returns a BENCH line like RUN-WORKLOAD.
+
+Sandboxed command environments can deny loopback TCP listener creation
+(TCP-LISTEN signals an error, typically EPERM) -- the same caveat the
+run-tests skill documents for the live AESP server tests.  When that
+happens this workload prints a SKIP line and returns NIL, exactly as
+RUN-KLAUS-WORKLOAD does when its binary is missing."
+  (let ((machine (atari800-cl.machine:make-atari-machine)))
+    (atari800-cl.machine:machine-cold-reset machine :os-rom (make-idle-rom))
+    (%setup-display-workload machine)
+    (let ((server
+            (handler-case
+                (atari800-cl.aesp:start-aesp-server
+                 machine :host "127.0.0.1"
+                         :control-port 0 :video-port 0 :audio-port 0)
+              (error (e)
+                (format *standard-output*
+                        "SKIP serve AESP listener unavailable: ~A~%" e)
+                (force-output *standard-output*)
+                nil))))
+      (when (null server)
+        (return-from run-serve-workload nil))
+      (let* ((conn (atari800-cl.transport:tcp-connect
+                    "127.0.0.1"
+                    (atari800-cl.aesp:aesp-server-video-port server)))
+             (stream (atari800-cl.transport:tcp-stream conn))
+             (stop-cell (list nil))
+             (drain-thread (atari800-cl.compat:make-thread
+                            (lambda () (%drain-video-client stream stop-cell))
+                            :name "bench-serve-video-drain")))
+        (unwind-protect
+             (progn
+               (dotimes (i *warmup-frames*)
+                 (atari800-cl.machine:machine-run-frame machine))
+               (let* ((start (get-internal-real-time))
+                      (frames *measured-frames*))
+                 (dotimes (i frames)
+                   (atari800-cl.machine:machine-run-frame machine))
+                 (let* ((end   (get-internal-real-time))
+                        (ticks (- end start))
+                        (secs  (/ (coerce ticks 'double-float)
+                                  (coerce internal-time-units-per-second 'double-float)))
+                        (fps   (/ (coerce frames 'double-float) secs))
+                        (rx    (/ fps *ntsc-fps*))
+                        (line  (format nil "BENCH serve frames=~D seconds=~6,3F fps=~8,2F realtime-x=~6,3F"
+                                       frames secs fps rx)))
+                   (write-line line)
+                   (force-output *standard-output*)
+                   line)))
+          ;; Teardown, in order: stop the drain thread (flag + close its
+          ;; socket to unblock the read, then wait it out with the same
+          ;; timeout/DESTROY-THREAD fallback STOP-AESP-SERVER uses for its
+          ;; own reader threads), close the client, STOP-AESP-SERVER.
+          (setf (car stop-cell) t)
+          (ignore-errors (atari800-cl.transport:tcp-close conn))
+          (let ((deadline (+ (get-internal-real-time)
+                             (truncate (* 2.0 internal-time-units-per-second)))))
+            (loop while (and (atari800-cl.compat:thread-alive-p drain-thread)
+                             (< (get-internal-real-time) deadline))
+                  do (sleep 0.005))
+            (when (atari800-cl.compat:thread-alive-p drain-thread)
+              (atari800-cl.compat:destroy-thread drain-thread)))
+          (atari800-cl.aesp:stop-aesp-server server))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Workload runner
 
 (defun run-workload (name rom &key setup-fn)
@@ -405,14 +509,16 @@ Returns the printed line as a string."
         (force-output *standard-output*)
         line))))
 
-(defun run-benchmarks (&key (workloads '(:nop :irq :display :audio :idle :klaus)))
+(defun run-benchmarks (&key (workloads '(:nop :irq :display :audio :idle :serve :klaus)))
   "Run every workload named in WORKLOADS (default :nop, :irq, :display,
-:audio, :idle, :klaus) and print one BENCH line per workload.  The
-:idle workload is a JMP-self spin loop with the :display workload's
-static screen attached (the canonical parked-machine load).  The
-:klaus workload skips gracefully if the functional test binary is not
-found.  Returns a list of the printed lines (NIL entries for skipped
-workloads are removed)."
+:audio, :idle, :serve, :klaus) and print one BENCH line per workload.
+The :idle workload is a JMP-self spin loop with the :display workload's
+static screen attached (the canonical parked-machine load); :serve adds
+a real AESP server with one drained video client on top of :idle.  The
+:serve and :klaus workloads skip gracefully -- :serve when a loopback
+TCP listener cannot be bound in this sandbox, :klaus when the
+functional test binary is not found.  Returns a list of the printed
+lines (NIL entries for skipped workloads are removed)."
   (let ((roms (list (cons :nop (make-nop-rom))
                     (cons :irq (make-irq-rom))))
         (lines '()))
@@ -434,6 +540,10 @@ workloads are removed)."
          (push (run-workload "idle" (make-idle-rom)
                              :setup-fn #'%setup-display-workload)
                lines))
+        ((eq w :serve)
+         (let ((result (run-serve-workload)))
+           (when result
+             (push result lines))))
         (t
          (let ((rom (cdr (assoc w roms))))
            (unless rom
