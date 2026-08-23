@@ -265,6 +265,98 @@ frame, so a machine nobody is listening to stops paying for it."
       (is-false (atari800-cl.aesp::aesp-server-audio-unit srv)
                 "the audio unit must be detached once the last client leaves"))))
 
+;;; ---------------------------------------------------------------------------
+;;; Video push economics (ROADMAP.md Phase 28)
+
+(defun %spawn-video-drain (stream)
+  "Continuously drain FRAME_RAW-shaped messages off STREAM into a list
+(protected by a lock), so a test can run frames through the machine's
+command mailbox (which blocks the CALLING thread until the emulator
+thread finishes the frame, post-frame push included) without
+deadlocking against its own unread ~322 KB FRAME_RAW payload -- the
+socket write inside the push would otherwise be able to block waiting
+for the very thread that is waiting on MACHINE-SUBMIT to return.
+Returns (values thread lock box); (CAR BOX) is the list of received
+(type . payload) conses, newest first.  The thread exits quietly on any
+stream error (EOF once the connection closes)."
+  (let ((lock (make-lock "video-drain"))
+        (box (list nil)))
+    (values
+     (make-thread
+      (lambda ()
+        (handler-case
+            (loop
+              (multiple-value-bind (ty pl) (atari800-cl.aesp:read-aesp-message stream)
+                (with-lock (lock) (push (cons ty pl) (car box)))))
+          (error () nil)))
+      :name "aesp-test-video-drain")
+     lock box)))
+
+(defun %video-drain-count (lock box)
+  (with-lock (lock) (length (car box))))
+
+(defun %video-drain-messages (lock box)
+  "The messages BOX holds so far, oldest first."
+  (with-lock (lock) (reverse (car box))))
+
+(defun %stop-video-drain (conn thread &key (timeout 2.0))
+  "Tear down a %SPAWN-VIDEO-DRAIN thread: close CONN (which unblocks
+THREAD's pending READ-AESP-MESSAGE on most implementations once the
+socket errors out) then wait up to TIMEOUT seconds for THREAD to exit,
+forcibly destroying it if it outlives that.  Mirrors STOP-AESP-SERVER's
+own thread-teardown pattern -- needed because a bare JOIN-THREAD can
+hang: closing a socket out from under another thread's blocked read is
+not guaranteed to unblock that read promptly (or at all) on every
+implementation."
+  (ignore-errors (atari800-cl.transport:tcp-close conn))
+  (let ((deadline (+ (get-internal-real-time)
+                     (truncate (* timeout internal-time-units-per-second)))))
+    (loop while (and (thread-alive-p thread) (< (get-internal-real-time) deadline))
+          do (sleep 0.005))
+    (when (thread-alive-p thread) (destroy-thread thread))))
+
+(test aesp-server-scanline-fn-gated-without-video-client
+  "With no video client connected, the scanline-fn gate (Phase 28a) skips
+rendering entirely.  Sentinel-fill the framebuffer first -- a real render
+would overwrite it with COLBK-based fill -- and confirm it survives
+running frames with VIDEO-ACTIVE-P false."
+  (with-aesp-server (m srv s)
+    (let ((fb (atari800-cl.aesp::aesp-server-framebuffer srv)))
+      (is-false (atari800-cl.aesp::aesp-server-video-active-p srv)
+                "no video client is connected, so the gate must be closed")
+      (fill fb #xAB)
+      (%run-frames-via-mailbox m 3)
+      (is (every (lambda (b) (= b #xAB)) fb)
+          "framebuffer must stay untouched while the video gate is closed"))))
+
+(test aesp-server-video-connect-forces-full-render-before-first-push
+  "Connecting a video client sets VIDEO-ACTIVE-P and NEEDS-FULL-RENDER-P;
+%PUSH-VIDEO-FRAME does not push a frame until one has rendered cleanly
+top-to-bottom with the gate open, at which point the scanline-fn's row-0
+handler clears NEEDS-FULL-RENDER-P and the client receives a FRAME_RAW."
+  (with-aesp-server (m srv s)
+    (let* ((conn (atari800-cl.transport:tcp-connect
+                  "127.0.0.1" (atari800-cl.aesp:aesp-server-video-port srv)))
+           (stream (atari800-cl.transport:tcp-stream conn)))
+      (is-true (%wait-until
+                (lambda () (atari800-cl.aesp::aesp-server-video-clients srv)))
+               "the video client must be registered before frames run")
+      (is-true (atari800-cl.aesp::aesp-server-video-active-p srv))
+      (is-true (atari800-cl.aesp::aesp-server-needs-full-render-p srv)
+               "a freshly connected client must force one full render first")
+      (multiple-value-bind (drain-th lock box) (%spawn-video-drain stream)
+        (unwind-protect
+             (progn
+               (%run-frames-via-mailbox m 2)
+               (is-false (atari800-cl.aesp::aesp-server-needs-full-render-p srv)
+                         "the flag must clear once a full frame rendered with the gate open")
+               (is-true (%wait-until (lambda () (plusp (%video-drain-count lock box)))))
+               (let ((msg (first (%video-drain-messages lock box))))
+                 (is (= atari800-cl.aesp:+aesp-frame-raw+ (car msg)))
+                 (is (= (* atari800-cl.aesp::+aesp-frame-raw-width+ 240 4)
+                        (length (cdr msg))))))
+          (%stop-video-drain conn drain-th))))))
+
 (test aesp-server-unknown-type-errors
   "An unknown message type yields ERROR with the not-implemented code."
   (with-aesp-server (m srv s)

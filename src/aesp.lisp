@@ -291,13 +291,32 @@ Extra slots for rendering:
   FRAMEBUFFER   — 384×240 24-bit RGB pixel array written by the scanline
                   callback; converted to BGRA8888 and pushed to
                   VIDEO-CLIENTS as FRAME_RAW after each frame (see
-                  %RGB24->BGRA32).
+                  %RGB24->BGRA32-CROPPED).
   VIDEO-CLIENTS — connections on the video port; frame data is pushed here.
   AUDIO-CLIENTS — connections on the audio port; PCM is pushed here.
   AUDIO-UNIT    — the AUDIO-UNIT attached to the machine while at least
                   one audio client is connected, else NIL.  Only the
                   emulator thread reads or writes it (see
-                  %SYNC-AUDIO-ATTACHMENT)."
+                  %SYNC-AUDIO-ATTACHMENT).
+  VIDEO-ACTIVE-P      — true while VIDEO-CLIENTS is non-empty; maintained
+                        under LOCK by %REGISTER-/%UNREGISTER-VIDEO-CLIENT.
+                        The scanline-fn closure reads this once per
+                        scanline (unlocked — a stale read costs at most
+                        one scanline's rendering either way, and the
+                        write side already serializes through LOCK) to
+                        skip rendering entirely when nobody is watching
+                        (ROADMAP.md Phase 28a).
+  NEEDS-FULL-RENDER-P — set whenever a video client registers; a client
+                        connecting mid-frame would otherwise see a torn
+                        frame (some rows rendered under the old gate
+                        state, some not, once the gate was previously
+                        closed). %PUSH-VIDEO-FRAME skips pushing while
+                        this is set; the scanline-fn closure clears it at
+                        row 0 of the next frame rendered with the gate
+                        open, guaranteeing the following push is a clean
+                        top-to-bottom render.  Mirrors the shape of
+                        %SYNC-AUDIO-ATTACHMENT's connect/disconnect fix
+                        for audio."
   machine
   host
   control-listener video-listener audio-listener
@@ -309,7 +328,9 @@ Extra slots for rendering:
   (framebuffer   nil)
   (video-clients '())
   (audio-clients '())
-  (audio-unit    nil))
+  (audio-unit    nil)
+  (video-active-p      nil)
+  (needs-full-render-p nil))
 
 (defun %add-thread (server th)
   (with-lock ((aesp-server-lock server)) (push th (aesp-server-threads server)))
@@ -323,13 +344,24 @@ Extra slots for rendering:
     (setf (aesp-server-clients server) (remove conn (aesp-server-clients server)))))
 
 (defun %register-video-client (server conn)
+  "Register a video-port connection.  Sets VIDEO-ACTIVE-P (opening the
+scanline-fn rendering gate, Phase 28a) and NEEDS-FULL-RENDER-P (so the
+first frame pushed after this connect is guaranteed to be a complete
+top-to-bottom render rather than whatever was mid-flight when the gate
+opened -- see the AESP-SERVER docstring)."
   (with-lock ((aesp-server-lock server))
-    (push conn (aesp-server-video-clients server))))
+    (push conn (aesp-server-video-clients server))
+    (setf (aesp-server-video-active-p server) t)
+    (setf (aesp-server-needs-full-render-p server) t)))
 
 (defun %unregister-video-client (server conn)
+  "Unregister a video-port connection.  Clears VIDEO-ACTIVE-P (closing the
+scanline-fn rendering gate) once the last video client is gone."
   (with-lock ((aesp-server-lock server))
     (setf (aesp-server-video-clients server)
-          (remove conn (aesp-server-video-clients server)))))
+          (remove conn (aesp-server-video-clients server)))
+    (setf (aesp-server-video-active-p server)
+          (and (aesp-server-video-clients server) t))))
 
 (defun %register-audio-client (server conn)
   (with-lock ((aesp-server-lock server))
@@ -408,17 +440,27 @@ crop and the channel conversion happen only at this AESP push boundary."
 FRAME_RAW (BGRA8888, no frame-number prefix -- see docs/PROTOCOL.md in
 the Attic project).  Called on the emulator thread (from
 ATARI-MACHINE-POST-FRAME-FN).  Clients that error during the write are
-silently dropped."
+silently dropped.
+
+Snapshots the client list FIRST and returns before doing any conversion
+work when it is empty (Phase 28a) -- with no video subscribers, the
+scanline-fn gate already skipped rendering, so there is nothing correct
+to convert anyway.  Also holds off pushing while NEEDS-FULL-RENDER-P is
+set: a client that just connected mid-frame would otherwise receive a
+torn frame (see AESP-SERVER's docstring and %REGISTER-VIDEO-CLIENT)."
   (declare (ignore machine))
-  (let ((fb (aesp-server-framebuffer server)))
-    (when (null fb) (return-from %push-video-frame nil))
-    (let ((payload (%rgb24->bgra32-cropped
-                    fb atari800-cl.renderer:+framebuffer-width+
-                    atari800-cl.renderer:+framebuffer-height+)))
-      ;; Snapshot the list under lock, then write outside the lock so a slow
-      ;; client doesn't block the emulator thread indefinitely.
-      (let ((clients (with-lock ((aesp-server-lock server))
-                       (copy-list (aesp-server-video-clients server)))))
+  ;; Snapshot the list under lock, then write outside the lock so a slow
+  ;; client doesn't block the emulator thread indefinitely.
+  (let ((clients (with-lock ((aesp-server-lock server))
+                   (copy-list (aesp-server-video-clients server)))))
+    (when (null clients) (return-from %push-video-frame nil))
+    (when (aesp-server-needs-full-render-p server)
+      (return-from %push-video-frame nil))
+    (let ((fb (aesp-server-framebuffer server)))
+      (when (null fb) (return-from %push-video-frame nil))
+      (let ((payload (%rgb24->bgra32-cropped
+                      fb atari800-cl.renderer:+framebuffer-width+
+                      atari800-cl.renderer:+framebuffer-height+)))
         (dolist (conn clients)
           (handler-case
               (write-aesp-message (tcp-stream conn) +aesp-frame-raw+ payload)
@@ -584,18 +626,29 @@ AESP-SERVER-*-PORT accessors)."
                          :audio-port   (tcp-listener-port al)
                          :framebuffer  (atari800-cl.renderer:make-framebuffer))))
             ;; Wire the scanline and post-frame callbacks into the machine.
+            ;; The scanline-fn early-returns when no video client is
+            ;; connected (Phase 28a): rendering to a framebuffer nobody
+            ;; will ever read is pure waste, and %PUSH-VIDEO-FRAME already
+            ;; refuses to push with an empty client list.  When the gate
+            ;; is open again after being closed, row 0 clears
+            ;; NEEDS-FULL-RENDER-P so the frame that just started
+            ;; rendering top-to-bottom is the one %PUSH-VIDEO-FRAME will
+            ;; accept as complete.
             (setf (atari-machine-scanline-fn machine)
                   (let ((fb (aesp-server-framebuffer server)))
                     (lambda (m)
-                      (let* ((a   (atari-machine-antic m))
-                             (sl  (mod (1- (atari800-cl.antic:antic-scanline a))
-                                       atari800-cl.antic:+scanlines-per-frame+))
-                             (row (- sl atari800-cl.antic:+active-start-scanline+)))
-                        (when (and (>= row 0) (< row 240))
-                          (atari800-cl.renderer:render-scanline
-                           fb row a
-                           (atari-machine-gtia m)
-                           (atari-machine-bus  m)))))))
+                      (when (aesp-server-video-active-p server)
+                        (let* ((a   (atari-machine-antic m))
+                               (sl  (mod (1- (atari800-cl.antic:antic-scanline a))
+                                         atari800-cl.antic:+scanlines-per-frame+))
+                               (row (- sl atari800-cl.antic:+active-start-scanline+)))
+                          (when (and (>= row 0) (< row 240))
+                            (when (zerop row)
+                              (setf (aesp-server-needs-full-render-p server) nil))
+                            (atari800-cl.renderer:render-scanline
+                             fb row a
+                             (atari-machine-gtia m)
+                             (atari-machine-bus  m))))))))
             (setf (atari-machine-post-frame-fn machine)
                   (lambda (m)
                     (%push-video-frame server m)
