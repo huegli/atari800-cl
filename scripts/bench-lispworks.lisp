@@ -43,14 +43,34 @@
 
 (defvar *bench-status* 0)
 
+;; ROADMAP.md Phase 31's "Gate re-evaluated (2026-08-24)" finding: LOADing
+;; scripts/bench.lisp as source runs it INTERPRETED under LispWorks' -build
+;; batch mode, so the per-scanline workload closures (display/idle/serve,
+;; audio to a lesser degree) interpret 240 times per frame instead of
+;; running compiled -- understating official LispWorks absolute fps on
+;; those workloads (idle measured 1840 fps interpreted vs. 2631 fps
+;; compiled in that evaluation) while leaving A/B deltas valid, since both
+;; sides of a bench-ab run are equally interpreted. Compile bench.lisp into
+;; the same output-translations cache ASDF already uses, and only
+;; recompile when the source is newer than the cached fasl.
+(defun compile-and-load-bench ()
+  (let* ((source (merge-pathnames #P"bench.lisp"
+                                  (merge-pathnames #P"scripts/"
+                                                   (project-root-pathname))))
+         (fasl (asdf:apply-output-translations
+                (compile-file-pathname source))))
+    (ensure-directories-exist fasl)
+    (when (or (not (probe-file fasl))
+              (< (file-write-date fasl) (file-write-date source)))
+      (compile-file source :output-file fasl))
+    (load fasl)))
+
 (defun run-atari800-cl-bench ()
   (handler-case
       (progn
         (configure-asdf-for-sandbox)
         (asdf:load-system :atari800-cl)
-        (load (merge-pathnames #P"bench.lisp"
-                               (merge-pathnames #P"scripts/"
-                                                (project-root-pathname))))
+        (compile-and-load-bench)
         (funcall (uiop:find-symbol* :run-benchmarks :atari800-cl.bench)))
     (error (condition)
       (format *error-output* "~&LispWorks benchmark run failed: ~A~%" condition)

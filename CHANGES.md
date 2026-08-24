@@ -3,6 +3,25 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## Bench harness: LispWorks workload drivers now compiled
+
+`scripts/bench-lispworks.lisp` used to `LOAD` `scripts/bench.lisp` as
+source, which LispWorks' `-build` batch mode runs through its
+interpreter rather than the compiler -- a Phase 31 profiling pass
+caught this (an "interpreted function called 7200000 times" line
+matching the `idle` workload's per-scanline closure count exactly) and
+found it understated official LispWorks absolute fps on
+renderer-attached workloads (`display`/`idle`/`serve`, `audio` to a
+lesser degree) by roughly 30-45%, while leaving `bench-ab.sh` A/B
+deltas valid since both sides of a paired run were equally interpreted.
+Fixed by `compile-file`ing `scripts/bench.lisp` into the same ASDF
+output-translations cache the rest of the harness uses, recompiling
+only when the source is newer than the cached fasl, then loading the
+fasl. SBCL is unaffected: its `LOAD` already compiles source by
+default. See `PERFORMANCE_LOG.md`'s "Bench harness: LispWorks workload
+drivers now compiled" section and ROADMAP.md Phase 31's "Gate
+re-evaluated (2026-08-24)" blockquote.
+
 ## ROADMAP Phase 29 -- Dirty-frame render skip
 
 An idle machine re-renders all 240 scanlines of an unchanging screen

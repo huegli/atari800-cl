@@ -38,3 +38,16 @@ Tune via `atari800-cl.bench:*warmup-frames*` / `*measured-frames*`.
 See `CLAUDE.md`'s Key Conventions for the rule that every optimization
 commit updates `PERFORMANCE_LOG.md` with before/after numbers from both
 implementations.
+
+`scripts/bench-lispworks.lisp` `compile-file`s `scripts/bench.lisp` into
+the same ASDF output-translations cache the rest of the harness uses,
+recompiling only when the source is newer than the cached fasl, then
+loads the fasl instead of the source. This matters because LispWorks'
+`-build` batch mode runs plain-`LOAD`ed source through its interpreter,
+not the compiler, which understated official LispWorks absolute fps on
+renderer-attached workloads (`display`/`idle`/`serve`/`audio`, whose
+per-scanline closures interpret 240 times per frame) -- see
+`PERFORMANCE_LOG.md`'s "Bench harness: LispWorks workload drivers now
+compiled" section and ROADMAP.md Phase 31's gate re-evaluation. SBCL
+needs no equivalent since its `LOAD` already compiles source by
+default.

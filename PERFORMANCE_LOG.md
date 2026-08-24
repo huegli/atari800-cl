@@ -946,6 +946,73 @@ after the fix.
 
 Commits: `5d38c65`, `8adba05`, `ca5be9d`, `6fe2e73`.
 
+## Bench harness: LispWorks workload drivers now compiled
+
+Date 2026-08-24. Not an emulator change -- a fix to the benchmark
+harness itself, prompted by ROADMAP.md Phase 31's "Gate re-evaluated
+(2026-08-24)" finding: `scripts/bench-lispworks.lisp` loaded
+`scripts/bench.lisp` via plain `LOAD`, and LispWorks' `-build` batch
+mode runs code loaded that way through its interpreter, not the
+compiler. A Phase 31 profiling pass caught this directly (an
+"interpreted function called 7200000 times" line, matching the `idle`
+workload's per-scanline closure count exactly) and worked around it for
+that one evaluation with an uncommitted `compile-file` shim, measuring
+1840 fps official (interpreted) vs. 2631 fps compiled on the same
+machine. Every renderer-attached workload (`display`, `idle`, `serve`,
+`audio` to a lesser degree) interprets its scanline-fn closure 240
+times per frame, so official LispWorks absolute fps on those workloads
+has understated LispWorks the whole time this harness has existed.
+`nop`/`irq`/`klaus` barely touch the closure and were expected to move
+little. A/B deltas (`bench-ab.sh`) were never affected: both sides of
+every paired run were equally interpreted, so the ratio was unbiased
+even though neither side's absolute number was.
+
+Fix: `scripts/bench-lispworks.lisp` now `compile-file`s
+`scripts/bench.lisp` into the same ASDF output-translations cache the
+rest of the harness already uses (`.cache/fasls/<impl>/.../scripts/`),
+comparing `file-write-date` against the cached fasl and only
+recompiling when the source is newer, then loads the fasl. SBCL needs
+no matching change: `sb-ext:*evaluator-mode*` defaults to `:compile`,
+so SBCL's plain `LOAD` of `scripts/bench.lisp` source already compiles
+each top-level form natively -- verified directly on this machine
+(`(print sb-ext:*evaluator-mode*)` => `:COMPILE`), not assumed.
+
+Same-session before/after, plain runs (not `bench-ab` -- this
+characterizes the measurement instrument, not an optimization):
+
+| workload | lispworks before (interpreted) | lispworks after (compiled) | delta | sbcl after (unaffected) |
+|----------|-------------------------------:|----------------------------:|------:|--------------------------:|
+| nop     | 2419.35 | 2489.63 |  +2.9% | 3804.48 |
+| irq     | 2290.08 | 2083.33 |  -9.0% | 3558.68 |
+| display | 1109.06 | 1271.19 | +14.6% | 2418.77 |
+| audio   |  710.90 |  697.67 |  -1.9% | 1619.77 |
+| idle    | 1823.71 | 2666.67 | +46.2% | 3649.88 |
+| serve   |  823.05 |  817.44 |  -0.7% | 1498.37 |
+| klaus   | 1749.13 | 1736.97 |  -0.7% | 3209.02 |
+
+`idle` and `display` rise materially, as expected -- both spend most of
+a frame inside the compiled-vs-interpreted renderer scanline closure.
+`nop`/`irq`/`klaus` move within single-digit noise (these are one-shot
+runs, not interleaved A/B pairs, so some run-to-run drift is normal).
+`audio` and `serve` land flat to slightly down here: `audio` drains
+synthesis once per frame rather than per scanline so the interpreter
+tax was always smaller for it, and `serve`'s frame cost is
+socket-write-dominated (Phase 28's territory), not closure-call-count
+dominated, so compiling the driver barely moves it. SBCL's numbers are
+shown only to confirm it is unaffected -- consistent with recent
+same-session SBCL figures elsewhere in this log.
+
+**Continuity rule.** Every LispWorks absolute-fps number for a
+renderer-attached workload (`display`, `idle`, `serve`, `audio`) in
+every section above this one was measured through the interpreted
+harness and is not comparable to LispWorks numbers measured after this
+commit -- the frozen-table/session-drift rule (this file's header,
+ROADMAP.md Phase 21) already forbade cross-section absolute
+comparisons for other reasons, and this is one more. A/B deltas
+recorded in those sections remain valid: both sides of every
+`bench-ab.sh` run were equally interpreted, so the paired ratios are
+unaffected.
+
 ## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
 
 SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction
