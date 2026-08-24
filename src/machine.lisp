@@ -97,7 +97,28 @@ Slots:
                  Typically set by the AESP server to render into its framebuffer.
   POST-FRAME-FN — if non-nil, called as (funcall post-frame-fn machine) at
                   the end of MACHINE-RUN-FRAME (after frame-count increment).
-                  Typically set by the AESP server to push the completed frame."
+                  Typically set by the AESP server to push the completed frame.
+  POKEY-LAG    — ROADMAP.md Phase 30 (deferred POKEY advance): CPU cycles
+                 POKEY is behind the CPU within the current scanline,
+                 accumulated by %RUN-CLOCKS' deferring instruction loop
+                 instead of being delivered immediately.  Zeroed by
+                 %MACHINE-SYNC-POKEY, which the wrapped $D2xx bus closures
+                 (installed in MAKE-ATARI-MACHINE) call before every
+                 access so a register read or write always sees exact,
+                 caught-up state.
+  POKEY-DEFER-DISABLED-P — when true, %RUN-CLOCKS never defers, regardless
+                 of what POKEY-DEFERRABLE-P would say; the debug/test
+                 escape hatch for the machine-level equivalence tests.
+  POKEY-DEFER-ENGAGEMENTS — count of scanlines on which the deferring
+                 instruction loop ran (ROADMAP.md Phase 30c); test-only
+                 instrumentation, not consulted by the scheduler itself.
+  POKEY-DEFER-BREAK-P — set by the wrapped $D2xx WRITE closure to signal
+                 that a mid-line write may have invalidated the deferral
+                 gate (enabled a timer IRQ, attached audio, started a
+                 serial transmission); %RUN-CLOCKS falls back to the
+                 non-deferring per-instruction path for the rest of the
+                 line when it sees this set, and clears it at the start
+                 of each new line."
   (cpu nil)
   (bus nil)
   (mmu nil)
@@ -112,7 +133,40 @@ Slots:
   (input nil)
   (priority-pending-flag nil)
   (scanline-fn   nil)
-  (post-frame-fn nil))
+  (post-frame-fn nil)
+  (pokey-lag 0 :type fixnum)
+  (pokey-defer-disabled-p nil)
+  (pokey-defer-engagements 0 :type fixnum)
+  (pokey-defer-break-p nil))
+
+;;; ---------------------------------------------------------------------------
+;;; Deferred POKEY advance (ROADMAP.md Phase 30)
+
+(defun %machine-sync-pokey (machine)
+  "If MACHINE's POKEY-LAG is positive, advance its POKEY by exactly that
+many cycles and zero the lag; otherwise a no-op.
+
+This is the sync half of Phase 30's deferral: %RUN-CLOCKS' deferring
+instruction loop accumulates cycles into POKEY-LAG instead of calling
+POKEY-ADVANCE after every instruction, and this function is the ONLY
+place that lag is ever paid off.  It is called from three places: the
+wrapped $D2xx bus read/write closures (MAKE-ATARI-MACHINE, below) before
+every register access, so a read or write always observes state exactly
+as caught-up as it would be without deferral; the deferring loop itself
+when a mid-line write breaks the gate, so cycles are delivered to POKEY
+in strict chronological order before falling back to the non-deferring
+path; and %RUN-CLOCKS' end-of-line fold, which flushes whatever is left
+before the line's usual top-up.  Any caller that reads or mutates POKEY
+state outside those paths must call this first if it cannot prove it
+only runs between frames (see the Phase 30a commit message for the full
+audit)."
+  (declare (type atari-machine machine))
+  (let ((lag (atari-machine-pokey-lag machine)))
+    (declare (type fixnum lag))
+    (when (plusp lag)
+      (pokey-advance (atari-machine-pokey machine) (atari-machine-cpu machine)
+                      lag)
+      (setf (atari-machine-pokey-lag machine) 0))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Construction
@@ -141,6 +195,41 @@ at the bus.  The result is a machine that is ready for MACHINE-COLD-RESET."
     (attach-gtia    bus gtia)
     (attach-pokey   bus pokey cpu)
     (attach-hostdev bus hostdev)
+    ;; ROADMAP.md Phase 30 (30a): wrap POKEY's bus dispatch closures (just
+    ;; installed by ATTACH-POKEY, above) so every $D2xx access syncs the
+    ;; deferred lag first.
+    ;;
+    ;; Timing-exactness note: without deferral, a $D2xx access today lands
+    ;; with POKEY already advanced through every PREVIOUS instruction this
+    ;; line ONLY -- the CURRENT instruction's own cycles are folded into
+    ;; POKEY's clock AFTER STEP-CPU returns (see the instruction loop in
+    ;; %RUN-CLOCKS), never before, so a register access mid-instruction
+    ;; never observes that instruction's own elapsed time.  POKEY-LAG, by
+    ;; construction, only ever holds cycles from instructions that have
+    ;; ALREADY fully completed (the deferring loop adds the current
+    ;; instruction's chunk to the lag only after STEP-CPU returns, exactly
+    ;; where the non-deferring loop would have called POKEY-ADVANCE) --
+    ;; so syncing here brings POKEY to the identical point in time an
+    ;; access would see without deferral, never ahead of it and never
+    ;; behind.
+    (let ((orig-pokey-read  (bus-pokey-read-fn  bus))
+          (orig-pokey-write (bus-pokey-write-fn bus)))
+      (setf (bus-pokey-read-fn bus)
+            (lambda (addr)
+              (%machine-sync-pokey machine)
+              (funcall (the function orig-pokey-read) addr)))
+      (setf (bus-pokey-write-fn bus)
+            (lambda (addr val)
+              (%machine-sync-pokey machine)
+              (funcall (the function orig-pokey-write) addr val)
+              ;; A write can enable a timer IRQ, attach/start whatever
+              ;; PENDING tracks, or otherwise change conditions
+              ;; POKEY-DEFERRABLE-P depends on -- any of which invalidates
+              ;; the deferral gate for the REST of this line.  Breaking
+              ;; unconditionally on every write, rather than recomputing
+              ;; eligibility mid-line, is the simple, obviously-correct
+              ;; rule (ROADMAP.md Phase 30b item 2).
+              (setf (atari-machine-pokey-defer-break-p machine) t))))
     ;; Wire the CPU to the bus.
     (setf (cpu-bus-read  cpu) (lambda (addr) (bus-read  bus addr))
           (cpu-bus-write cpu) (lambda (addr val) (bus-write bus addr val)))
@@ -217,8 +306,18 @@ PCM samples, and return it.  With no argument a fresh unit is created;
 pass NIL to detach (synthesis then costs nothing but a NIL test per
 POKEY advance).  Drain the accumulated samples with MACHINE-AUDIO-DRAIN
 — typically once per frame, which yields 746 or 747 samples at
-+AUDIO-SAMPLE-RATE+."
++AUDIO-SAMPLE-RATE+.
+
+ROADMAP.md Phase 30 audit: this function is reachable both from the
+post-frame AESP path (provably lag-free — see %SYNC-AUDIO-ATTACHMENT's
+docstring) and directly from the public facade / REPL / scripts, which
+are not provably called only between frames.  Syncing first costs
+nothing when the lag is already 0 and removes the ambiguity either way:
+attaching or detaching audio changes what POKEY-DEFERRABLE-P will say
+for scanlines from here on, and any cycles already claimed under the
+OLD attachment state must be delivered under it, not the new one."
   (declare (type atari-machine machine))
+  (%machine-sync-pokey machine)
   (attach-audio (atari-machine-pokey machine) audio))
 
 (defun machine-audio-drain (machine)
@@ -544,8 +643,16 @@ STOP-FLAG is re-checked.  Returns MACHINE."
 
 (defun attach-input (machine input)
   "Wire host INPUT-STATE into MACHINE's PIA, GTIA, and POKEY so their input
-registers reflect live input.  Pass NIL to detach.  Returns MACHINE."
+registers reflect live input.  Pass NIL to detach.  Returns MACHINE.
+
+ROADMAP.md Phase 30 audit: like MACHINE-ATTACH-AUDIO, this is public API
+callable outside the mailbox-drained between-frames window, and
+ATTACH-POKEY-INPUT flips POKEY's PENDING key bit (one of
+POKEY-DEFERRABLE-P's conditions) — sync first so any already-lagged
+cycles are delivered under the attachment state that was actually in
+effect while they elapsed, not the one this call is about to install."
   (declare (type atari-machine machine))
+  (%machine-sync-pokey machine)
   (setf (atari-machine-input machine) input)
   (attach-pia-input   (atari-machine-pia   machine) input)
   (attach-gtia-input  (atari-machine-gtia  machine) input)

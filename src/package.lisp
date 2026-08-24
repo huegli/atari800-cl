@@ -562,6 +562,12 @@
            #:machine-audio-drain
            #:load-rom-file
            #:+clocks-per-frame+
+           ;; Deferred POKEY advance (ROADMAP.md Phase 30)
+           #:atari-machine-pokey-lag
+           #:atari-machine-pokey-defer-disabled-p
+           #:atari-machine-pokey-defer-engagements
+           #:atari-machine-pokey-defer-break-p
+           #:%machine-sync-pokey
            ;; Concurrency: mailbox + run loop + host input
            #:%run-clocks
            #:command-mailbox
