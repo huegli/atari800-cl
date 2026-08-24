@@ -241,6 +241,10 @@
            #:attach-mmu
            #:bus-peek-ram
            #:bus-poke-ram
+           ;; Render-dirty tracking (ROADMAP.md Phase 29b)
+           #:bus-page-dirty
+           #:bus-io-regs-dirty-p
+           #:bus-clear-render-dirty
            ;; Chip object back-pointers
            #:bus-gtia #:bus-pokey #:bus-pia #:bus-antic
            ;; Per-chip dispatch closures (installed by chip attach functions)

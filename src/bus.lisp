@@ -68,6 +68,18 @@
 (deftype rom-array ()
   '(simple-array (unsigned-byte 8) (*)))
 
+(defconstant +page-count+ 256)
+
+(deftype page-dirty-map ()
+  "A 256-entry byte vector, one slot per 256-byte page of the 64K address
+space, used to record which pages a RAM write touched (ROADMAP.md Phase
+29b). Slot N is nonzero iff page N has been written since the last
+BUS-CLEAR-RENDER-DIRTY. A byte vector rather than a bit vector: it is
+what FAST-AREF's contract wants (a SIMPLE-ARRAY of a small unsigned-byte
+element type), and 256 bytes is noise next to the 64K RAM array it
+shadows."
+  `(simple-array (unsigned-byte 8) (,+page-count+)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Bus struct
 
@@ -85,13 +97,30 @@ Slots:
   *-READ-FN / *-WRITE-FN     — per-chip dispatch closures.  Each is
                 either NIL (chip not attached) or a function:
                   read closure:  (lambda (address) -> u8)
-                  write closure: (lambda (address value) -> *)"
+                  write closure: (lambda (address value) -> *)
+  PAGE-DIRTY  — ROADMAP.md Phase 29b render-dirty tracking: a 256-entry
+                PAGE-DIRTY-MAP, one slot per 256-byte page. Every RAM
+                write sets its page's slot to 1. Starts ALL-DIRTY (every
+                slot 1) so a freshly built or just-reset machine renders
+                its first frame unconditionally rather than reading a
+                stale all-clean map. A future render client consults
+                this (via BUS-PAGE-DIRTY) to decide whether the pages it
+                cares about changed, then calls BUS-CLEAR-RENDER-DIRTY.
+                This bus never reads or clears the map itself.
+  IO-REGS-DIRTY-P — companion boolean: T when a render-relevant GTIA or
+                ANTIC register has been written since the last
+                BUS-CLEAR-RENDER-DIRTY. Starts T for the same
+                fresh/reset reason as PAGE-DIRTY."
   (ram (make-array +ram-size+ :element-type '(unsigned-byte 8)
                               :initial-element 0)
        :type bus-ram)
   (os-rom    nil :type (or null rom-array))
   (basic-rom nil :type (or null rom-array))
   (mmu       nil :type (or null mmu))
+  (page-dirty (make-array +page-count+ :element-type '(unsigned-byte 8)
+                                        :initial-element 1)
+              :type page-dirty-map)
+  (io-regs-dirty-p t :type boolean)
   ;; Per-chip dispatch closures.
   (gtia-read-fn   nil :type (or null function))
   (gtia-write-fn  nil :type (or null function))
@@ -129,9 +158,33 @@ Slots:
   (aref (bus-ram bus) address))
 
 (defun bus-poke-ram (bus address value)
-  "Write directly to the 64K RAM backing store, ignoring the memory map."
+  "Write directly to the 64K RAM backing store, ignoring the memory map.
+Still a RAM write for render-dirty purposes (ROADMAP.md Phase 29b): a
+debugger/CLI poke through this path can touch screen memory exactly as a
+CPU store would, and the render skip's correctness must never depend on
+which door a RAM write came through -- only BUS-WRITE's I/O-range branch
+is exempt, because that write does NOT land in RAM at all."
   (declare (type bus bus) (type u16 address) (type u8 value))
-  (setf (aref (bus-ram bus) address) (ldb (byte 8 0) value)))
+  (setf (aref (bus-ram bus) address) (ldb (byte 8 0) value))
+  ;; Index (ldb (byte 8 8) address) is in [0, 255] by construction: ADDRESS
+  ;; is declared U16 (unsigned-byte 16), and (byte 8 8) extracts exactly its
+  ;; high byte, which is provably a valid PAGE-DIRTY-MAP index.
+  (setf (fast-aref (simple-array (unsigned-byte 8) (256))
+                   (bus-page-dirty bus) (ldb (byte 8 8) address))
+        1))
+
+(defun bus-clear-render-dirty (bus)
+  "Mark BUS's render-dirty state fully clean: every PAGE-DIRTY slot back
+to 0 and IO-REGS-DIRTY-P back to NIL. Called by the future render client
+(ROADMAP.md Phase 29c, not this commit) after it has rendered a complete
+frame reflecting every write recorded since the last call. This bus
+never calls it itself -- clearing is entirely the render client's call,
+so a machine with no attached render client simply accumulates dirt
+forever, which is harmless (it only ever gets read, never sized on)."
+  (declare (type bus bus))
+  (fill (bus-page-dirty bus) 0)
+  (setf (bus-io-regs-dirty-p bus) nil)
+  bus)
 
 ;;; ---------------------------------------------------------------------------
 ;;; ROM / MMU wiring helpers
@@ -215,13 +268,29 @@ Lookup order — first match wins:
 (defun bus-write (bus address value)
   "Write VALUE to ADDRESS.  Writes to the I/O range ($D000-$D7FF) go
 through the chip dispatch closures; everything else (including the
-RAM under any currently-mapped ROM) lands in the 64K RAM array."
+RAM under any currently-mapped ROM) lands in the 64K RAM array.
+
+Every RAM store also marks its page dirty (ROADMAP.md Phase 29b) --
+this is THE hot-path addition of the phase, so it is kept to one extra
+store and zero extra branches on the common (non-I/O) path: the
+COND's existing RAM clause gains a second SETF, nothing more.  I/O
+writes never reach this store; their own render-dirty bookkeeping (for
+the subset of GTIA/ANTIC registers that can affect pixels) lives in
+IO-WRITE below, on the already-cold chip-dispatch branch."
   (declare (type bus bus) (type u16 address) (type u8 value))
   (cond
     ((<= +io-base+ address +io-end+)
      (io-write bus address (ldb (byte 8 0) value)))
     (t
-     (setf (aref (bus-ram bus) address) (ldb (byte 8 0) value)))))
+     (setf (aref (bus-ram bus) address) (ldb (byte 8 0) value))
+     ;; Index (ldb (byte 8 8) address) is in [0, 255] by construction:
+     ;; ADDRESS is declared U16 (unsigned-byte 16), and (byte 8 8)
+     ;; extracts exactly its high byte -- a provably valid PAGE-DIRTY-MAP
+     ;; index, independent of any bounds check FAST-AREF may or may not
+     ;; perform underneath it.
+     (setf (fast-aref (simple-array (unsigned-byte 8) (256))
+                      (bus-page-dirty bus) (ldb (byte 8 8) address))
+           1))))
 
 (defun bus-read16 (bus address)
   "Read a little-endian 16-bit word.  ADDRESS+1 wraps within 64K."
@@ -248,6 +317,70 @@ RAM under any currently-mapped ROM) lands in the 64K RAM array."
               (#xD400 (bus-antic-read-fn bus)))))
     (if fn (funcall fn address) #xFF)))
 
+;;; ---------------------------------------------------------------------------
+;;; Render-dirty register classification (ROADMAP.md Phase 29b).
+;;;
+;;; Every GTIA/ANTIC write sets IO-REGS-DIRTY-P EXCEPT a short, explicitly
+;;; enumerated set that provably cannot change a rendered pixel:
+;;;
+;;;   GTIA HITCLR ($D01E, offset $1E) -- write-only strobe that clears the
+;;;   collision latches (a READ-side bookkeeping effect only; nothing it
+;;;   touches is consulted by the renderer).
+;;;
+;;;   GTIA CONSOL ($D01F, offset $1F) -- the write side of this register
+;;;   drives the speaker (audio), not video; the read side (console keys)
+;;;   is unrelated to this write-side classification.
+;;;
+;;;   ANTIC WSYNC ($D40A, offset $0A) -- a per-scanline CPU-halt timing
+;;;   strobe; ANTIC-WRITE's only effect for this offset is arming
+;;;   WSYNC-PENDING, consumed by the scheduler, never by the renderer.
+;;;   Synchronized display code writes this every line, so leaving it
+;;;   OUT of the dirty set is what makes the map usable at all -- folding
+;;;   it in would make nearly every real program's frames look dirty.
+;;;
+;;;   ANTIC NMIEN ($D40E, offset $0E) -- gates whether DLI/VBI interrupts
+;;;   fire; it does not itself hold or move any pixel data. Any actual
+;;;   visual effect a DLI/VBI handler produces happens through a SEPARATE
+;;;   GTIA/ANTIC register write inside that handler, which this same
+;;;   classification already tracks on its own merits.
+;;;
+;;;   ANTIC NMIRES ($D40F, offset $0F) -- write-only strobe that clears
+;;;   the NMI status latch (ANTIC-NMIST), a read-side flag with no
+;;;   rendering effect.
+;;;
+;;; Everything else in either write window -- including every register
+;;; the phase's own enumeration names (DMACTL, CHACTL, DLISTL/H, HSCROL,
+;;; VSCROL, PMBASE, CHBASE, all GTIA positions/sizes/graphics/colors,
+;;; PRIOR, VDELAY, GRACTL) -- sets the flag. Per the phase's "when in
+;;; doubt, include" rule, any register not named above (e.g. ANTIC's
+;;; unbacked $06/$08 offsets, or VCOUNT/PENH/PENV, which are nominally
+;;; read-only but still latched into the register file on a write) also
+;;; sets the flag rather than being reasoned about here.
+
+(defconstant +gtia-w-hitclr+  #x1E)
+(defconstant +gtia-w-consol+  #x1F)
+(defconstant +antic-w-wsync+  #x0A)
+(defconstant +antic-w-nmien+  #x0E)
+(defconstant +antic-w-nmires+ #x0F)
+
+(declaim (inline %gtia-write-render-inert-p %antic-write-render-inert-p))
+
+(defun %gtia-write-render-inert-p (address)
+  "T when ADDRESS (anywhere in the mirrored $D000-$D0FF GTIA write
+window) is HITCLR or CONSOL -- see the section comment above."
+  (declare (type u16 address))
+  (let ((offset (ldb (byte 5 0) address)))
+    (or (= offset +gtia-w-hitclr+) (= offset +gtia-w-consol+))))
+
+(defun %antic-write-render-inert-p (address)
+  "T when ADDRESS (anywhere in the mirrored $D400-$D4FF ANTIC write
+window) is WSYNC, NMIEN, or NMIRES -- see the section comment above."
+  (declare (type u16 address))
+  (let ((offset (ldb (byte 5 0) address)))
+    (or (= offset +antic-w-wsync+)
+        (= offset +antic-w-nmien+)
+        (= offset +antic-w-nmires+))))
+
 (defun io-write (bus address value)
   (declare (type bus bus) (type u16 address) (type u8 value))
   (let ((fn (case (logand address #xFF00)
@@ -256,4 +389,16 @@ RAM under any currently-mapped ROM) lands in the 64K RAM array."
               (#xD200 (bus-pokey-write-fn bus))
               (#xD300 (bus-pia-write-fn bus))
               (#xD400 (bus-antic-write-fn bus)))))
-    (when fn (funcall fn address value))))
+    (when fn
+      (funcall fn address value)
+      ;; PIA ($D300) and POKEY ($D200) writes never reach the COND below
+      ;; setting anything (neither range matches either CLAUSE's guard),
+      ;; matching the phase's explicit "never render inputs" rule for
+      ;; those two chips.
+      (cond
+        ((and (<= #xD000 address #xD0FF)
+              (not (%gtia-write-render-inert-p address)))
+         (setf (bus-io-regs-dirty-p bus) t))
+        ((and (<= #xD400 address #xD4FF)
+              (not (%antic-write-render-inert-p address)))
+         (setf (bus-io-regs-dirty-p bus) t))))))

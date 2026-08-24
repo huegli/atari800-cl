@@ -254,3 +254,114 @@ swaps OS ROM mapping immediately."
     (is (zerop (atari800-cl.bus:bus-peek-ram bus #xC500)))
     (is (= 0 (atari800-cl.bus:bus-read bus #xC500))
         "OS now off: read returns RAM (zero)")))
+
+;;; ---------------------------------------------------------------------------
+;;; Bus: render-dirty tracking (ROADMAP.md Phase 29b)
+;;;
+;;; This stage is bus-side infrastructure only -- nothing yet consults
+;;; BUS-PAGE-DIRTY / BUS-IO-REGS-DIRTY-P to skip a render; these tests
+;;; exercise the tracking itself directly.
+
+(test bus-fresh-is-all-dirty
+  "A freshly made bus starts with every page dirty and IO-REGS-DIRTY-P set,
+so a machine's first frame always renders."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (is-true (atari800-cl.bus:bus-io-regs-dirty-p bus)
+              "IO-REGS-DIRTY-P must start T")
+    (loop for page from 0 below 256
+          do (is (= 1 (aref (atari800-cl.bus:bus-page-dirty bus) page))
+                 "page $~2,'0X must start dirty" page))))
+
+(test bus-clear-render-dirty-cleans-everything
+  "BUS-CLEAR-RENDER-DIRTY zeroes every PAGE-DIRTY slot and clears
+IO-REGS-DIRTY-P."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (is-false (atari800-cl.bus:bus-io-regs-dirty-p bus))
+    (loop for page from 0 below 256
+          do (is (zerop (aref (atari800-cl.bus:bus-page-dirty bus) page))
+                 "page $~2,'0X must be clean" page))))
+
+(test bus-ram-write-dirties-exactly-its-page
+  "A single RAM write through BUS-WRITE dirties only the page its address
+falls in, leaving every other page clean."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #x9C40 #x41)
+    (is (= 1 (aref (atari800-cl.bus:bus-page-dirty bus) #x9C))
+        "page $9C (the write's page) must be dirty")
+    (loop for page from 0 below 256
+          unless (= page #x9C)
+          do (is (zerop (aref (atari800-cl.bus:bus-page-dirty bus) page))
+                 "page $~2,'0X must stay clean" page))))
+
+(test bus-rom-overlay-write-dirties-underlying-ram-page
+  "A write to an address currently showing ROM (e.g. under the OS ROM
+window) still lands in RAM underneath and dirties that RAM page."
+  (let* ((mmu (atari800-cl.mmu:make-mmu))
+         (bus (atari800-cl.bus:make-bus :mmu mmu))
+         (rom (make-array #x4000 :element-type '(unsigned-byte 8)
+                                 :initial-element #xFF)))
+    (atari800-cl.bus:install-os-rom bus rom)
+    (atari800-cl.mmu:mmu-write-portb mmu #x01)              ; OS on
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #xC123 #x42)
+    (is (= 1 (aref (atari800-cl.bus:bus-page-dirty bus) #xC1))
+        "page $C1 (underlying RAM, even though ROM is currently mapped
+over it) must be dirty")))
+
+(test bus-poke-ram-also-dirties-its-page
+  "BUS-POKE-RAM (the debugger/CLI bypass path) is still a RAM write for
+dirty-tracking purposes."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-poke-ram bus #x1234 #x99)
+    (is (= 1 (aref (atari800-cl.bus:bus-page-dirty bus) #x12)))))
+
+(test bus-gtia-color-write-sets-io-regs-dirty
+  "A write to a GTIA color register (COLBK, offset $1A) sets
+IO-REGS-DIRTY-P."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (setf (atari800-cl.bus:bus-gtia-write-fn bus) (lambda (addr val)
+                                                      (declare (ignore addr val))))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #xD01A #x46)             ; COLBK
+    (is-true (atari800-cl.bus:bus-io-regs-dirty-p bus))))
+
+(test bus-antic-wsync-write-does-not-set-io-regs-dirty
+  "A write to ANTIC's WSYNC ($D40A) -- a per-scanline timing strobe with no
+rendering effect -- must NOT set IO-REGS-DIRTY-P."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (setf (atari800-cl.bus:bus-antic-write-fn bus) (lambda (addr val)
+                                                       (declare (ignore addr val))))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #xD40A #x00)             ; WSYNC
+    (is-false (atari800-cl.bus:bus-io-regs-dirty-p bus))))
+
+(test bus-antic-dmactl-write-sets-io-regs-dirty
+  "A write to ANTIC's DMACTL ($D400), which controls DMA/playfield mode,
+sets IO-REGS-DIRTY-P."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (setf (atari800-cl.bus:bus-antic-write-fn bus) (lambda (addr val)
+                                                       (declare (ignore addr val))))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #xD400 #x22)             ; DMACTL
+    (is-true (atari800-cl.bus:bus-io-regs-dirty-p bus))))
+
+(test bus-pokey-write-never-sets-io-regs-dirty
+  "POKEY writes are never a render input; IO-REGS-DIRTY-P stays clear."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (setf (atari800-cl.bus:bus-pokey-write-fn bus) (lambda (addr val)
+                                                       (declare (ignore addr val))))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #xD200 #xA0)             ; AUDF1
+    (is-false (atari800-cl.bus:bus-io-regs-dirty-p bus))))
+
+(test bus-pia-write-never-sets-io-regs-dirty
+  "PIA writes are never a render input; IO-REGS-DIRTY-P stays clear."
+  (let ((bus (atari800-cl.bus:make-bus)))
+    (setf (atari800-cl.bus:bus-pia-write-fn bus) (lambda (addr val)
+                                                     (declare (ignore addr val))))
+    (atari800-cl.bus:bus-clear-render-dirty bus)
+    (atari800-cl.bus:bus-write bus #xD300 #xFF)             ; PORTA
+    (is-false (atari800-cl.bus:bus-io-regs-dirty-p bus))))
