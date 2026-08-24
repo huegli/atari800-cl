@@ -849,6 +849,27 @@ the audio check alone lived in this position."
                 (advance-loop)))))
     irq-raised))
 
+(declaim (ftype (function (pokey) boolean) pokey-deferrable-p))
+
+(defun pokey-deferrable-p (pokey)
+  "T when POKEY's state cannot change observably between now and the end
+of the current scanline, so the machine scheduler may defer per-
+instruction POKEY-ADVANCE calls to line end (or to the next $D2xx bus
+access, whichever comes first) without altering behavior (ROADMAP.md
+Phase 30): no AUDIO-UNIT is attached, PENDING is zero (which already
+implies AUDIO is NIL -- ATTACH-AUDIO is what sets its bit -- and also
+rules out an in-flight serial transmission or attached host input, both
+of which can raise their own IRQs on a schedule this predicate does not
+reason about), and no timer IRQ source (bits 0-2 of IRQEN) is enabled --
+an enabled timer could otherwise underflow and raise a CPU IRQ mid-line,
+which deferral must never delay past the instruction boundary it would
+have fired on."
+  (declare (type pokey pokey))
+  (and (null (pokey-audio pokey))
+       (zerop (pokey-pending pokey))
+       (zerop (logand (pokey-irqen pokey)
+                       (logior +irq-timer1+ +irq-timer2+ +irq-timer4+)))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Register access
 

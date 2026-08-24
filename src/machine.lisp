@@ -425,6 +425,28 @@ ONE budget cycle per line when ANTIC reported a steal; this scheduler
 charges the full steal (114 - stolen granted per line), so the CPU now
 correctly loses all 9+ stolen cycles each line.
 
+Deferred POKEY advance (ROADMAP.md Phase 30): once per line, DEFER-P is
+computed from POKEY-DEFERRABLE-P (no audio attached, no serial-tx/input
+work pending, no timer IRQ source enabled) and MACHINE's debug
+POKEY-DEFER-DISABLED-P escape hatch.  When true, nothing observable can
+happen from POKEY's per-instruction state alone, so the instruction loop
+accumulates each instruction's cycles into MACHINE's POKEY-LAG instead
+of calling POKEY-ADVANCE immediately; POKEY-LAG is paid off by
+%MACHINE-SYNC-POKEY, called by the wrapped $D2xx bus closures before any
+access and by this function's own end-of-line fold (below).  A mid-line
+$D2xx WRITE, via that same wrapper, sets POKEY-DEFER-BREAK-P — the
+deferring loop's one extra per-instruction test — which flushes the lag
+and falls back to the ordinary (non-deferring) per-instruction path for
+the rest of the line; the non-deferring loop itself carries no new test
+at all and is byte-identical to the pre-Phase-30 code.  POKEY-REMAINING
+is decremented at the SAME point in both loops (when an instruction's
+chunk is accounted for, whether delivered immediately or lagged), so by
+line end it always holds exactly the cycles no instruction claimed at
+all (typically the WSYNC-skipped tail); the end-of-line step folds any
+leftover lag into POKEY first, then tops up by POKEY-REMAINING, so
+POKEY receives precisely this line's 114 cycles in total regardless of
+how many of them were deferred.
+
 WSYNC ($D40A): after each instruction, ANTIC-CONSUME-WSYNC is checked;
 if a WSYNC write is pending, CPU-BUDGET is clamped to (MIN CPU-BUDGET 0)
 and the instruction loop stops for this line -- the CPU stalls to the
@@ -480,49 +502,138 @@ carry across calls."
              (let* ((line-cycles (min +cpu-cycles-per-scanline+
                                       (- n clocks-run)))
                     (stolen (antic-begin-scanline antic cpu bus))
-                    (pokey-remaining line-cycles))
+                    (pokey-remaining line-cycles)
+                    ;; Once PER LINE: is POKEY's per-instruction state
+                    ;; unobservable for the rest of this line?  See
+                    ;; POKEY-DEFERRABLE-P.  Cleared stale flag first — a
+                    ;; break left armed by a PREVIOUS line's mid-line
+                    ;; write must not suppress deferral on a line where
+                    ;; nothing has written $D2xx yet.
+                    ;;
+                    ;; INVARIANT (ROADMAP.md Phase 30c item 1): DEFER-P
+                    ;; requires POKEY-DEFERRABLE-P, which requires every
+                    ;; timer IRQ enable bit (IRQEN & (TIMER1|TIMER2|TIMER4))
+                    ;; to be clear.  A cleared enable bit means no timer
+                    ;; expiry the deferring loop's lagged instructions could
+                    ;; process -- immediately or later, once flushed -- can
+                    ;; ever call %RAISE-IRQ (see %EXPIRE-CHANNEL), because
+                    ;; that path is itself gated on the same IRQEN bit.  So
+                    ;; no IRQ is ever raised, delayed, or reordered by
+                    ;; deferral for as long as DEFER-P holds: the ONLY way
+                    ;; IRQEN's timer bits can change mid-line is the wrapped
+                    ;; $D2xx write closure, which breaks deferral (POKEY-
+                    ;; DEFER-BREAK-P) for the remainder of the line before
+                    ;; any instruction runs under the NEW IRQEN value.
+                    (defer-p (progn
+                               (setf (atari-machine-pokey-defer-break-p
+                                      machine)
+                                     nil)
+                               (and (not (atari-machine-pokey-defer-disabled-p
+                                          machine))
+                                    (pokey-deferrable-p pokey)))))
                (declare (type fixnum line-cycles stolen pokey-remaining))
                (incf cpu-budget (- line-cycles stolen))
                ;; Run whole instructions while the budget allows.  STEP-CPU
                ;; services a pending NMI/IRQ instead of fetching when one is
                ;; due, returning the 7-cycle entry cost so it is charged to
-               ;; the budget.
-               (loop while (and (>= cpu-budget 2) (not (cpu-halted cpu)))
-                     do (handler-case
-                            (let ((used (step-cpu cpu)))
-                              (declare (type fixnum used))
-                              (decf cpu-budget used)
-                              ;; Advance POKEY alongside the instruction,
-                              ;; capped at this line's remaining cycles.
-                              (let ((chunk (min used pokey-remaining)))
-                                (when (plusp chunk)
-                                  (pokey-advance pokey cpu chunk)
-                                  (decf pokey-remaining chunk))))
-                          ;; A KIL instruction signals ILLEGAL-OPCODE; leave
-                          ;; the CPU halted and stop trying to step.
-                          (illegal-opcode ()
-                            (setf (cpu-halted cpu) t)))
-                        ;; WSYNC ($D40A): a write halts the CPU until the
-                        ;; end of the current scanline.  Clamp CPU-BUDGET
-                        ;; to (MIN CPU-BUDGET 0): a positive surplus
-                        ;; carried in from a previous line must not leak
-                        ;; past the stall (real WSYNC freezes the CPU
-                        ;; regardless of how far ahead it was), but a
-                        ;; NEGATIVE budget -- the WSYNC-writing instruction
-                        ;; overshot the line's remainder -- is a debt of
-                        ;; already-executed cycles and must carry into the
-                        ;; next line, not be forgiven.  POKEY-REMAINING is
-                        ;; left untouched here; the "top POKEY up to
-                        ;; exactly this line's cycle count" step below
-                        ;; advances POKEY through the skipped remainder,
-                        ;; so POKEY still sees every cycle of the line.
-                        ;; ANTIC-TICK (the per-cycle reference path) never
-                        ;; calls ANTIC-CONSUME-WSYNC, so WSYNC has no
-                        ;; effect outside this scheduler.
-                        (when (antic-consume-wsync antic)
-                          (setf cpu-budget (min cpu-budget 0))
-                          (return)))
-               ;; Top POKEY up to exactly this line's cycle count.
+               ;; the budget.  MACROLET, not a local function: NON-DEFER-LOOP
+               ;; is spliced inline at both its call sites below so the
+               ;; non-deferring path costs no extra funcall, the same shape
+               ;; POKEY-ADVANCE's ADVANCE-LOOP macrolet uses to split its
+               ;; audio/no-audio bodies (ROADMAP.md Phase 30b item 3 /
+               ;; Phase 22's inner-loop-test lesson, quoted on POKEY-ADVANCE).
+               (macrolet
+                   ((non-defer-loop ()
+                      `(loop while (and (>= cpu-budget 2) (not (cpu-halted cpu)))
+                             do (handler-case
+                                    (let ((used (step-cpu cpu)))
+                                      (declare (type fixnum used))
+                                      (decf cpu-budget used)
+                                      ;; Advance POKEY alongside the
+                                      ;; instruction, capped at this line's
+                                      ;; remaining cycles.
+                                      (let ((chunk (min used pokey-remaining)))
+                                        (when (plusp chunk)
+                                          (pokey-advance pokey cpu chunk)
+                                          (decf pokey-remaining chunk))))
+                                  ;; A KIL instruction signals ILLEGAL-OPCODE;
+                                  ;; leave the CPU halted and stop stepping.
+                                  (illegal-opcode ()
+                                    (setf (cpu-halted cpu) t)))
+                                ;; WSYNC ($D40A): a write halts the CPU until
+                                ;; the end of the current scanline.  Clamp
+                                ;; CPU-BUDGET to (MIN CPU-BUDGET 0): a
+                                ;; positive surplus carried in from a
+                                ;; previous line must not leak past the
+                                ;; stall (real WSYNC freezes the CPU
+                                ;; regardless of how far ahead it was), but
+                                ;; a NEGATIVE budget -- the WSYNC-writing
+                                ;; instruction overshot the line's
+                                ;; remainder -- is a debt of already-
+                                ;; executed cycles and must carry into the
+                                ;; next line, not be forgiven.
+                                ;; POKEY-REMAINING is left untouched here;
+                                ;; the end-of-line fold/top-up below
+                                ;; advances POKEY through the skipped
+                                ;; remainder, so POKEY still sees every
+                                ;; cycle of the line.  ANTIC-TICK (the
+                                ;; per-cycle reference path) never calls
+                                ;; ANTIC-CONSUME-WSYNC, so WSYNC has no
+                                ;; effect outside this scheduler.
+                                (when (antic-consume-wsync antic)
+                                  (setf cpu-budget (min cpu-budget 0))
+                                  (return)))))
+                 (if defer-p
+                     (progn
+                       ;; Deferring loop.  Exactly the shape above, except
+                       ;; the instruction's chunk goes into POKEY-LAG
+                       ;; instead of an immediate POKEY-ADVANCE call, and
+                       ;; ONE extra per-instruction test (the Phase 30b
+                       ;; budget) reads POKEY-DEFER-BREAK-P: when a mid-
+                       ;; line $D2xx write has set it, %MACHINE-SYNC-POKEY
+                       ;; flushes the lag (so cycles reach POKEY in strict
+                       ;; chronological order) before falling back to
+                       ;; NON-DEFER-LOOP for the remainder of the line.
+                       (loop while (and (>= cpu-budget 2) (not (cpu-halted cpu)))
+                             do (handler-case
+                                    (let ((used (step-cpu cpu)))
+                                      (declare (type fixnum used))
+                                      (decf cpu-budget used)
+                                      (let ((chunk (min used pokey-remaining)))
+                                        (when (plusp chunk)
+                                          (incf (atari-machine-pokey-lag machine)
+                                                chunk)
+                                          (decf pokey-remaining chunk))))
+                                  (illegal-opcode ()
+                                    (setf (cpu-halted cpu) t)))
+                                (when (antic-consume-wsync antic)
+                                  (setf cpu-budget (min cpu-budget 0))
+                                  (return))
+                                (when (atari-machine-pokey-defer-break-p machine)
+                                  (%machine-sync-pokey machine)
+                                  (return)))
+                       (incf (atari-machine-pokey-defer-engagements machine))
+                       ;; A mid-line write broke the gate: finish the line
+                       ;; the ordinary way.  A no-op when WSYNC or plain
+                       ;; budget exhaustion already ended the line instead
+                       ;; (NON-DEFER-LOOP's WHILE test is then false).
+                       (when (atari-machine-pokey-defer-break-p machine)
+                         (non-defer-loop)))
+                     (non-defer-loop)))
+               ;; End-of-line: fold any still-lagged cycles into POKEY
+               ;; first -- they were already subtracted from
+               ;; POKEY-REMAINING when the deferring loop accounted for
+               ;; them, so flushing the lag and THEN topping up by
+               ;; whatever POKEY-REMAINING still holds (the WSYNC-skipped
+               ;; or never-executed tail) delivers each of this line's
+               ;; cycles exactly once -- never double-counted, never
+               ;; dropped, regardless of how many mid-line $D2xx accesses
+               ;; already paid off part of the lag early.
+               (let ((lag (atari-machine-pokey-lag machine)))
+                 (declare (type fixnum lag))
+                 (when (plusp lag)
+                   (pokey-advance pokey cpu lag)
+                   (setf (atari-machine-pokey-lag machine) 0)))
                (when (plusp pokey-remaining)
                  (pokey-advance pokey cpu pokey-remaining))
                ;; Close the line — but not a trailing partial line.

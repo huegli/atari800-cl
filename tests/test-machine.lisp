@@ -1189,3 +1189,65 @@ synthesized entirely in memory) -- with no .atr file involved at all."
                      lo hi
                      (atari800-cl.cpu:cpu-pc (atari800-cl.machine:atari-machine-cpu m))
                      (atari800-cl.cpu:cpu-halted (atari800-cl.machine:atari-machine-cpu m))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Deferred POKEY advance (ROADMAP.md Phase 30 -- 30c item 3)
+;;;
+;;; POKEY-DEFER-ENGAGEMENTS counts the scanlines on which %RUN-CLOCKS took
+;;; the deferring instruction-loop path (POKEY-DEFERRABLE-P was true and
+;;; POKEY-DEFER-DISABLED-P was not set).  All three machines below run the
+;;; same tight JMP-self spin loop as MACHINE-POKEY-IRQ-SERVICED-WITHIN-
+;;; SAME-SCANLINE above; only the POKEY/flag setup differs.
+
+(defun %make-spin-loop-os-rom ()
+  "A synthetic OS ROM whose reset code is JMP $C000 -- a tight spin loop,
+so the PC never marches into the NOP filler.  Shared by the Phase 30
+deferral-engagement tests below."
+  (let ((os (%make-synthetic-os-rom :reset-pc #xC000)))
+    (%poke os #x0000 #x4C)                               ; JMP abs
+    (%poke os #x0001 #x00)
+    (%poke os #x0002 #xC0)
+    os))
+
+(test machine-pokey-defer-engagement-with-timer-irq-enabled
+  "POKEY-DEFERRABLE-P excludes any timer IRQ source being enabled, so with
+IRQEN's timer-1 bit set the scheduler must never take the deferring path
+-- POKEY-DEFER-ENGAGEMENTS stays 0 across several frames, even though
+the machine is otherwise idle (no audio, no input)."
+  (let* ((m   (make-test-machine :os-rom (%make-spin-loop-os-rom)))
+         (bus (atari800-cl.machine:atari-machine-bus m)))
+    (atari800-cl.bus:bus-write bus #xD20E #x01)          ; IRQEN: timer 1
+    (dotimes (i 5)
+      (declare (ignore i))
+      (atari800-cl.machine:machine-run-frame m))
+    (is (= 0 (atari800-cl.machine:atari-machine-pokey-defer-engagements m))
+        "deferral must never engage while a timer IRQ enable bit is set; ~
+         engagements = ~D"
+        (atari800-cl.machine:atari-machine-pokey-defer-engagements m))))
+
+(test machine-pokey-defer-engagement-on-idle-machine
+  "An idle machine -- spin loop, no audio attached, no timer IRQ enabled
+-- qualifies for deferral on every scanline it runs, so
+POKEY-DEFER-ENGAGEMENTS must be positive after a few frames."
+  (let ((m (make-test-machine :os-rom (%make-spin-loop-os-rom))))
+    (dotimes (i 5)
+      (declare (ignore i))
+      (atari800-cl.machine:machine-run-frame m))
+    (is (plusp (atari800-cl.machine:atari-machine-pokey-defer-engagements m))
+        "deferral must engage on an idle machine with no audio and no ~
+         timer IRQ enabled; engagements = ~D"
+        (atari800-cl.machine:atari-machine-pokey-defer-engagements m))))
+
+(test machine-pokey-defer-disabled-flag-suppresses-engagement
+  "With POKEY-DEFER-DISABLED-P set, the scheduler never takes the
+deferring path even on a machine that would otherwise qualify every
+line -- POKEY-DEFER-ENGAGEMENTS stays 0."
+  (let ((m (make-test-machine :os-rom (%make-spin-loop-os-rom))))
+    (setf (atari800-cl.machine:atari-machine-pokey-defer-disabled-p m) t)
+    (dotimes (i 5)
+      (declare (ignore i))
+      (atari800-cl.machine:machine-run-frame m))
+    (is (= 0 (atari800-cl.machine:atari-machine-pokey-defer-engagements m))
+        "POKEY-DEFER-DISABLED-P must suppress deferral entirely even on ~
+         an otherwise-idle machine; engagements = ~D"
+        (atari800-cl.machine:atari-machine-pokey-defer-engagements m))))

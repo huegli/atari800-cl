@@ -390,6 +390,7 @@
            #:pokey-input
            #:pokey-tick
            #:pokey-advance
+           #:pokey-deferrable-p
            #:pokey-read #:pokey-write
            #:pokey-random
            #:reset-pokey
