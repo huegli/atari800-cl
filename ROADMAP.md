@@ -468,7 +468,7 @@ and say so in the commit message.
 | 27    | Idle benchmark workloads (idle, serve)       | --          | no       | done   |
 | 28    | AESP push economics (gate, reuse, dedup)     | 27         | yes      | done   |
 | 29    | Dirty-frame render skip (conditional)        | 27, 28     | yes      | open   |
-| 30    | Deferred POKEY advance                       | 27         | yes      | open   |
+| 30    | Deferred POKEY advance                       | 27         | yes      | done   |
 | 31    | Spin-loop fast-forward (conditional, opt-in) | 28, 30     | yes      | open   |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
@@ -1912,6 +1912,50 @@ Commits: `bus: per-page RAM write dirty map`,
 ---
 
 ## Phase 30 -- Deferred POKEY advance  [hot path -> benchmark]
+
+> **Done (2026-08-23)**, three commits plus this close-out: `14dae58`
+> (machine lockstep equivalence harness, no behavior change), `4875544`
+> (30a, sync-on-access plumbing: `pokey-lag` / `pokey-defer-disabled-p`
+> / `pokey-defer-engagements` / `pokey-defer-break-p` on
+> `ATARI-MACHINE`, `%MACHINE-SYNC-POKEY`, wrapped `$D2xx` bus closures),
+> `f123fcb` (30b, the scheduler gate: per-line `POKEY-DEFERRABLE-P` plus
+> split defer/non-defer instruction loops in `%RUN-CLOCKS`). Measured
+> with `scripts/bench-ab.sh` (5+ interleaved pairs, both
+> implementations) per the tranche rules: 30a stayed in noise
+> everywhere as required (pure plumbing, unreachable until 30b); 30b's
+> `f123fcb` vs `4875544` delta separated CLEAN on `nop` on BOTH
+> implementations (sbcl +35.0%, lispworks +35.2% -- the rare phase
+> where SBCL was expected to move too, per this phase's own opening:
+> "32% self time is the prize"), with `display`/`idle` also CLEAN or
+> strongly positive on both, `irq`/`audio` flat as predicted (the gate
+> excludes both by construction), and `serve` flat (AESP-push-dominated,
+> not POKEY-dominated). The reason the lockstep harness (`14dae58`)
+> exists: `MACHINE-LOCKSTEP-DEFER-ON-VS-OFF`
+> (`tests/test-machine.lisp`) ran 64 frames of two otherwise-identical
+> machines -- one at deferral's default, one with
+> `POKEY-DEFER-DISABLED-P` forced -- through identical mid-run POKEY
+> pokes crossing both the defer-engaged and defer-broken (timer-IRQ-
+> enabled) regimes, and found byte-identical POKEY/CPU/RAM state on
+> every single frame, exactly as the batching-is-EXACT argument
+> predicts; separate assertions confirmed the deferring machine actually
+> engaged the gate (`POKEY-DEFER-ENGAGEMENTS` > 0) and the disabled one
+> never did, so the pass is not vacuous. Re-profiling LispWorks `nop`
+> and `display` with the Phase 18/26 `hcl` methodology confirmed the
+> predicted collapse: `POKEY-ADVANCE` fell from the #1 self-time entry
+> at the Phase 26 close-out (28% self / 51% incl on `nop`, 11% / 19% on
+> `display`) to 7% / 13% on `nop` (tied for 5th/6th place with array
+> internals) and 3% / 5% on `display` (11th place) -- the CPU core's own
+> `%RUN-CLOCKS`/`STEP-CPU`/`BUS-READ` now occupy most of `nop`'s top 5.
+> Full suites green on both implementations (sbcl 2700/2686/0,
+> lispworks 2703/2689/0 -- checks/pass/fail); the CPU core itself is
+> untouched by this phase, so per item 30c/4 no Harte re-run beyond the
+> standard suite was required. See `PERFORMANCE_LOG.md`'s "ROADMAP
+> Phase 30" section for the full A/B tables and re-profile tables.
+> Phases 29 and 31 remain conditional -- both are gated on a fresh
+> `idle` re-profile this close-out did not run (30d only re-profiled
+> `nop` and `display` per spec); whether `idle` still shows the
+> renderer or the CPU spin itself dominating after this phase's gains
+> is an open question for whichever of 29/31 gets picked up next.
 
 The Phase 26 close-out profile still puts `POKEY-ADVANCE` first on
 LispWorks `nop` (28% self) and SBCL `nop` (32% self). The cost is no

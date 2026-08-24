@@ -957,14 +957,16 @@ edventure.obx's own segment headers say it occupies)."
 ;;; ---------------------------------------------------------------------------
 ;;; Machine-level lockstep equivalence harness (ROADMAP.md Phase 30, stage
 ;;; 30c) -- proves two ATARI-MACHINE instances stay in identical observable
-;;; states frame-by-frame.  Written against CURRENT main, where the Phase 30
-;;; deferred-POKEY-advance feature does not exist yet: %RUN-MACHINES-IN-
-;;; LOCKSTEP takes both machines as ARGUMENTS rather than building them, so
-;;; it needs no deferral-specific symbol and stays useful (and green) right
-;;; now.  Phase 30's close-out instantiates the actual equivalence test by
-;;; building one machine with the deferral debug switch forced on and
-;;; comparing it against a default (deferral off) machine -- see the
-;;; MACHINE-LOCKSTEP-DEFER-ON-VS-OFF comment below.
+;;; states frame-by-frame.  %RUN-MACHINES-IN-LOCKSTEP takes both machines as
+;;; ARGUMENTS rather than building them, so it needs no deferral-specific
+;;; symbol: MACHINE-LOCKSTEP-SELF-CHECK and MACHINE-LOCKSTEP-WITH-POKEY-
+;;; STIMULI below use it with two identically-configured machines (deferral
+;;; at its shared default) to pin the harness has no false positives; the
+;;; close-out test MACHINE-LOCKSTEP-DEFER-ON-VS-OFF (near the end of this
+;;; file, alongside the POKEY-DEFER-ENGAGEMENTS tests) uses it with one
+;;; machine at the default (deferral active) and one with
+;;; POKEY-DEFER-DISABLED-P forced T, to prove deferral is observably a
+;;; no-op.
 ;;;
 ;;; What the comparator covers: the complete POKEY struct (every scalar and
 ;;; array slot bearing observable state -- see %POKEY-STATE-PLIST), CPU
@@ -1251,3 +1253,86 @@ line -- POKEY-DEFER-ENGAGEMENTS stays 0."
         "POKEY-DEFER-DISABLED-P must suppress deferral entirely even on ~
          an otherwise-idle machine; engagements = ~D"
         (atari800-cl.machine:atari-machine-pokey-defer-engagements m))))
+
+(test machine-lockstep-defer-on-vs-off
+  "The reason %RUN-MACHINES-IN-LOCKSTEP exists: machine A runs with
+deferral at its default (active), machine B has POKEY-DEFER-DISABLED-P
+forced T, and both are otherwise built identically (same synthetic OS ROM,
+same IRQ handler, I flag unmasked the same way).  ROADMAP.md Phase 30
+claims the batching is EXACT -- POKEY-ADVANCE by A then by B is
+bit-identical to one advance by A+B -- so the two machines' complete
+observable state (POKEY struct, CPU registers/flags/cycles, RAM checksum)
+must match after every single frame despite A taking the deferring
+instruction-loop path and B never taking it.
+
+The per-frame stimuli are the same pattern MACHINE-LOCKSTEP-WITH-POKEY-
+STIMULI uses (AUDF/AUDC/AUDCTL/STIMER pokes, IRQEN enabled then disabled,
+a late SKCTL poke) applied identically to both machines via the bus, so
+the run crosses both regimes that matter: frames where IRQEN's timer-1 bit
+is clear and no audio is attached (A qualifies for deferral, B does not
+take it because it is disabled) and frames after IRQEN enables the timer-1
+IRQ (POKEY-DEFERRABLE-P excludes both machines identically, since the
+gate depends on the same POKEY state either machine also carries -- the
+comparison is about the SCHEDULER'S deferral choice, not about POKEY
+state validity).
+
+Runs 64 frames (>= 60 per the phase spec).  Finally asserts that A alone
+actually engaged the deferring path one or more times
+(POKEY-DEFER-ENGAGEMENTS > 0) and that B, with deferral disabled, never
+did (POKEY-DEFER-ENGAGEMENTS = 0) -- a lockstep pass where A's counter
+stayed at 0 would prove nothing about deferral, only that two identical
+non-deferring runs agree with each other."
+  (flet ((build-os ()
+           (let ((rom (%make-synthetic-os-rom :reset-pc #xC000 :irq-pc #xFE10)))
+             ;; Main program at $C000: JMP $C000 -- a tight spin loop, so PC
+             ;; never marches down the NOP filler into the handler bytes and
+             ;; the machine looks idle except for the mid-run pokes below.
+             (%poke rom #x0000 #x4C)
+             (%poke rom #x0001 #x00)
+             (%poke rom #x0002 #xC0)
+             ;; IRQ handler at $FE10 (ROM offset $3E10): INC $81, RTI.
+             (%poke rom #x3E10 #xE6)
+             (%poke rom #x3E11 #x81)
+             (%poke rom #x3E12 #x40)
+             rom))
+         (poke-both (ma mb addr value)
+           (atari800-cl.bus:bus-write (atari800-cl.machine:atari-machine-bus ma) addr value)
+           (atari800-cl.bus:bus-write (atari800-cl.machine:atari-machine-bus mb) addr value)))
+    (let ((ma (make-test-machine :os-rom (build-os)))
+          (mb (make-test-machine :os-rom (build-os))))
+      (setf (atari800-cl.machine:atari-machine-pokey-defer-disabled-p mb) t)
+      ;; Cold reset leaves I=1 on both; unmask IRQs identically so the
+      ;; timer-1 IRQ triggered below is actually serviced on each side,
+      ;; and so the machines cross out of the deferral-eligible regime the
+      ;; same way for the duration IRQEN's timer-1 bit is set.
+      (atari800-cl.cpu:clear-flag (atari800-cl.machine:atari-machine-cpu ma)
+                                   atari800-cl.cpu:+flag-i+)
+      (atari800-cl.cpu:clear-flag (atari800-cl.machine:atari-machine-cpu mb)
+                                   atari800-cl.cpu:+flag-i+)
+      (%run-machines-in-lockstep
+       ma mb 64
+       :per-frame-fn
+       (lambda (ma mb frame)
+         (case frame
+           (2  (poke-both ma mb #xD200 30)     ; AUDF1
+               (poke-both ma mb #xD201 #xA0)   ; AUDC1 (volume only, no distortion)
+               (poke-both ma mb #xD202 60)     ; AUDF2
+               (poke-both ma mb #xD203 #x00)   ; AUDC2
+               (poke-both ma mb #xD204 10)     ; AUDF3
+               (poke-both ma mb #xD205 #x00)   ; AUDC3
+               (poke-both ma mb #xD206 200)    ; AUDF4
+               (poke-both ma mb #xD207 #x00)   ; AUDC4
+               (poke-both ma mb #xD208 #x40)   ; AUDCTL: channel 1 at 1.79 MHz
+               (poke-both ma mb #xD209 0)      ; STIMER: reload all timer counters
+               (poke-both ma mb #xD20E #x01))  ; IRQEN: timer 1 only -- breaks the gate
+           (6  (poke-both ma mb #xD20E #x00))  ; IRQEN: disable -- deferral re-eligible
+           (10 (poke-both ma mb #xD20F #x20))))) ; SKCTL: transmit-mode bit (register only)
+      (is (plusp (atari800-cl.machine:atari-machine-pokey-defer-engagements ma))
+          "machine A (deferral at its default) must have engaged the ~
+           deferring path at least once across 64 frames of idle spin; ~
+           engagements = ~D"
+          (atari800-cl.machine:atari-machine-pokey-defer-engagements ma))
+      (is (= 0 (atari800-cl.machine:atari-machine-pokey-defer-engagements mb))
+          "machine B (POKEY-DEFER-DISABLED-P forced T) must never engage ~
+           the deferring path; engagements = ~D"
+          (atari800-cl.machine:atari-machine-pokey-defer-engagements mb)))))

@@ -3,6 +3,75 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 30 -- Deferred POKEY advance
+
+The Phase 26 close-out profile still put `POKEY-ADVANCE` first on
+LispWorks `nop` (28% self) and SBCL `nop` (32% self) -- not array
+dispatch anymore (Phase 26 fixed that), but the call pattern itself:
+`%RUN-CLOCKS` invokes `POKEY-ADVANCE` after every single instruction in
+2-7 cycle chunks, so function-call overhead and chunk bookkeeping run
+15-50x per scanline even when nothing observable can happen. Phase 30
+defers those calls instead of eliminating any of them: `POKEY-ADVANCE`
+by A then by B is bit-identical to one advance by A+B (each is
+equivalent to that many `POKEY-TICK`s, a property the suite already
+pinned), so batching the whole line's worth of advance into one call at
+line end is exact -- the same idea as the chip's existing lazy-RNG
+design (`POKEY-RNG-LAG`/`%SYNC-RNG`) applied one level up.
+
+The exactness argument has exactly two escape hatches, both closed:
+(a) the CPU touching a POKEY register mid-line, and (b) POKEY raising
+an IRQ mid-line. `ATARI-MACHINE` gains a `pokey-lag` counter (cycles
+POKEY is behind the CPU within the current line) and
+`%MACHINE-SYNC-POKEY` (advance by the lag, then zero it); every
+`$D200-$D2FF` bus read and write closure now syncs first, so any
+register access -- `RANDOM`, `IRQST`, `STIMER`, `IRQEN`, `AUDF*`,
+`AUDC*`, `AUDCTL`, `SKCTL`, and every other path that touches POKEY
+state outside the bus (`ATTACH-POKEY-INPUT`, `MACHINE-ATTACH-AUDIO`,
+AESP's `%SYNC-AUDIO-ATTACHMENT`, REPL instrumentation) -- always sees
+exact state (the sync-on-access rule). `%RUN-CLOCKS` computes a
+per-line `POKEY-DEFERRABLE-P` gate once per line, outside the
+per-instruction loop (an extra inner-loop test once cost ~7% on `nop`
+per the Phase 22 lesson, so the loop itself was split into defer/
+non-defer variants rather than adding a branch inside either): the gate
+requires no audio attachment, nothing already pending, and no timer IRQ
+enable bit set, so no IRQ can ever be delayed by deferral by
+construction. A mid-line `$D2xx` write that would invalidate the gate
+(enabling a timer IRQ, starting audio, setting PENDING) clears it for
+the rest of the line rather than trying to recompute eligibility.
+
+Measured with `scripts/bench-ab.sh` (5+ interleaved pairs, both
+implementations): the plumbing commit (30a) was behaviorally inert as
+designed -- every workload stayed in noise on both implementations, as
+it must with the gate not yet wired up. The gate commit (30b) separated
+CLEAN on `nop` on BOTH implementations (sbcl +35.0%, lispworks +35.2%)
+-- the rare phase where SBCL was expected to move too, since the Phase
+26 close-out profile named SBCL's `nop` `POKEY-ADVANCE` share (32%
+self) as the target alongside LispWorks'. `display` and `idle` improved
+substantially on both implementations (the spin-side gain the phase was
+built for); `irq` and `audio` stayed flat, exactly as predicted, since
+the gate excludes both by construction (a timer IRQ enabled, or audio
+attached); `serve` stayed flat because its cost is AESP-push-dominated
+(Phase 28's territory), not POKEY-advance-dominated. Full tables in
+`PERFORMANCE_LOG.md`'s "ROADMAP Phase 30" section.
+
+The lockstep proof: `tests/test-machine.lisp`'s
+`MACHINE-LOCKSTEP-DEFER-ON-VS-OFF` runs 64 frames of two
+otherwise-identical machines -- one at deferral's default, one with
+deferral force-disabled -- through identical mid-run POKEY pokes that
+cross both the defer-engaged (idle) and defer-broken (timer IRQ
+enabled) regimes, asserting byte-identical POKEY struct, CPU
+registers/flags/cycles/interrupt lines, and RAM checksum after every
+single frame. It passed on both implementations, and two follow-up
+assertions confirm the pass is not vacuous: the deferring machine's
+engagement counter is positive (the gate actually ran) and the
+disabled machine's stayed at zero. Re-profiling LispWorks `nop` and
+`display` with the Phase 18/26 methodology confirmed the predicted
+collapse: `POKEY-ADVANCE` fell from the #1 self-time entry at the
+Phase 26 close-out to 7% self on `nop` (tied for 5th/6th place with
+array-dispatch internals, effectively noise) and 3% self on `display`
+(11th place), with the CPU core's own `%RUN-CLOCKS`/`STEP-CPU`/
+`BUS-READ` now dominating `nop`'s profile instead.
+
 ## ROADMAP Phases 27-28 -- idle workloads + AESP push economics
 
 The first two phases of the idle-operation tranche (ROADMAP Phases

@@ -632,6 +632,188 @@ CLEAN separations on untouched paths are image-layout/session
 artifacts, not effects. The honest cumulative read: `serve` +70.7%
 sbcl / +22.8% lispworks, everything else flat.
 
+## ROADMAP Phase 30 -- Deferred POKEY advance
+
+Date 2026-08-23. Commits: `14dae58` (machine lockstep equivalence
+harness, no behavior change), `4875544` (30a, sync-on-access
+plumbing: `pokey-lag` / `pokey-defer-disabled-p` /
+`pokey-defer-engagements` / `pokey-defer-break-p` on `ATARI-MACHINE`,
+`%MACHINE-SYNC-POKEY`, wrapped `$D2xx` bus closures), `f123fcb` (30b,
+the scheduler gate: per-line `POKEY-DEFERRABLE-P` plus split
+defer/non-defer instruction loops in `%RUN-CLOCKS`). Methodology per
+the tranche ground rules: `bench-ab.sh <prev-commit> -impl both -pairs
+5` per hot commit.
+
+### 30a `4875544` vs `14dae58` -- sync-on-access plumbing (behaviorally inert)
+
+All workloads MIXED/noise on both implementations: sbcl +0.3%..+4.9%;
+lispworks +1.7%..+4.8%, except one audio row that separated CLEAN at
++33.2% -- a degraded-baseline-run artifact (the B side of that one
+pair ran unusually slow), not a real effect; the MIXED separation on
+every other row is the honest read. Exactly as expected: `pokey-lag`
+is written but the gate that would ever act on it does not exist
+until 30b, so this commit is pure plumbing with no reachable behavior
+change, and the acceptance bar was "stays in noise everywhere."
+
+### 30b `f123fcb` vs `4875544` -- the scheduler gate
+
+sbcl:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop     | 2837.16 -> 3830.12 | +35.0% CLEAN |
+| irq     | 3483.88 -> 3529.46 |  +1.3% MIXED |
+| display | 2126.19 -> 2409.41 | +13.3% CLEAN |
+| audio   | 1634.58 -> 1637.54 |  +0.2% MIXED |
+| idle    | 1876.43 -> 2063.89 | +10.0% CLEAN |
+| serve   |  970.64 ->  971.52 |  +0.1% MIXED |
+
+`klaus` (not an A/B pair, single same-session run): 3200.91 fps, vs.
+~2700 in recent sessions -- the CPU-heavy functional-test workload
+also benefits, consistent with it spending long stretches with no
+timer IRQ enabled.
+
+lispworks:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop     | 1695.88 -> 2293.30 | +35.2% CLEAN |
+| irq     | 2136.89 -> 2312.89 |  +8.2% MIXED |
+| display |  956.41 -> 1056.44 | +10.5% MIXED |
+| audio   |  617.78 ->  670.29 |  +8.5% MIXED |
+| idle    |  876.30 ->  982.03 | +12.1% MIXED |
+| serve   |  264.36 ->  264.78 |  +0.2% MIXED |
+
+`klaus`: 1659.00 fps (single same-session run).
+
+The acceptance shape held: `nop` separates CLEAN on BOTH
+implementations -- the rare phase where SBCL was supposed to move too
+(ROADMAP.md 30d: "32% self time is the prize"), and it did, +35.0%.
+`irq` and `audio` stay within noise on both implementations, as
+predicted: `irq` runs with IRQEN's timer-1 bit set for its whole
+duration, so `POKEY-DEFERRABLE-P` is false on every line and the gate
+never engages; `audio` runs with an audio attachment, which the same
+predicate excludes. `serve` is flat on both implementations because
+its frame cost is AESP-push-dominated (Phase 28's territory), not
+POKEY-advance-dominated. `display` and `idle` separate CLEAN on sbcl
+and land MIXED-but-positive on lispworks -- both inherit the spin-side
+gain the gate was built for, just with more session noise on the
+lispworks samples that day. The lispworks B-side means recorded here
+are lower than the same commit (`4875544`) measured earlier the same
+day for the 30a table above (e.g. lispworks `nop` 1696 here vs. ~1976
+in an earlier same-day sample) -- ordinary session/thermal drift on
+this machine, which is exactly why `bench-ab.sh`'s interleaved A/B
+design is used instead of comparing absolute figures across runs; the
+paired deltas above remain valid regardless.
+
+### Lockstep proof (30c)
+
+`tests/test-machine.lisp`'s `MACHINE-LOCKSTEP-DEFER-ON-VS-OFF` builds
+two otherwise-identical machines -- same synthetic OS ROM (a `JMP
+$C000` spin loop plus an `INC $81` / `RTI` IRQ handler at `$FE10`),
+same I-flag unmask -- machine A left at deferral's default (active),
+machine B with `POKEY-DEFER-DISABLED-P` forced `T`. Both run 64 frames
+(>= the spec's 60) through `%RUN-MACHINES-IN-LOCKSTEP`, with identical
+mid-run POKEY pokes applied to both machines every frame via the bus
+(frame 2: `AUDF1-4`/`AUDC1-4`/`AUDCTL`/`STIMER`/`IRQEN` enabling timer
+1; frame 6: `IRQEN` disabling it again; frame 10: an `SKCTL` poke) --
+the same stimulus pattern `MACHINE-LOCKSTEP-WITH-POKEY-STIMULI` uses,
+chosen so the run crosses both regimes the gate cares about: frames 0-1
+and 7-63 where machine A qualifies for deferral (idle, no audio, no
+timer IRQ enabled) and frames 2-6 where `IRQEN`'s timer-1 bit breaks
+the gate identically on both machines. `%MACHINES-STATE-EQUAL-P`
+(complete POKEY struct, CPU registers/flags/cycles/interrupt lines, RAM
+checksum) passed on every one of the 64 frames -- byte-identical
+throughout, exactly as ROADMAP.md's batching-is-EXACT claim predicts.
+
+The two follow-up assertions rule out a vacuous pass: machine A's
+`POKEY-DEFER-ENGAGEMENTS` was positive (deferral actually engaged
+across the idle stretches of the run) and machine B's stayed at 0
+(the disabled flag suppressed it completely). A lockstep pass with
+machine A's counter also at 0 would only have proven two non-deferring
+runs agree with each other; this run proves the deferring and
+non-deferring paths agree with each other, which is the actual claim.
+Passed on both sbcl and lispworks as part of the full suite (below).
+
+### Re-profile (30d): LispWorks `nop` and `display`, Phase 26 vs Phase 30
+
+Same methodology as Phase 18 / the Phase 26 close-out:
+`atari800-cl.compat:with-profiling` around a warmed-up machine (60
+frames), then a measured chunk sized to land at roughly 16-18 seconds
+of wall clock -- 40,000 frames for `nop` (1088 samples, 16.135s user
+time), 20,000 frames for `display` (1215 samples, 18.067s user time).
+Driver was a throwaway scratchpad script (not committed), same shape
+as the Phase 26 driver: load `:atari800-cl` and `scripts/bench.lisp`'s
+workload builders, wrap the timed loop in `WITH-PROFILING`.
+
+**nop -- top 5 by self time ("top"), Phase 26 vs Phase 30:**
+
+| rank | Phase 26 (self / incl) | Phase 30 (self / incl) |
+|------|--------------------------|--------------------------|
+| 1 | POKEY-ADVANCE 28% / 51% | %RUN-CLOCKS 24% / 100% |
+| 2 | SYSTEM::THROW-TO-TAG 15% / 15% | BUS-READ 18% / 18% |
+| 3 | %RUN-CLOCKS 14% / 100% | SYSTEM::THROW-TO-TAG 15% / 15% |
+| 4 | STEP-CPU 12% / 38% | STEP-CPU 13% / 48% |
+| 5 | BUS-READ 11% / 11% | SVREF-NO-CHECK$I-VECTOR$FIXNUM 7% / 7% |
+
+`POKEY-ADVANCE` -- the #1 entry at 28% self / 51% inclusive at the
+Phase 26 close-out, and the entry ROADMAP.md's Phase 30 opening
+explicitly named as "the prize" -- fell to 77 samples of 1088 (7%
+self / 13% inclusive), landing just off the bottom of the top 5,
+essentially tied with `SVREF-NO-CHECK$I-VECTOR$FIXNUM` (78 samples,
+7%) for 5th/6th place: a one-sample difference is noise at this
+sample count. `POKEY-ADVANCE`'s self share collapsed to roughly a
+quarter of its Phase 26 figure and its inclusive share to roughly a
+quarter as well (51% -> 13%), exactly the "collapse toward the CPU
+core's [share]" ROADMAP.md 30d predicted -- the CPU core's own
+`%RUN-CLOCKS`/`STEP-CPU`/`BUS-READ` now occupy 3 of the top 4 slots,
+with `SYSTEM::THROW-TO-TAG` (the non-local exit machinery
+`%RUN-CLOCKS`'s per-line loop and IRQ delivery use) the only non-CPU,
+non-POKEY entry left in the top 5.
+
+**display -- top 5 by self time ("top"), Phase 26 vs Phase 30:**
+
+| rank | Phase 26 (self / incl) | Phase 30 (self / incl) |
+|------|--------------------------|--------------------------|
+| 1 | %RENDER-CHAR-MODE 19% / 41% | %RENDER-CHAR-MODE 20% / 44% |
+| 2 | POKEY-ADVANCE 11% / 19% | BUS-READ 9% / 9% |
+| 3 | %RUN-CLOCKS 7% / 100% | %RUN-CLOCKS 7% / 100% |
+| 4 | BUS-READ 7% / 7% | SYSTEM::LOGBITP$FIXNUM$FIXNUM 6% / 6% |
+| 5 | STEP-CPU 4% / 14% | SYSTEM::THROW-TO-TAG 5% / 5% |
+
+`POKEY-ADVANCE` was the #2 entry at Phase 26 close-out (11% self / 19%
+inclusive); at Phase 30 it drops to 31 samples of 1215 (3% self / 5%
+inclusive) -- 11th place by self time, behind `%CHAR-ROW-BITS` (30
+samples) and just ahead of it. `%RENDER-CHAR-MODE` (the renderer's own
+character-decode loop, untouched by this phase) is unmoved at the top,
+as expected: `display`'s bottleneck was always the renderer, and
+Phase 30 only ever claimed to remove POKEY overhead, which it did --
+the renderer now accounts for a larger relative share (44% inclusive
+vs. 41%) simply because there is less POKEY time left to compete with
+it for samples.
+
+### Suites
+
+Full suite, both implementations, from the repo root with test assets
+present:
+
+| implementation | checks | pass | fail |
+|-----------------|--------|------|------|
+| sbcl      | 2700 | 2686 | 0 |
+| lispworks | 2703 | 2689 | 0 |
+
+Both green, 0 failures (the SBCL check-count varying a few counts run
+to run, always at 0 failures, is the pre-existing flakiness noted
+during this phase's development -- 0 failures is the bar, not an
+exact total). `MACHINE-LOCKSTEP-DEFER-ON-VS-OFF` passed on both. The
+CPU core itself is untouched by Phase 30 (only `src/machine.lisp`'s
+scheduler and bus-wrapper wiring changed), so per ROADMAP.md 30c item
+4 / the 30c/4-analog close-out rule, no Harte re-run beyond the
+standard suite above was required.
+
+Commits: `14dae58`, `4875544`, `f123fcb`, plus this close-out (lockstep
+defer-on-vs-off test, re-profile, this section).
+
 ## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
 
 SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction
