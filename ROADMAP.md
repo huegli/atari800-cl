@@ -467,7 +467,7 @@ and say so in the commit message.
 | 26    | LispWorks fast-path array access             | 18         | yes      | done   |
 | 27    | Idle benchmark workloads (idle, serve)       | --          | no       | done   |
 | 28    | AESP push economics (gate, reuse, dedup)     | 27         | yes      | done   |
-| 29    | Dirty-frame render skip (conditional)        | 27, 28     | yes      | open   |
+| 29    | Dirty-frame render skip (conditional)        | 27, 28     | yes      | done   |
 | 30    | Deferred POKEY advance                       | 27         | yes      | done   |
 | 31    | Spin-loop fast-forward (conditional, opt-in) | 28, 30     | yes      | open   |
 
@@ -1839,6 +1839,49 @@ Commits: `aesp: gate rendering and conversion on video subscribers`,
 ---
 
 ## Phase 29 -- Dirty-frame render skip  [hot path -> benchmark]  (conditional)
+
+> **Done (2026-08-23)**, four commits: `5d38c65` (gate evaluation, GO
+> verdict, plus the 29a page-write census -- only pages $00/$01 dirty
+> at READY, screen/DL/charset pages untouched across 600 frames),
+> `8adba05` (29c, `ANTIC-COLLECT-WATCHED-PAGES`: the purely-additive
+> display-list/screen/charset/P-M page walker plus pinned page-set
+> tests), `ca5be9d` (29b, the bus-side per-page RAM write dirty map --
+> one branch-free `FAST-AREF` store in the RAM write path, plus
+> `IO-REGS-DIRTY-P` with its WSYNC/NMIEN/NMIRES/HITCLR/CONSOL
+> exclusions), `6fe2e73` (29c/29d, the wiring: `MACHINE-DISPLAY-
+> CHANGED-SINCE-RENDER-P` / `MACHINE-NOTE-FULL-RENDER`, the AESP row-0
+> decision protocol, five 29d behavior tests). The veto bench
+> (`ca5be9d` vs `8adba05`, the dirty-map store on the hot RAM write
+> path) came back MIXED/noise on all six workloads on both
+> implementations -- the phase's stated revert condition never fired.
+> The wiring acceptance bench (`6fe2e73` vs `ca5be9d`) met the bar
+> exactly: `idle` separated CLEAN on both implementations (sbcl
+> 1982.51 -> 3622.82 fps, +82.7%; lispworks 1018.26 -> 1837.19 fps,
+> +80.4%), `nop`/`irq` stayed within noise on both (the veto held on
+> the wiring commit too), and `display` stayed within noise as
+> designed (it keeps forced rendering to stay a renderer benchmark);
+> `serve` posted the largest gains of any workload (sbcl +52.8%,
+> lispworks +193.6%) because Phase 29's skip and Phase 28c's dedup now
+> short-circuit together on a clean frame. Full tables and
+> interpretation in `PERFORMANCE_LOG.md`'s "ROADMAP Phase 29" section.
+> Suites green on both implementations, including the LispWorks
+> `ATARI800_CL_CHECKED_AREF=1` audit build (`ca5be9d` added a new
+> `FAST-AREF` site in `src/bus.lisp`). During `6fe2e73`'s development
+> the agent caught and fixed an SBCL-only bug before it shipped: a
+> `DOTIMES` loop variable declared `(INTEGER 0 255)` signalled a
+> `TYPE-ERROR` on every all-clean call because SBCL's `DOTIMES`
+> transiently assigns the terminating count (256) to the loop variable
+> under `(safety 1)`; widened to `(INTEGER 0 256)`.
+>
+> Phase 31 (spin-loop fast-forward) remains conditional on its own
+> gate, unevaluated by this close-out. Its gate asks whether `idle`
+> remains materially below `nop` on either implementation with a
+> profile blaming the CPU spin itself -- and with `idle` now at
+> roughly 93% of `nop`'s fps on sbcl and roughly 75% on lispworks (up
+> from the Phase 30 close-out's 54%/43%), the gap this phase's own
+> opening motivated has narrowed enough that Phase 31's gate should be
+> re-evaluated against fresh numbers before any implementation work,
+> not assumed still open on the pre-Phase-29 ratios.
 
 > **Gate evaluated (2026-08-23): GO.** Re-profiled the `idle` workload
 > on both implementations with the Phase 18/26/30 methodology

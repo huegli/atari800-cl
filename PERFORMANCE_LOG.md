@@ -814,6 +814,138 @@ standard suite above was required.
 Commits: `14dae58`, `4875544`, `f123fcb`, plus this close-out (lockstep
 defer-on-vs-off test, re-profile, this section).
 
+## ROADMAP Phase 29 -- Dirty-frame render skip
+
+Date 2026-08-23. Commits: `5d38c65` (gate evaluation, GO verdict, plus
+the 29a page-write census), `8adba05` (29c, `ANTIC-COLLECT-WATCHED-
+PAGES`: the display-list/screen/charset/P-M page walker, purely
+additive), `ca5be9d` (29b, the bus-side per-page RAM write dirty map
+plus `IO-REGS-DIRTY-P`), `6fe2e73` (29c/29d, the wiring:
+`MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P` / `MACHINE-NOTE-FULL-RENDER`,
+the AESP row-0 decision protocol, bench `:idle` opt-in). Methodology
+per the tranche ground rules: `bench-ab.sh <prev-commit> -impl both
+-pairs 5` per hot commit.
+
+### Gate evaluation + 29a census
+
+Re-profiled `idle` on both implementations with the Phase 18/26/30
+`with-profiling` methodology: the renderer dominates on both hosts
+(`RENDER-SCANLINE` ~43% inclusive on SBCL and LispWorks alike,
+`%RENDER-CHAR-MODE` the #1 self-time entry on SBCL and tied for #1 on
+LispWorks) -- gate reads **GO**. 29a's page-write census (booting the
+checked-in ROMs to the BASIC READY prompt, then diffing all 64K of RAM
+frame-to-frame over 600 settled frames) found only 2 of 256 pages ever
+change: page $00 (zero page -- RTCLOK/ATRACT) and page $01 (the 6502
+stack), both dirty in 600/600 frames; the display-list page ($9C),
+screen RAM (`$9C`-`$A0`), and charset (`$E0`-`$E3`) pages stayed
+byte-identical across every one of the 600 frames -- a tighter
+always-dirty set than the phase's own opening text predicted (2 pages,
+not the 3 OS-shadow pages guessed), confirming page granularity is
+necessary and sufficient. Full profiling tables and DL/census detail
+in ROADMAP.md's Phase 29 gate blockquote.
+
+### Veto bench: `ca5be9d` vs `8adba05` -- the bus dirty-map store
+
+This is the phase's stated revert condition: the RAM write path gains
+one extra `FAST-AREF` store per write, and per the tranche rule, any
+`nop`/`irq` movement that separates cleanly is a veto regardless of
+what 29c/29d later show.
+
+| workload | sbcl delta | sep | lispworks delta | sep |
+|----------|-----------|-----|-----------------|-----|
+| nop | -0.3% | MIXED | +7.3% | MIXED |
+| irq | +1.1% | MIXED | +0.0% | MIXED |
+| display | +0.0% | MIXED | +3.8% | MIXED |
+| audio | -0.9% | MIXED | +4.5% | MIXED |
+| idle | +4.8% | MIXED | +2.1% | MIXED |
+| serve | +0.6% | MIXED | -0.3% | MIXED |
+
+All six workloads MIXED/noise on both implementations -- the dirty-map
+store costs nothing measurable. Veto not triggered; `ca5be9d` stands.
+
+### Wiring acceptance: `6fe2e73` vs `ca5be9d`
+
+sbcl:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop | +4.8% | MIXED |
+| irq | -3.1% | MIXED |
+| display | +0.4% | MIXED |
+| audio | +1.8% | MIXED |
+| idle | 1982.51 -> 3622.82 | +82.7% CLEAN |
+| serve | 973.72 -> 1488.21 | +52.8% CLEAN |
+
+`klaus` (not an A/B pair, single same-session run): 3231 fps.
+
+lispworks:
+
+| workload | delta | separation |
+|----------|-------|------------|
+| nop | +6.4% | MIXED |
+| irq | +3.5% | MIXED |
+| display | +2.5% | MIXED |
+| audio | +2.0% | MIXED |
+| idle | 1018.26 -> 1837.19 | +80.4% CLEAN |
+| serve | 285.15 -> 837.32 | +193.6% CLEAN |
+
+`klaus`: 1796 fps (single same-session run).
+
+Acceptance met exactly: `idle` separates CLEAN on both
+implementations -- the parked machine's frame cost now sits within
+roughly a nop's worth of overhead of a bare `JMP *` sled (sbcl idle is
+now within ~7% of `nop`'s fps; see the ROADMAP close-out blockquote for
+the ratio read against `nop`). `nop` and `irq` stay within noise on
+both implementations, as the veto required -- the phase's own revert
+condition never fires on the wiring commit either. `display` stays
+within noise, as designed: it deliberately keeps forced rendering
+(`:consult-render-skip nil`) so it continues to measure the renderer
+itself rather than silently turning into a second `idle`. `serve`
+shows the largest gain of any workload on either implementation
+(+52.8% sbcl, +193.6% lispworks) because it compounds two mechanisms:
+Phase 29's render skip AND Phase 28c's `%FRAME-UNCHANGED-P` dedup now
+short-circuit together on a clean frame -- no `RENDER-SCANLINE` calls
+and no byte compare, just a cached-payload resend -- which is also why
+its LispWorks gain so far exceeds `idle`'s: `serve`'s baseline paid for
+both the renderer AND per-frame AESP conversion/compare overhead that
+this commit now skips entirely on clean frames.
+
+### Suites
+
+Full suite, both implementations, from the repo root with test assets
+present:
+
+| implementation | checks | pass | fail |
+|-----------------|--------|------|------|
+| sbcl      | 3546 | 3532 | 0 |
+| lispworks | 3552 | 3538 | 0 |
+
+Both green, 0 failures (asset-gated skips only; the SBCL check-count
+varying a few counts run to run is the pre-existing flakiness noted in
+earlier phases -- 0 failures is the bar, not an exact total). The
+LispWorks `ATARI800_CL_CHECKED_AREF=1` audit build (required this
+phase since `ca5be9d` adds a new `FAST-AREF` call site in
+`src/bus.lisp`) also passed: 3546 checks, 3530 pass, 16 skip, 0 fail
+(the checked/unchecked check-count and skip-count variance is the same
+pre-existing run-to-run flakiness, not a regression -- 0 failures is
+the bar).
+
+During 6fe2e73's development the agent caught and fixed an SBCL-only
+bug before it shipped: `MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P`'s
+page-intersection `DOTIMES` loop originally declared its loop variable
+`(INTEGER 0 255)`; SBCL's `DOTIMES` transiently assigns the count
+itself (256) to the loop variable at the termination check even though
+the body never runs with it, and under `(safety 1)` that assignment is
+still type-checked, so the tighter-looking declaration signalled a
+`TYPE-ERROR` on every call that ran the loop to completion -- exactly
+the all-clean case the function exists to detect. Fixed by widening
+the declaration to `(INTEGER 0 256)`; caught by exercising
+`scripts/bench.lisp`'s `:idle` workload directly, not by the suite run
+that happened to precede the tightening. Both full suites were re-run
+after the fix.
+
+Commits: `5d38c65`, `8adba05`, `ca5be9d`, `6fe2e73`.
+
 ## ROADMAP Phase 17 -- NMOS bus quirks (RMW double-write + indexed dummy reads)
 
 SCANLINE_ACCURACY_PLAN.md Phase 5 items 1-2, landed on the instruction

@@ -3,6 +3,66 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 29 -- Dirty-frame render skip
+
+An idle machine re-renders all 240 scanlines of an unchanging screen
+every frame. Phase 29 tracks, per frame, whether anything that feeds
+the renderer actually changed, and skips the whole `RENDER-SCANLINE`
+pass when nothing did. The gate (`5d38c65`) re-profiled `idle` on both
+implementations and found the renderer still dominating (`RENDER-
+SCANLINE` ~43% inclusive on both hosts) -- GO -- and its 29a page-write
+census (booting the checked-in ROMs to the BASIC READY prompt and
+diffing all 64K of RAM frame-to-frame over 600 frames) found only 2 of
+256 pages ever change at idle: zero page and the stack page, with the
+display-list, screen RAM, and charset pages byte-identical the whole
+run. That confirms the phase's central design point: a single global
+"any RAM write happened" boolean is useless (it would see pages $00/
+$01 churn every frame and never signal clean), so tracking has to be
+per-256-byte-page.
+
+`8adba05` adds `ANTIC-COLLECT-WATCHED-PAGES`, a pure analysis function
+that walks ANTIC's current display-list/LMS/CHBASE/PMBASE state and
+fills a caller-supplied 256-entry vector with every page whose bytes
+can affect the frame about to be drawn -- purely additive, not yet
+wired to anything. `ca5be9d` adds the bus-side infrastructure: a
+256-entry `PAGE-DIRTY` map with one extra branch-free `FAST-AREF`
+store on the RAM write path (index provably in range via `(ldb (byte 8
+8) address)`), plus an `IO-REGS-DIRTY-P` boolean set by GTIA/ANTIC
+register writes with a short, explicitly enumerated exclusion list --
+WSYNC, NMIEN, NMIRES, HITCLR, CONSOL -- registers that affect timing,
+IRQ gating, or non-video I/O rather than pixels. `6fe2e73` wires the
+two together: `MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P` intersects the
+watched-page set against the dirty map (or forces a render whenever
+the watched-page walk can't fully trust its own result), and
+`MACHINE-NOTE-FULL-RENDER` clears the dirty map at the START of a
+frame the client has committed to fully rendering. AESP's row-0
+scanline callback makes this decision once per frame -- never per
+scanline -- and a clean frame now also short-circuits Phase 28c's
+`%FRAME-UNCHANGED-P` dedup without even a byte compare, since a
+skipped frame provably left the framebuffer untouched.
+
+The conservative-correctness rule threading through all three
+commits: any doubt renders. A display-list walk that can't be trusted,
+a register this project isn't sure affects pixels, an un-analyzable
+frame -- all of these force a full render rather than risk skipping
+one that should have redrawn. False dirt costs one redundant render;
+false clean costs a wrong frame on screen, which this phase treats as
+categorically worse.
+
+Measured with `scripts/bench-ab.sh` (5+ interleaved pairs, both
+implementations) per the tranche rules. The veto bench (`ca5be9d` vs
+`8adba05`, the dirty-map store added to the hot RAM write path) came
+back MIXED/noise on all six workloads on both implementations -- the
+phase's stated revert condition never fired. The wiring bench
+(`6fe2e73` vs `ca5be9d`) separated `idle` CLEAN on both implementations
+(sbcl +82.7%, lispworks +80.4%) while `nop`/`irq` stayed within noise
+on both (the veto held here too) and `display` stayed within noise by
+design (it keeps forced rendering so it continues to measure the
+renderer itself). `serve` posted the largest gains of any workload
+(sbcl +52.8%, lispworks +193.6%) because it compounds this phase's
+skip with Phase 28c's dedup on every clean frame. Full tables in
+`PERFORMANCE_LOG.md`'s "ROADMAP Phase 29" section.
+
 ## ROADMAP Phase 30 -- Deferred POKEY advance
 
 The Phase 26 close-out profile still put `POKEY-ADVANCE` first on
