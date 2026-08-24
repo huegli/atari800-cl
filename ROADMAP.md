@@ -1840,6 +1840,107 @@ Commits: `aesp: gate rendering and conversion on video subscribers`,
 
 ## Phase 29 -- Dirty-frame render skip  [hot path -> benchmark]  (conditional)
 
+> **Gate evaluated (2026-08-23): GO.** Re-profiled the `idle` workload
+> on both implementations with the Phase 18/26/30 methodology
+> (`atari800-cl.compat:with-profiling` around a warmed-up machine, a
+> throwaway scratchpad driver, sized to land at roughly 15-18s of wall
+> clock -- not committed to src/).
+>
+> LispWorks (16000 frames, 15.65s, 1022 fps, 1248 samples), top 5 by
+> self ("top"):
+>
+> | rank | function | self / incl |
+> |------|----------|--------------|
+> | 1 | %RENDER-CHAR-MODE | 19% / 40% |
+> | 2 | BUS-READ | 9% / 9% |
+> | 3 | %RUN-CLOCKS | 6% / 100% |
+> | 4 | SYSTEM::LOGBITP$FIXNUM$FIXNUM | 5% / 5% |
+> | 5 | SVREF-NO-CHECK$I-VECTOR$FIXNUM | 4% / 4% |
+>
+> (`RENDER-SCANLINE` itself: 2% self / 43% incl -- it is the frame's
+> single largest inclusive consumer, `%RUN-CLOCKS`'s 100% aside, since
+> that is the whole per-line loop.)
+>
+> SBCL (35000 frames, 17.15s, 2041 fps, 1786 samples over 8.93s of
+> sampled CPU time), top 5 by self:
+>
+> | rank | function | self / total |
+> |------|----------|---------------|
+> | 1 | %RENDER-CHAR-MODE | 28.1% / 38.1% |
+> | 2 | BUS-READ | 19.1% / 19.1% |
+> | 3 | STEP-CPU | 8.8% / 39.0% |
+> | 4 | %RUN-CLOCKS | 7.4% / 99.9% |
+> | 5 | ASH | 6.4% / 6.4% |
+>
+> (`RENDER-SCANLINE`: 5.1% self / 43.2% total.)
+>
+> Combined renderer self time (`RENDER-SCANLINE` + `%RENDER-CHAR-MODE`
+> + `%CHAR-ROW-BITS`, the framebuffer writes now folded into
+> `%RENDER-CHAR-MODE`'s own self time by Phase 26's `FAST-AREF`
+> inlining rather than showing as separate `%WRITE-RGB`/`%FILL-SPAN`
+> entries): 24% of all samples on LispWorks (301/1248), 35% on SBCL
+> (627/1786). `RENDER-SCANLINE`'s inclusive share lands within a point
+> of each other on the two implementations (43% LispWorks, 43.2%
+> SBCL) despite very different absolute fps and very different
+> per-implementation array-access costs -- the renderer is not a
+> LispWorks-specific artifact here, it is genuinely half of the idle
+> frame's cost on both hosts. `%RENDER-CHAR-MODE` is the #1 self-time
+> entry on SBCL and tied for #1 on LispWorks; nothing CPU-side (the
+> whole point of `idle`'s bare `JMP *` spin) comes close. Verdict:
+> **GO** -- the renderer dominates `idle` on both implementations,
+> exactly the condition this gate's opening paragraph names, and it
+> agrees with the fps-ratio framing from the Phase 30 close-out (idle
+> at 54%/43% of `nop`).
+>
+> **29a instrumentation (GO, so this ran).** Booted the checked-in
+> ROMs (`roms/ATARIXL.ROM` / `roms/ATARIBAS.ROM` -- an Altirra-compatible
+> OS/BASIC image; screen banner reads "Altirra 8K BASIC 1.59", the
+> same ROMs `tests/test-machine.lisp`'s real-ROM tests use) to the
+> BASIC READY prompt (reached by frame 200), ran 120 more settle
+> frames (to frame 320), then snapshotted all 64K of RAM every frame
+> for 600 frames and diffed page-by-page (byte-content diff, not
+> write-tracking) against the previous frame's snapshot -- a
+> throwaway SBCL scratchpad script, not committed. ANTIC state at
+> settle: display list at $9C20 (page $9C) -- confirmed by walking
+> the DL bytes directly (`70 70 70 42 40 9C 02 02 ... 41 20 9C`: three
+> blank-line codes, mode-2+LMS with operand $9C40, 23 more mode-2
+> lines, then JVB back to $9C20); the LMS operand $9C40 (page $9C)
+> matches the SAVMSC ($58/$59) shadow exactly; CHBASE register $E0 ->
+> character set base $E000 (page $E0). Screen data spans $9C40-$9DBF
+> (24 rows x 40 cols = 960 bytes), pages $9C-$9E.
+>
+> Census result: of 256 pages, exactly **2 ever changed** across all
+> 600 frames -- page $00 (zero page: RTCLOK's jiffy counter and the
+> ATRACT attract-mode counter both live there) and page $01 (the 6502
+> hardware stack, whose residual bytes after VBI's register
+> pushes/pops differ frame to frame) -- both dirty in 600/600 frames,
+> every other page byte-identical in every one of the 600 frames.
+> Pages $9C through $A0 (display list + screen RAM) and $E0-$E3
+> (charset) were dirty in **0/600** frames -- the hypothesis 29a was
+> scoped to confirm held exactly. This is a *stronger* result than
+> the phase's own opening hypothesis text predicted ("OS shadow pages
+> 0/2/3 written every VBI"): pages $02 and $03 did not change at all
+> during this run; only zero page and the stack page ticked. OS
+> attract-mode timekeeping does tick every frame (confirmed via zero
+> page), it just does not spill into as many pages as the phase
+> guessed.
+>
+> Design implication for 29b/29c: page granularity is confirmed
+> necessary and sufficient -- a single global "any RAM write"
+> boolean would see pages $00/$01 churn every frame and never signal
+> clean, exactly the failure mode the phase's opening paragraph
+> warns about, while a per-page map correctly excludes $00/$01 from
+> the watched set (nothing there feeds ANTIC/GTIA) and sees the
+> DL/screen/charset pages stay clean. The always-dirty set measured
+> here (2 pages, not the predicted 3) means the dirty map's false-busy
+> rate at idle is even lower than the roadmap anticipated -- no
+> change to the 29b/29c design is indicated, only a tighter empirical
+> bound on it.
+>
+> Phase 29 itself (29b/29c/29d, the actual dirty-map implementation)
+> has not run; this evaluation is the gate plus 29a's analysis-only
+> instrumentation, per spec. The phase stays open in the table below.
+
 Gate: run this phase ONLY if, after Phases 27/28/30, a fresh profile
 of the `idle` workload (Phase 18 methodology) still shows
 `RENDER-SCANLINE` / `%RENDER-CHAR-MODE` dominating. If `idle` fps is
