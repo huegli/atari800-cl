@@ -469,7 +469,7 @@ and say so in the commit message.
 | 28    | AESP push economics (gate, reuse, dedup)     | 27         | yes      | done   |
 | 29    | Dirty-frame render skip (conditional)        | 27, 28     | yes      | done   |
 | 30    | Deferred POKEY advance                       | 27         | yes      | done   |
-| 31    | Spin-loop fast-forward (conditional, opt-in) | 28, 30     | yes      | open   |
+| 31    | Spin-loop fast-forward (conditional, opt-in) | 28, 30     | yes      | not-needed |
 
 Phases 6/7/8 are independent of 3/5 and can be reordered if blocked.
 Phase 12 is independent of everything and can run any time; it is last
@@ -1662,7 +1662,10 @@ Markdown stays ASCII-only.
 
 Execution order: 27 -> 28 -> 30 unconditionally; 29 and 31 are
 conditional on what the re-measured idle profile still shows after
-that, in that order.
+that, in that order. Both conditional gates have now run: 29 gated GO
+and shipped (dirty-frame render skip); 31's re-evaluation (see its
+section below) gated NOT-NEEDED and closed without shipping. The
+tranche is complete.
 
 ---
 
@@ -2193,6 +2196,150 @@ Commits: `machine: sync-on-access plumbing for deferred POKEY`,
 ---
 
 ## Phase 31 -- Spin-loop fast-forward  [hot path -> benchmark]  (conditional, opt-in)
+
+> **Gate re-evaluated (2026-08-24): NOT-NEEDED.** Fresh same-session
+> `./scripts/bench-sbcl.sh` / `./scripts/bench-lispworks.sh` runs (plain
+> runs, not bench-ab): sbcl `idle` 3606.40 fps vs `nop` 3956.69 fps
+> (91.1%, an 8.9-point gap); lispworks `idle` 1840.49 fps vs `nop`
+> 2479.34 fps (74.2%, a 25.8-point gap) -- consistent with the Phase 29
+> close-out's same-session figures (93%/75%), confirming those numbers
+> were not a one-off. sbcl's gap stays plainly immaterial, exactly as
+> the Phase 29 close-out called it; lispworks' gap is the only one worth
+> a profile.
+>
+> **Profile (LispWorks, `idle`, compiled harness).** The throwaway
+> driver used for prior phases' profiling loads `scripts/bench.lisp` via
+> plain `LOAD`, and LispWorks' `-build` batch mode runs code loaded that
+> way through its interpreter rather than the compiler -- confirmed by a
+> first pass showing "interpreted function called 7200000 times" (=
+> 30000 frames x 240 scanlines, exactly the idle workload's scanline-fn
+> closure call count) and `SYSTEM::%INVOKE` / `*%APPLY-INTERPRETED-
+> FUNCTION*` occupying a chunk of the call tree with no counterpart in
+> the SBCL profile. This is a pre-existing property of every official
+> bench-lispworks.sh run since Phase 27 (harmless for this project's
+> A/B deltas, which always compare two interpreted runs against each
+> other), but it pollutes a profile's self-time attribution with
+> interpreter-dispatch noise unrelated to any emulator code path. Fixed
+> for this evaluation by `compile-file`-ing both `scripts/bench.lisp`
+> and the driver body before loading (not committed to src/) -- this
+> raised the profiled run's own fps (30000 frames, 11.4s, 2631 fps)
+> well above the official interpreted-harness number, which is expected
+> and is exactly why the profile's PROPORTIONS, not its absolute fps,
+> are what this evaluation uses.
+>
+> LispWorks (30000 frames, 758 samples), top 8 by self ("top"):
+>
+> | rank | function | self |
+> |------|----------|------|
+> | 1 | %RUN-CLOCKS | 102 (13%) |
+> | 2 | ADDR-ABSOLUTE | 75 (10%) |
+> | 3 | SYSTEM::THROW-TO-TAG | 64 (8%) |
+> | 4 | BUS-READ | 63 (8%) |
+> | 5 | STEP-CPU | 51 (7%) |
+> | 6 | POKEY-ADVANCE | 49 (6%) |
+> | 7 | SYSTEM::AREF1 | 45 (6%) |
+> | 8 | SVREF-NO-CHECK$I-VECTOR$FIXNUM | 37 (5%) |
+>
+> The call tree (not just the flat self-time list) resolves the
+> attribution cleanly: `ADDR-ABSOLUTE`, `BUS-READ`, `AREF1`,
+> `SVREF-NO-CHECK`, `SYSTEM::ARG-IS-SAFE` /
+> `TYPE::VALUE-IN-RANGE-LO-HI-P` (array-bounds safety checks) and
+> `SYSTEM::DPB*` (16-bit address assembly) all nest under `STEP-CPU`,
+> which is called once per `JMP *` iteration -- 451 of 758 samples
+> (59%) inclusive. `%RUN-CLOCKS`'s own self time (102, 13%) is the
+> instruction loop's per-iteration bookkeeping (budget decrement, the
+> `cpu-halted` / WSYNC / defer-break tests inlined into the macrolet
+> loop body), and `SYSTEM::THROW-TO-TAG` (64, 8%) is that same loop's
+> non-local-exit machinery for its `HANDLER-CASE`/`(return)` control
+> flow -- both are the loop iterating the spin, not a distinct
+> subsystem. Summed, spin-and-loop-bookkeeping is 617/758 = **81%**.
+> `POKEY-ADVANCE` (99 inclusive incl. `%TIMER-RELOAD-VALUE` /
+> `%FIRE-TIMER-IRQ`, 13%) is Phase 30's once-per-line deferred-lag
+> catch-up call -- unavoidable regardless of how the spin executes,
+> since it fires once per LINE, not once per instruction. The remaining
+> ~5% is Phase 29's row-0 render-skip decision
+> (`MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P` /
+> `ANTIC-COLLECT-WATCHED-PAGES` / `%WATCHED-MARK-RANGE`) plus ANTIC's
+> per-line begin/end-scanline event bookkeeping. **Split: ~81% spin,
+> ~13% POKEY residual, ~5% ANTIC/decision residual.**
+>
+> SBCL (60000 frames, 1766 samples, `sb-sprof :type :flat`), top 8 by
+> self:
+>
+> | rank | function | self | total (incl.) |
+> |------|----------|------|-----------------|
+> | 1 | BUS-READ | 336 (19.0%) | 336 (19.0%) |
+> | 2 | STEP-CPU | 252 (14.3%) | 1247 (70.6%) |
+> | 3 | %RUN-CLOCKS | 205 (11.6%) | 1765 (99.9%) |
+> | 4 | POKEY-ADVANCE | 193 (10.9%) | 280 (15.9%) |
+> | 5 | ASH | 191 (10.8%) | 191 (10.8%) |
+> | 6 | SB-KERNEL:%DPB | 137 (7.8%) | 429 (24.3%) |
+> | 7 | ADDR-ABSOLUTE | 100 (5.7%) | 770 (43.6%) |
+> | 8 | (LAMBDA (ADDR) :IN MAKE-ATARI-MACHINE) | 61 (3.5%) | 61 (3.5%) |
+>
+> SBCL's flat report gives inclusive totals directly: `STEP-CPU`'s
+> subtree (`ADDR-ABSOLUTE`, `BUS-READ`, the bus address-dispatch
+> closure, `ASH`/`%DPB`/`TWO-ARG--` address-arithmetic helpers,
+> `OPCODE-JMP-ABS-4C`) totals 1247/1766 = 70.6%; `%RUN-CLOCKS`'s own
+> self time (205, 11.6%) is the same loop-bookkeeping category as the
+> LispWorks profile. These sum to exactly 1452/1766 -- and
+> `%RUN-CLOCKS`'s own total (1765/1766, 99.9%) minus its children
+> (`STEP-CPU` 1247 + `POKEY-ADVANCE` 280 + the ANTIC/decision entries
+> ~33) reproduces `%RUN-CLOCKS`'s self time (205) almost exactly,
+> confirming the accounting closes. **Split: ~82% spin, ~16% POKEY
+> residual, ~2% ANTIC/decision residual.** The two implementations
+> agree closely despite very different absolute costs (LispWorks pays
+> more for array-bounds safety checking per access; SBCL's `BUS-READ`
+> alone is 19% self because SBCL's dispatch is a flatter, cheaper call).
+>
+> **Gate's literal conditions.** sbcl fails clause 1 outright (8.9-point
+> gap is not "material" by this project's own noise bar -- Phase 30
+> called single-digit moves MIXED/noise). lispworks technically
+> satisfies both clauses: the gap is material (25.8 points) and the
+> profile does blame the CPU spin itself as the dominant residual (81%
+> of self time, more than POKEY and ANTIC/decision combined). Read in
+> isolation, that is a GO on lispworks.
+>
+> **Ceiling arithmetic (the reason it isn't).** If Phase 31 zeroed the
+> ENTIRE spin fraction of the frame (an idealized upper bound; the
+> phase's own design still pays one `STEP-CPU` + PC/opcode-byte check
+> per line to detect the pattern, so real gains land below this line):
+> `ceiling_fps = idle_fps / (1 - spin_fraction)`.
+>
+> | impl | idle fps today | idle realtime-x today | spin frac | ceiling fps | ceiling realtime-x | ceiling vs today |
+> |------|----------------|------------------------|-----------|-------------|----------------------|-------------------|
+> | sbcl | 3606.40 | 60.2x | 82% | 20260.7 | 338.1x | +462% |
+> | lispworks | 1840.49 | 30.7x | 81% | 9895.1 | 165.1x | +438% |
+>
+> Both hosts already run `idle` at 30-60x NTSC realtime (59.92 fps) with
+> nothing built; the idealized ceiling is 165-338x realtime. A served
+> AESP session is paced by the client's draining rate (Phase 28's
+> territory) and by real-time NTSC frame production, not by how many
+> spare frames per second the CPU could theoretically produce past that
+> point -- there is no client, real or synthetic, that perceives the
+> difference between an idle machine sitting 30x ahead of realtime and
+> one sitting 165x ahead. Separately: closing lispworks' entire 25.8-point
+> gap to `nop` (not the full ceiling, just parity) needs only a ~32% cut
+> to the measured spin time, well inside what the design's ~38x-per-line
+> iteration-count reduction (one detect-and-zero vs. ~38 real `JMP *`
+> steps at 114 cycles/line / 3 cycles/instruction) would plausibly
+> deliver -- so the phase would likely work as designed. The question
+> this gate turns on is not whether it would work, it is whether the
+> result is worth having.
+>
+> **Verdict: NOT-NEEDED.** sbcl fails the gate's own materiality clause.
+> lispworks satisfies both literal clauses, but the phase's own
+> cost-benefit framing -- "the one phase in the tranche that can bend
+> timing," opt-in, bends IRQ latency by up to ~113 cycles, adds an
+> unconditional per-instruction PC/opcode test to `%RUN-CLOCKS` that
+> must stay in noise on `nop`/`irq`/`display`/`audio` or be reverted,
+> and is explicitly the highest-risk item in the tranche -- weighs that
+> real, ongoing cost against a benefit that is already unobservable:
+> both implementations serve an idle machine tens of times faster than
+> real time today, and the idealized ceiling only pushes that further
+> into a regime no client can perceive. Closing the phase per its own
+> spec ("Otherwise close with a not-needed note"); the idle-operation
+> tranche (Phases 27-31) is complete.
 
 Gate: run this phase ONLY if, after Phases 28 and 30, the `idle`
 workload remains materially below `nop` on either implementation AND
