@@ -717,6 +717,252 @@ ANTIC-TICK."
         (antic-scan-y antic) 0)
   antic)
 
+;;; ---------------------------------------------------------------------------
+;;; Watched-page analysis (ROADMAP.md Phase 29c)
+;;;
+;;; ANTIC-COLLECT-WATCHED-PAGES is a pure, read-only analysis pass: given
+;;; ANTIC's current register/pointer state and bus access, it determines
+;;; which 256-byte RAM/ROM pages the frame RENDER-SCANLINE is about to draw
+;;; actually depends on.  It drives nothing on its own and has no callers
+;;; yet -- Phase 29's wave-2 consumer (not implemented here) is expected to
+;;; call it once per frame and intersect its OUT-VECTOR against the bus's
+;;; per-page write-dirty map (Phase 29b) to decide whether rendering can be
+;;; skipped.  This is purely additive: nothing above calls it, so it has no
+;;; effect on any existing behaviour.
+
+(defconstant +watched-pages-max-dl-entries+ 512
+  "Hard bound on the number of display-list instructions
+ANTIC-COLLECT-WATCHED-PAGES will walk before giving up and returning NIL.
+A well-formed OS-style display list (even a full 240-line one) needs at
+most a few hundred entries; this exists purely to terminate a runaway
+list -- a JMP (not JVB) back to itself or to an earlier point that never
+reaches a terminating JVB -- in bounded time.")
+
+(defconstant +watched-pages-io-first-page+ (ldb (byte 8 8) +io-base+)
+  "First page (inclusive) of the $D000-$D7FF I/O range, as a page number
+-- $D0.  See +WATCHED-PAGES-IO-LAST-PAGE+ and
+%WATCHED-PAGE-FORBIDDEN-P.")
+
+(defconstant +watched-pages-io-last-page+ (ldb (byte 8 8) +io-end+)
+  "Last page (inclusive) of the $D000-$D7FF I/O range, as a page number
+-- $D7.  See +WATCHED-PAGES-IO-FIRST-PAGE+ and %WATCHED-PAGE-FORBIDDEN-P.")
+
+(declaim (inline %watched-page-forbidden-p))
+
+(defun %watched-page-forbidden-p (page)
+  "T if PAGE (a page number 0-255) falls inside the $D000-$D7FF I/O
+range -- GTIA/POKEY/PIA/ANTIC registers, which must never be read as if
+they were plain memory (register reads can have side effects: collision-
+latch clears, POKEY RANDOM consumption, WSYNC-style latching, etc.).
+ANTIC-COLLECT-WATCHED-PAGES treats any display-list fetch, JMP/JVB or LMS
+operand, screen-data byte, character-set byte, or P/M graphics byte
+landing here as un-analyzable and aborts with NIL rather than guess."
+  (declare (type (unsigned-byte 8) page))
+  (<= +watched-pages-io-first-page+ page +watched-pages-io-last-page+))
+
+(defun %watched-mark-range (out-vector start len)
+  "Mark every page touched by the LEN-byte range starting at 16-bit
+address START (wrapping past $FFFF back to $0000, as a real bus address
+would) in OUT-VECTOR.  Returns T if the whole range avoided the
+$D000-$D7FF I/O range; returns NIL (having stopped marking mid-range) if
+any byte of it landed there."
+  (declare (type (simple-array (unsigned-byte 8) (256)) out-vector)
+           (type (unsigned-byte 16) start) (type fixnum len))
+  (let ((addr start))
+    (declare (type (unsigned-byte 16) addr))
+    (dotimes (i len t)
+      (declare (type fixnum i))
+      (let ((page (ldb (byte 8 8) addr)))
+        (when (%watched-page-forbidden-p page)
+          (return-from %watched-mark-range nil))
+        (setf (aref out-vector page) 1))
+      (setf addr (ldb (byte 16 0) (1+ addr))))))
+
+(defun antic-collect-watched-pages (antic bus out-vector)
+  "Analyze ANTIC's current display-list/register state and fill
+OUT-VECTOR -- a caller-supplied (SIMPLE-ARRAY (UNSIGNED-BYTE 8) (256)),
+one entry per 256-byte page of the 64K address space -- with 1 at every
+page whose contents can affect the frame RENDER-SCANLINE is about to
+draw.  OUT-VECTOR is zeroed first.  Returns T if the analysis is
+trustworthy (OUT-VECTOR is then the complete watched-page set), or NIL if
+it could not be sure -- OUT-VECTOR's contents are then meaningless, and
+the caller must treat NIL as \"render this frame unconditionally\".
+
+This function is a pure, read-only pass over ANTIC-DLIST-POINTER,
+ANTIC's registers, and the bus; it has no side effects of its own and
+drives nothing -- Phase 29's wave-2 consumer intersects OUT-VECTOR
+against the bus's per-page write-dirty map (Phase 29b) once per frame:
+if none of the watched pages are dirty (and no watched register changed,
+tracked separately by Phase 29b's REGS-DIRTY flag), the frame is
+unchanged and rendering can be skipped.
+
+What gets marked, mirroring PROCESS-DL-INSTRUCTION / %END-SCANLINE-EVENTS
+/ RENDER-SCANLINE exactly:
+
+ 1. Display list.  Starting at ANTIC-DLIST-POINTER (the DL start most
+    recently latched from DLISTL/DLISTH -- call this once per frame,
+    right after the VBI re-latch, so the walk covers the frame about to
+    be rendered from its top; calling it mid-frame walks from wherever
+    the live pointer currently sits), walk one DL instruction at a time:
+    mark the mode byte's page; for JMP/JVB (mode 1) and for any LMS
+    operand (bit 6 set on a mode >= 2 instruction), mark both operand
+    bytes' pages too.  A JVB (JMP with bit 6 set) is the walk's normal
+    terminator -- it is where real ANTIC parks until the next VBLANK, so
+    reaching one ends a successful walk.  A plain JMP (bit 6 clear)
+    continues the walk at the new address immediately, exactly as
+    ANTIC's own instruction fetch would -- this can loop, so the walk
+    aborts with NIL after +WATCHED-PAGES-MAX-DL-ENTRIES+ instructions
+    without reaching a JVB.
+
+ 2. Screen memory.  A running memory-scan address (seeded from
+    ANTIC-SCREEN-DATA-PTR, exactly as a real mid-list LMS-less mode line
+    would inherit it) is reloaded by each LMS operand and advanced by
+    BYTES-PER-SCREEN-ROW of the mode after each mode line >= 2, exactly
+    as %END-SCANLINE-EVENTS does; every mode line's screen-byte range is
+    marked.  NOTE: DMACTL's narrow/wide playfield-width bits (bits 0-1)
+    only scale ANTIC's DMA *cycle-steal* accounting
+    (PLAYFIELD-DMA-CYCLES) -- neither %END-SCANLINE-EVENTS's pointer
+    advance nor the renderer's actual byte reads (%RENDER-CHAR-MODE's
+    N-CHARS, %RENDER-BITMAP-MODE's NBYTES) scale with them, so this walk
+    doesn't either: BYTES-PER-SCREEN-ROW unscaled is what actually
+    matches the renderer, not an approximation of it.  Mode 0 (blank)
+    and mode 1 (JMP/JVB) consume no screen memory, matching the mode >=
+    2 guards in %END-SCANLINE-EVENTS and RENDER-SCANLINE.
+
+ 3. Character sets.  For every character mode (2-7) the walk visits,
+    the full aligned CHBASE window %CHAR-ROW-BITS can address is marked:
+    modes 2/3/6/7 mask the character index to 6 bits (64 glyphs x 8
+    bytes = 512 bytes), modes 4/5 to 7 bits (128 glyphs x 8 bytes = 1024
+    bytes) -- see %CHAR-ROW-BITS's WIDE-GLYPH-P.  When both a 64-glyph
+    and a 128-glyph mode appear in the same DL, the 1024-byte window is
+    marked (it is a superset -- both start at the same CHBASE*256 page).
+
+ 4. Player/missile graphics.  When DMACTL enables missile and/or player
+    DMA (bits 2/3), the whole PMBASE-selected window is marked: 8 pages
+    (2 KB, 2 KB-aligned via PMBASE & $F8) for single-line resolution
+    (DMACTL bit 4 set), 4 pages (1 KB, 1 KB-aligned via PMBASE & $FC)
+    for double-line -- see %FETCH-PM-GRAPHICS's addressing.  This is
+    deliberately the whole aligned block rather than the smaller exact
+    footprint %FETCH-PM-GRAPHICS reads within it (conservative is fine
+    here -- marking extra pages costs nothing but an occasional
+    redundant render).
+
+Returns NIL (do not trust OUT-VECTOR) when:
+  - ANTIC-DMACTL enables DL fetching (it is non-zero -- matches
+    %DISPLAY-ACTIVE-P's own gate) but the walk cannot terminate cleanly:
+    it does not reach a JVB within +WATCHED-PAGES-MAX-DL-ENTRIES+
+    instructions.
+  - Any byte the walk needs to fetch to keep walking (a DL mode byte, or
+    a JMP/JVB or LMS operand byte) would land in $D000-$D7FF -- reading
+    there can have side effects (collision-latch clears, POKEY RANDOM
+    consumption, etc.), so this function never issues that read.
+  - Any computed screen-data, character-set, or P/M window overlaps
+    $D000-$D7FF -- real ANTIC would be fetching register bytes there,
+    which is exactly the kind of state this analysis cannot model.
+
+When ANTIC-DMACTL is entirely zero, ANTIC fetches no display list at all
+(matching %DISPLAY-ACTIVE-P) -- the frame is background-color-only, so
+this returns T with OUT-VECTOR left all zero (no memory feeds the frame;
+register changes, including to COLBK, are Phase 29b's REGS-DIRTY
+concern, not this function's).
+
+Reads memory only through ATARI800-CL.BUS:BUS-READ, and only for the DL
+instruction/operand bytes actually needed to keep walking (never for
+screen/charset/P-M ranges, whose page footprint is address arithmetic,
+not byte content) -- and never for an address in $D000-$D7FF (see
+above).  ROM pages (e.g. a charset living in OS ROM) are marked like any
+other page: ROM's read side is side-effect-free, and a write-dirty-map
+miss there is exactly as trustworthy as for RAM."
+  (declare (type antic antic) (type bus bus)
+           (type (simple-array (unsigned-byte 8) (256)) out-vector))
+  (fill out-vector 0)
+  (let ((dmactl (antic-dmactl antic)))
+    (declare (type (unsigned-byte 8) dmactl))
+    (when (zerop dmactl)
+      (return-from antic-collect-watched-pages t))
+    (let ((dl-addr (antic-dlist-pointer antic))
+          (mem-addr (antic-screen-data-ptr antic))
+          (entries 0)
+          (narrow-char-p nil)
+          (wide-char-p nil))
+      (declare (type (unsigned-byte 16) dl-addr mem-addr)
+               (type fixnum entries))
+      (flet ((mark-byte (addr)
+               (declare (type (unsigned-byte 16) addr))
+               (let ((page (ldb (byte 8 8) addr)))
+                 (when (%watched-page-forbidden-p page)
+                   (return-from antic-collect-watched-pages nil))
+                 (setf (aref out-vector page) 1)))
+             (fetch (addr)
+               ;; Caller must have already marked/validated ADDR's page.
+               (declare (type (unsigned-byte 16) addr))
+               (atari800-cl.bus:bus-read bus addr)))
+        (loop
+          (when (>= entries +watched-pages-max-dl-entries+)
+            (return-from antic-collect-watched-pages nil))
+          (incf entries)
+          (mark-byte dl-addr)
+          (let* ((inst (fetch dl-addr))
+                 (mode (ldb (byte 4 0) inst)))
+            (declare (type (unsigned-byte 8) inst) (type (unsigned-byte 4) mode))
+            (setf dl-addr (ldb (byte 16 0) (1+ dl-addr)))
+            (cond
+              ((= mode 1)
+               ;; JMP / JVB: two operand bytes -> new DL address.  JVB
+               ;; (bit 6 set) is the walk's normal terminator; a plain
+               ;; JMP continues the walk at the new address.
+               (mark-byte dl-addr)
+               (let ((lo (fetch dl-addr)))
+                 (setf dl-addr (ldb (byte 16 0) (1+ dl-addr)))
+                 (mark-byte dl-addr)
+                 (let* ((hi (fetch dl-addr))
+                        (target (dpb hi (byte 8 8) lo))
+                        (jvb-p (logtest inst #x40)))
+                   (setf dl-addr (ldb (byte 16 0) (1+ dl-addr)))
+                   (if jvb-p
+                       (return)     ; normal end-of-list
+                       (setf dl-addr target)))))
+              (t
+               (let ((lms-p (and (logtest inst #x40) (>= mode 2))))
+                 (when lms-p
+                   (mark-byte dl-addr)
+                   (let ((lo (fetch dl-addr)))
+                     (setf dl-addr (ldb (byte 16 0) (1+ dl-addr)))
+                     (mark-byte dl-addr)
+                     (let ((hi (fetch dl-addr)))
+                       (setf dl-addr (ldb (byte 16 0) (1+ dl-addr)))
+                       (setf mem-addr (dpb hi (byte 8 8) lo)))))
+                 (when (>= mode 2)
+                   (let ((width (bytes-per-screen-row mode)))
+                     (declare (type fixnum width))
+                     (unless (%watched-mark-range out-vector mem-addr width)
+                       (return-from antic-collect-watched-pages nil))
+                     (when (<= mode 7)
+                       (if (or (= mode 4) (= mode 5))
+                           (setf wide-char-p t)
+                           (setf narrow-char-p t)))
+                     (setf mem-addr (ldb (byte 16 0) (+ mem-addr width)))))))))))
+      ;; Character-set window: the widest window any visited character
+      ;; mode needs, at CHBASE*256 (see docstring point 3).
+      (when (or narrow-char-p wide-char-p)
+        (let* ((chbase (aref (antic-registers antic) +reg-chbase+))
+               (window (if wide-char-p 1024 512)))
+          (declare (type (unsigned-byte 8) chbase) (type fixnum window))
+          (unless (%watched-mark-range out-vector (ash chbase 8) window)
+            (return-from antic-collect-watched-pages nil))))
+      ;; Player/missile graphics window (see docstring point 4).
+      (let* ((missiles-p (logtest dmactl +dmactl-missile-mask+))
+             (players-p  (logtest dmactl +dmactl-player-mask+)))
+        (when (or missiles-p players-p)
+          (let* ((pmbase   (aref (antic-registers antic) +reg-pmbase+))
+                 (single-p (logtest dmactl +dmactl-pm-hires-mask+))
+                 (base     (if single-p (logand pmbase #xF8) (logand pmbase #xFC)))
+                 (n-pages  (if single-p 8 4)))
+            (declare (type (unsigned-byte 8) pmbase base) (type fixnum n-pages))
+            (unless (%watched-mark-range out-vector (ash base 8) (* n-pages 256))
+              (return-from antic-collect-watched-pages nil)))))
+      t)))
+
 (defun attach-antic (bus antic &optional cpu)
   "Install ANTIC's read/write closures into BUS.  When CPU is supplied,
 ANTIC stores the back-pointer so NMI events can route there."

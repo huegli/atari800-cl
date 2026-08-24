@@ -331,7 +331,9 @@
            #:antic-scan-y
            #:antic-screen-data-ptr
            #:antic-render-screen-data-ptr
-           #:+reg-chbase+))
+           #:+reg-chbase+
+           ;; Watched-page analysis (ROADMAP.md Phase 29c)
+           #:antic-collect-watched-pages))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.gtia — GTIA (player/missile + collision latches + console)

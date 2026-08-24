@@ -528,3 +528,120 @@ base+$180+(scanline>>1), player p at base+$200+$80*p+(scanline>>1)."
         "no fetch before the active region")
     (is (null (%pm-fetch-calls antic :scanline 250))
         "no fetch during VBLANK")))
+
+;;; ---------------------------------------------------------------------------
+;;; ANTIC-COLLECT-WATCHED-PAGES (ROADMAP.md Phase 29c)
+
+(defun %make-watched-out-vector ()
+  "Return a fresh 256-entry zeroed OUT-VECTOR for
+ANTIC-COLLECT-WATCHED-PAGES."
+  (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0))
+
+(defun %watched-pages (out-vector)
+  "Return the sorted list of page numbers OUT-VECTOR has marked (1)."
+  (loop for page from 0 below 256
+        when (= 1 (aref out-vector page))
+          collect page))
+
+(test watched-pages-24-line-mode-2-display-list
+  "The bench.lisp %SETUP-DISPLAY-WORKLOAD shape: DL at $4000 (mode 2 +
+LMS -> $5000, 23 more mode-2 lines, JVB back to $4000), CHBASE $60.
+Expected: DL page $40; screen pages $50-$53 (24 rows x 40 cols = 960
+bytes, $5000-$53BF); charset window $60-$61 (mode 2 is a 64-glyph mode,
+512-byte window at CHBASE*256); no P/M pages (DMACTL has neither bit
+set)."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture
+       :dl-bytes (append '(#x42 #x00 #x50)              ; mode 2 + LMS $5000
+                          (make-list 23 :initial-element #x02)
+                          '(#x41 #x00 #x40))             ; JVB -> $4000
+       :dmactl #x22)
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD409 #x60)          ; CHBASE
+    (let ((out (%make-watched-out-vector)))
+      (is-true (atari800-cl.antic:antic-collect-watched-pages antic bus out))
+      (is (equal '(#x40 #x50 #x51 #x52 #x53 #x60 #x61)
+                 (%watched-pages out))))))
+
+(test watched-pages-lms-mid-list-marks-two-screen-regions
+  "Two LMS mode-8 (map mode, no charset) lines pointing at different
+screen addresses must both show up, each in its own page, plus the DL's
+own page -- and nothing else (no charset window, since mode 8 is a
+bitmap mode; no P/M window, since DMACTL has no missile/player bits)."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture
+       :dl-bytes '(#x48 #x00 #x60          ; mode 8 + LMS $6000 (region A)
+                   #x48 #x00 #x70          ; mode 8 + LMS $7000 (region B)
+                   #x41 #x00 #x40)         ; JVB -> $4000
+       :dmactl #x22)
+    (declare (ignore cpu))
+    (let ((out (%make-watched-out-vector)))
+      (is-true (atari800-cl.antic:antic-collect-watched-pages antic bus out))
+      (is (equal '(#x40 #x60 #x70) (%watched-pages out))))))
+
+(test watched-pages-pm-dma-window-tracks-enable-and-resolution
+  "PMBASE window is marked only when DMACTL enables missile and/or
+player DMA, sized by the single-line/double-line resolution bit."
+  ;; Single-line (bit 4 set): 8 pages (2K) from PMBASE & $F8.
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dl-bytes '(#x41 #x00 #x40)    ; lone JVB -> self
+                            :dmactl #x3C)                  ; missile+player+hires+DL
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD407 #x38)            ; PMBASE
+    (let ((out (%make-watched-out-vector)))
+      (is-true (atari800-cl.antic:antic-collect-watched-pages antic bus out))
+      (is (equal '(#x38 #x39 #x3A #x3B #x3C #x3D #x3E #x3F #x40)
+                 (%watched-pages out))
+          "DL page $40 plus the 8-page single-line PMBASE window at $38")))
+  ;; Double-line (bit 4 clear): 4 pages (1K) from PMBASE & $FC.
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dl-bytes '(#x41 #x00 #x40)
+                            :dmactl #x2C)                  ; missile+player, no hires
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD407 #x34)            ; PMBASE
+    (let ((out (%make-watched-out-vector)))
+      (is-true (atari800-cl.antic:antic-collect-watched-pages antic bus out))
+      (is (equal '(#x34 #x35 #x36 #x37 #x40) (%watched-pages out))
+          "DL page $40 plus the 4-page double-line PMBASE window at $34")))
+  ;; Disabled: DMACTL has neither missile nor player bit -> no PM pages.
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dl-bytes '(#x41 #x00 #x40)
+                            :dmactl #x20)                  ; DL fetch only
+    (declare (ignore cpu))
+    (atari800-cl.bus:bus-write bus #xD407 #x38)            ; PMBASE (ignored)
+    (let ((out (%make-watched-out-vector)))
+      (is-true (atari800-cl.antic:antic-collect-watched-pages antic bus out))
+      (is (equal '(#x40) (%watched-pages out))
+          "no PM window when DMACTL enables neither missile nor player DMA"))))
+
+(test watched-pages-runaway-jmp-returns-nil
+  "A plain JMP (bit 6 clear -- not JVB) back to itself never reaches a
+terminator; the walk must give up and return NIL once
++WATCHED-PAGES-MAX-DL-ENTRIES+ is exceeded, rather than looping forever."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dl-bytes '(#x01 #x00 #x40)    ; JMP -> $4000 (itself)
+                            :dmactl #x22)
+    (declare (ignore cpu))
+    (let ((out (%make-watched-out-vector)))
+      (is (null (atari800-cl.antic:antic-collect-watched-pages antic bus out))))))
+
+(test watched-pages-dl-in-io-range-returns-nil
+  "A display-list pointer landing in $D000-$D7FF must never be read
+through the bus (register reads can have side effects); the walk
+returns NIL instead of guessing."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dlist-addr #xD040 :dmactl #x22)
+    (declare (ignore cpu))
+    (let ((out (%make-watched-out-vector)))
+      (is (null (atari800-cl.antic:antic-collect-watched-pages antic bus out))))))
+
+(test watched-pages-dmactl-zero-returns-t-with-empty-set
+  "With DMACTL entirely zero, ANTIC fetches no display list at all
+(matching %DISPLAY-ACTIVE-P); the analysis is trivially trustworthy and
+OUT-VECTOR stays all zero."
+  (multiple-value-bind (antic cpu bus)
+      (%make-antic-fixture :dl-bytes '(#x42 #x00 #x50) :dmactl 0)
+    (declare (ignore cpu))
+    (let ((out (%make-watched-out-vector)))
+      (is-true (atari800-cl.antic:antic-collect-watched-pages antic bus out))
+      (is (null (%watched-pages out))))))
