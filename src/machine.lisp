@@ -118,7 +118,28 @@ Slots:
                  serial transmission); %RUN-CLOCKS falls back to the
                  non-deferring per-instruction path for the rest of the
                  line when it sees this set, and clears it at the start
-                 of each new line."
+                 of each new line.
+  WATCHED-PAGES — ROADMAP.md Phase 29 (dirty-frame render skip): a
+                 preallocated 256-entry (SIMPLE-ARRAY (UNSIGNED-BYTE 8)
+                 (256)) scratch buffer MACHINE-DISPLAY-CHANGED-SINCE-
+                 RENDER-P passes to ANTIC-COLLECT-WATCHED-PAGES so that
+                 function never has to allocate one itself. Single-
+                 renderer-consumer semantics: this scratch buffer, and
+                 the decision built on top of it, assume at most ONE
+                 render client calls MACHINE-DISPLAY-CHANGED-SINCE-
+                 RENDER-P / MACHINE-NOTE-FULL-RENDER on a given machine.
+                 Two independent render clients sharing one machine
+                 would race this buffer and would each clear the OTHER's
+                 view of the bus dirty map via MACHINE-NOTE-FULL-RENDER
+                 -- not supported, and nothing in this codebase attaches
+                 more than one.
+  RENDER-SKIP-COUNT — fixnum count of frames MACHINE-DISPLAY-CHANGED-
+                 SINCE-RENDER-P found clean, incremented by the render
+                 client's own scanline-fn (not by this file) whenever it
+                 chooses to skip a frame. Pure observability: nothing in
+                 src/machine.lisp reads it back. Exists so tests and
+                 benchmarks have a cheap, exact way to confirm the skip
+                 actually engaged instead of inferring it from timing."
   (cpu nil)
   (bus nil)
   (mmu nil)
@@ -137,7 +158,11 @@ Slots:
   (pokey-lag 0 :type fixnum)
   (pokey-defer-disabled-p nil)
   (pokey-defer-engagements 0 :type fixnum)
-  (pokey-defer-break-p nil))
+  (pokey-defer-break-p nil)
+  (watched-pages (make-array 256 :element-type '(unsigned-byte 8)
+                                  :initial-element 0)
+                 :type (simple-array (unsigned-byte 8) (256)))
+  (render-skip-count 0 :type fixnum))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Deferred POKEY advance (ROADMAP.md Phase 30)
@@ -661,6 +686,83 @@ FRAME-COUNT before returning MACHINE."
   (incf (atari-machine-frame-count machine))
   (let ((pfn (atari-machine-post-frame-fn machine)))
     (when pfn (funcall pfn machine)))
+  machine)
+
+;;; ---------------------------------------------------------------------------
+;;; Dirty-frame render skip (ROADMAP.md Phase 29c)
+;;;
+;;; MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P / MACHINE-NOTE-FULL-RENDER are
+;;; the machine-level API a render client (src/aesp.lisp's START-AESP-
+;;; SERVER, scripts/bench.lisp's :idle workload) uses to decide, once per
+;;; frame, whether it needs to render at all.  Single-renderer-consumer
+;;; semantics throughout (see the ATARI-MACHINE docstring's WATCHED-PAGES
+;;; entry): both functions assume at most one client calls them on a
+;;; given machine, since WATCHED-PAGES is one shared scratch buffer and
+;;; the bus's dirty map is one shared piece of global state that
+;;; MACHINE-NOTE-FULL-RENDER clears for whoever calls it.
+
+(defun machine-display-changed-since-render-p (machine)
+  "T if the render client attached to MACHINE must render the current
+frame; NIL if nothing that feeds the renderer has changed since the last
+MACHINE-NOTE-FULL-RENDER, so the frame can be skipped outright.
+
+Calls ANTIC-COLLECT-WATCHED-PAGES into MACHINE's WATCHED-PAGES scratch
+buffer.  If that returns NIL (the analysis could not be sure -- a
+runaway display list, an operand landing in the $D000-$D7FF I/O range,
+etc.), this function returns T unconditionally: per ROADMAP.md Phase
+29's own rule, any doubt about the analysis must render, because only
+the SKIP depends on the map's precision -- the displayed frame's
+correctness never does.
+
+Otherwise returns T iff ATARI-MACHINE-BUS's IO-REGS-DIRTY-P is set (a
+render-relevant GTIA/ANTIC register was written since the last
+MACHINE-NOTE-FULL-RENDER) OR the 256-entry intersection of WATCHED-PAGES
+against the bus's PAGE-DIRTY map is non-empty (a page the current frame
+actually reads from was written since the last MACHINE-NOTE-FULL-
+RENDER).  BUS-PAGE-DIRTY and BUS-IO-REGS-DIRTY-P both start all-dirty at
+machine construction (see BUS's docstring), so the very first call on a
+freshly built or just-reset machine always returns T without any special
+casing here -- the first frame is unconditionally rendered because
+everything reads as dirty."
+  (declare (type atari-machine machine))
+  (let* ((antic   (atari-machine-antic machine))
+         (bus     (atari-machine-bus machine))
+         (watched (atari-machine-watched-pages machine)))
+    (if (not (antic-collect-watched-pages antic bus watched))
+        t
+        (or (bus-io-regs-dirty-p bus)
+            (let ((dirty (bus-page-dirty bus)))
+              (declare (type (simple-array (unsigned-byte 8) (256))
+                             dirty watched))
+              (dotimes (page 256 nil)
+                ;; PAGE's declared range must include 256, not just the
+                ;; valid AREF indices 0-255: DOTIMES's loop variable is
+                ;; transiently assigned the count value itself (256) at
+                ;; the termination check even though the body never runs
+                ;; with that value, and SBCL's (safety 1) policy applies
+                ;; the type check to every assignment, not just uses --
+                ;; declaring (integer 0 255) here signals a TYPE-ERROR on
+                ;; every call that runs the loop to completion (exactly
+                ;; the all-clean case this function exists to detect).
+                (declare (type (integer 0 256) page))
+                (when (and (/= 0 (aref watched page)) (/= 0 (aref dirty page)))
+                  (return t))))))))
+
+(defun machine-note-full-render (machine)
+  "Tell MACHINE's bus that the render client is about to fully render the
+current frame: clears BUS's per-page dirty map and IO-REGS-DIRTY-P flag
+(via BUS-CLEAR-RENDER-DIRTY) so writes from THIS point forward accumulate
+toward the NEXT frame's MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P decision.
+
+Callers MUST call this at the START of a frame they have decided to
+fully render -- BEFORE actually rendering any of it.  Any write that
+lands during the frame being rendered (the CPU racing the beam) is then
+correctly counted as dirt for the NEXT decision, forcing that next frame
+to render too rather than being wrongly judged clean.  A client that
+decides to SKIP a frame must NOT call this -- dirt keeps accumulating,
+unconsulted, until the next frame that actually renders."
+  (declare (type atari-machine machine))
+  (bus-clear-render-dirty (atari-machine-bus machine))
   machine)
 
 ;;; ---------------------------------------------------------------------------

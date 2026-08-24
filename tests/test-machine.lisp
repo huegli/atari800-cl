@@ -1336,3 +1336,199 @@ non-deferring runs agree with each other."
           "machine B (POKEY-DEFER-DISABLED-P forced T) must never engage ~
            the deferring path; engagements = ~D"
           (atari800-cl.machine:atari-machine-pokey-defer-engagements mb)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Dirty-frame render skip (ROADMAP.md Phase 29c/29d)
+;;;
+;;; %MAKE-RENDER-SKIP-TEST-MACHINE builds a MAKE-TEST-MACHINE (synthetic
+;;; NOP-filled OS ROM, so the CPU never touches RAM on its own) with a
+;;; static 24-line mode-2 display list poked directly into RAM -- the same
+;;; DL/screen/charset shape scripts/bench.lisp's %SETUP-DISPLAY-WORKLOAD
+;;; and tests/test-antic.lisp's watched-pages fixture both use, so this
+;;; exercises ANTIC-COLLECT-WATCHED-PAGES against a known page set: DL at
+;;; page $40, screen at $50-$52 (960 bytes), charset (glyph 1's 512-byte
+;;; window) at $60.
+;;;
+;;; %INSTALL-RENDER-SKIP-PROTOCOL wires a scanline-fn onto a machine that
+;;; mimics src/aesp.lisp's START-AESP-SERVER row-0 decision exactly: at
+;;; row 0 of every frame, ask MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P and
+;;; either call MACHINE-NOTE-FULL-RENDER and render every row, or skip the
+;;; whole frame and bump ATARI-MACHINE-RENDER-SKIP-COUNT -- the "counting
+;;; scanline-fn" instrument these tests are built around.  It has no
+;;; NEEDS-FULL-RENDER-P equivalent (there is no AESP-SERVER here, and no
+;;; reconnect to model), so it always consults the machine-level decision.
+
+(defun %make-render-skip-test-machine ()
+  "Build a MAKE-TEST-MACHINE with a static 24-line mode-2 display list,
+screen data, and character set poked into RAM, plus playfield DMA
+enabled -- ready for MACHINE-RUN-FRAME to actually render something.
+See this section's header comment for the exact page layout."
+  (let* ((m   (make-test-machine))
+         (bus (atari800-cl.machine:atari-machine-bus m)))
+    ;; DL at $4000: mode 2 + LMS -> $5000, 23 plain mode-2 lines, JVB $4000.
+    (atari800-cl.bus:bus-poke-ram bus #x4000 #x42)
+    (atari800-cl.bus:bus-poke-ram bus #x4001 #x00)
+    (atari800-cl.bus:bus-poke-ram bus #x4002 #x50)
+    (loop for i from 0 below 23
+          do (atari800-cl.bus:bus-poke-ram bus (+ #x4003 i) #x02))
+    (atari800-cl.bus:bus-poke-ram bus #x401A #x41)
+    (atari800-cl.bus:bus-poke-ram bus #x401B #x00)
+    (atari800-cl.bus:bus-poke-ram bus #x401C #x40)
+    ;; Screen RAM: 24 rows x 40 chars of char code 1; glyph 1 at $6008
+    ;; (charset base $6000) is a solid block, glyph 0 stays all-zero RAM
+    ;; (blank) -- so changing a screen byte between code 0 and 1 changes
+    ;; rendered pixels.
+    (dotimes (i (* 24 40))
+      (atari800-cl.bus:bus-poke-ram bus (+ #x5000 i) #x01))
+    (dotimes (r 8)
+      (atari800-cl.bus:bus-poke-ram bus (+ #x6008 r) #xFF))
+    (atari800-cl.bus:bus-write bus #xD409 #x60)      ; CHBASE
+    (atari800-cl.bus:bus-write bus #xD018 #x68)      ; COLPF2
+    (atari800-cl.bus:bus-write bus #xD402 #x00)      ; DLISTL
+    (atari800-cl.bus:bus-write bus #xD403 #x40)      ; DLISTH
+    (atari800-cl.bus:bus-write bus #xD400 #x22)      ; DMACTL
+    m))
+
+(defun %install-render-skip-protocol (machine fb)
+  "Install a scanline-fn on MACHINE that mimics src/aesp.lisp's
+START-AESP-SERVER row-0 decision protocol (ROADMAP.md Phase 29c): decide
+once per frame, at row 0, whether to render at all, remember that
+decision for the rest of the frame's rows, and render into FB only when
+the decision was to render.  A frame that is skipped bumps
+ATARI-MACHINE-RENDER-SKIP-COUNT exactly once."
+  (let ((render-this-frame t))
+    (setf (atari800-cl.machine:atari-machine-scanline-fn machine)
+          (lambda (m)
+            (let* ((a   (atari800-cl.machine:atari-machine-antic m))
+                   (sl  (mod (1- (atari800-cl.antic:antic-scanline a))
+                             atari800-cl.antic:+scanlines-per-frame+))
+                   (row (- sl atari800-cl.antic:+active-start-scanline+)))
+              (when (and (>= row 0) (< row 240))
+                (when (zerop row)
+                  (setf render-this-frame
+                        (atari800-cl.machine:machine-display-changed-since-render-p m))
+                  (if render-this-frame
+                      (atari800-cl.machine:machine-note-full-render m)
+                      (incf (atari800-cl.machine:atari-machine-render-skip-count m))))
+                (when render-this-frame
+                  (atari800-cl.renderer:render-scanline
+                   fb row a
+                   (atari800-cl.machine:atari-machine-gtia m)
+                   (atari800-cl.machine:atari-machine-bus m)))))))))
+
+(test render-skip-static-display-renders-once-then-skips
+  "A static display list: frame 1 (fresh machine, bus starts all-dirty)
+must render; frames 2 and 3, with nothing having changed, must both
+skip -- ATARI-MACHINE-RENDER-SKIP-COUNT reaches 2 and the framebuffer
+stays byte-identical to what frame 1 rendered."
+  (let* ((m  (%make-render-skip-test-machine))
+         (fb (atari800-cl.renderer:make-framebuffer)))
+    (%install-render-skip-protocol m fb)
+    (atari800-cl.machine:machine-run-frame m)
+    (is (= 0 (atari800-cl.machine:atari-machine-render-skip-count m))
+        "the very first frame on a freshly reset machine must render, ~
+         never skip (BUS starts all-dirty)")
+    (let ((snapshot (copy-seq fb)))
+      (atari800-cl.machine:machine-run-frame m)
+      (atari800-cl.machine:machine-run-frame m)
+      (is (= 2 (atari800-cl.machine:atari-machine-render-skip-count m))
+          "frames 2 and 3 of an unchanging display must both skip; ~
+           render-skip-count = ~D"
+          (atari800-cl.machine:atari-machine-render-skip-count m))
+      (is (equalp snapshot fb)
+          "a skipped frame must leave the framebuffer byte-identical to ~
+           the last real render"))))
+
+(test render-skip-screen-memory-write-forces-rerender
+  "Poking one screen-memory byte (through the bus, so it hits the
+per-page dirty map) between two clean frames must force the very next
+frame to render -- not skip -- and the re-rendered framebuffer must
+actually differ, since the poke changes a character code the renderer
+draws."
+  (let* ((m   (%make-render-skip-test-machine))
+         (bus (atari800-cl.machine:atari-machine-bus m))
+         (fb  (atari800-cl.renderer:make-framebuffer)))
+    (%install-render-skip-protocol m fb)
+    (atari800-cl.machine:machine-run-frame m)   ; frame 1: renders
+    (atari800-cl.machine:machine-run-frame m)   ; frame 2: skips (static)
+    (is (= 1 (atari800-cl.machine:atari-machine-render-skip-count m)))
+    (let ((before (copy-seq fb)))
+      ;; Change screen offset 0 from char code 1 (solid block) to 0
+      ;; (blank) -- a real pixel change at the top-left character cell.
+      (atari800-cl.bus:bus-poke-ram bus #x5000 #x00)
+      (atari800-cl.machine:machine-run-frame m)   ; frame 3: must render
+      (is (= 1 (atari800-cl.machine:atari-machine-render-skip-count m))
+          "a screen-memory write must force the next frame to render, ~
+           not skip; render-skip-count = ~D"
+          (atari800-cl.machine:atari-machine-render-skip-count m))
+      (is (not (equalp before fb))
+          "the re-rendered frame must reflect the changed screen byte"))))
+
+(test render-skip-unrelated-ram-write-stays-skipped
+  "Poking a RAM page outside the frame's watched-page set (not the DL,
+screen, or charset pages) must NOT break the skip: the next frame stays
+skipped and the framebuffer stays byte-identical."
+  (let* ((m   (%make-render-skip-test-machine))
+         (bus (atari800-cl.machine:atari-machine-bus m))
+         (fb  (atari800-cl.renderer:make-framebuffer)))
+    (%install-render-skip-protocol m fb)
+    (atari800-cl.machine:machine-run-frame m)   ; frame 1: renders
+    (atari800-cl.machine:machine-run-frame m)   ; frame 2: skips (static)
+    (is (= 1 (atari800-cl.machine:atari-machine-render-skip-count m)))
+    (let ((before (copy-seq fb)))
+      ;; $3000 is outside the DL ($40), screen ($50-$52), and charset
+      ;; ($60) pages this display list watches.
+      (atari800-cl.bus:bus-poke-ram bus #x3000 #x42)
+      (atari800-cl.machine:machine-run-frame m)   ; frame 3: must still skip
+      (is (= 2 (atari800-cl.machine:atari-machine-render-skip-count m))
+          "a write to an unwatched page must not break the skip; ~
+           render-skip-count = ~D"
+          (atari800-cl.machine:atari-machine-render-skip-count m))
+      (is (equalp before fb)
+          "the framebuffer must stay byte-identical while the skip ~
+           remains engaged"))))
+
+(test render-skip-gtia-color-write-forces-rerender
+  "Writing a GTIA color register (COLPF2) between two clean frames must
+force the next frame to render, and the re-rendered framebuffer must
+reflect the new color."
+  (let* ((m   (%make-render-skip-test-machine))
+         (bus (atari800-cl.machine:atari-machine-bus m))
+         (fb  (atari800-cl.renderer:make-framebuffer)))
+    (%install-render-skip-protocol m fb)
+    (atari800-cl.machine:machine-run-frame m)   ; frame 1: renders
+    (atari800-cl.machine:machine-run-frame m)   ; frame 2: skips (static)
+    (is (= 1 (atari800-cl.machine:atari-machine-render-skip-count m)))
+    (let ((before (copy-seq fb)))
+      (atari800-cl.bus:bus-write bus #xD018 #x24)   ; COLPF2: changed
+      (atari800-cl.machine:machine-run-frame m)     ; frame 3: must render
+      (is (= 1 (atari800-cl.machine:atari-machine-render-skip-count m))
+          "a GTIA color-register write must force the next frame to ~
+           render; render-skip-count = ~D"
+          (atari800-cl.machine:atari-machine-render-skip-count m))
+      (is (not (equalp before fb))
+          "the re-rendered frame must reflect the changed color"))))
+
+(test render-skip-wsync-writes-do-not-force-rerender
+  "ANTIC WSYNC ($D40A) is explicitly excluded from IO-REGS-DIRTY-P (a
+per-scanline timing strobe, not a rendering input) -- writing it
+repeatedly between two clean frames must NOT break the skip, proving the
+exclusion works end to end through MACHINE-DISPLAY-CHANGED-SINCE-
+RENDER-P, not just at the bus layer tests/test-mmu.lisp already covers."
+  (let* ((m   (%make-render-skip-test-machine))
+         (bus (atari800-cl.machine:atari-machine-bus m))
+         (fb  (atari800-cl.renderer:make-framebuffer)))
+    (%install-render-skip-protocol m fb)
+    (atari800-cl.machine:machine-run-frame m)   ; frame 1: renders
+    (atari800-cl.machine:machine-run-frame m)   ; frame 2: skips (static)
+    (is (= 1 (atari800-cl.machine:atari-machine-render-skip-count m)))
+    (let ((before (copy-seq fb)))
+      (dotimes (i 5)
+        (atari800-cl.bus:bus-write bus #xD40A 0))  ; WSYNC, repeatedly
+      (atari800-cl.machine:machine-run-frame m)    ; frame 3: must still skip
+      (is (= 2 (atari800-cl.machine:atari-machine-render-skip-count m))
+          "WSYNC writes alone must not break the skip; render-skip-count = ~D"
+          (atari800-cl.machine:atari-machine-render-skip-count m))
+      (is (equalp before fb)
+          "the framebuffer must stay byte-identical while the skip ~
+           remains engaged"))))

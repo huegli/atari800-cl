@@ -597,7 +597,12 @@
            #:machine-pending-interrupts
            ;; Rendering hooks
            #:atari-machine-scanline-fn
-           #:atari-machine-post-frame-fn))
+           #:atari-machine-post-frame-fn
+           ;; Dirty-frame render skip (ROADMAP.md Phase 29)
+           #:atari-machine-watched-pages
+           #:atari-machine-render-skip-count
+           #:machine-display-changed-since-render-p
+           #:machine-note-full-render))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.transport — Socket transport (TCP via usocket; Unix via compat)

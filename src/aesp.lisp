@@ -350,7 +350,28 @@ Extra slots for rendering:
                         guaranteed to see a freshly, completely rendered
                         FRAMEBUFFER courtesy of NEEDS-FULL-RENDER-P
                         above -- so a reconnecting client can never be
-                        handed a cached payload of unknown vintage."
+                        handed a cached payload of unknown vintage.
+  RENDER-THIS-FRAME-P — ROADMAP.md Phase 29c's row-0 decision, remembered
+                        for the rest of the frame's scanlines.  The
+                        scanline-fn closure sets this at row 0 of every
+                        frame it renders at all (VIDEO-ACTIVE-P true):
+                        T when NEEDS-FULL-RENDER-P was set or
+                        ATARI800-CL.MACHINE:MACHINE-DISPLAY-CHANGED-
+                        SINCE-RENDER-P said the frame must render (in
+                        which case it also calls ATARI800-CL.MACHINE:
+                        MACHINE-NOTE-FULL-RENDER before rendering row 0),
+                        NIL when the frame is clean and every row 0-239
+                        this frame is skipped entirely (ATARI-MACHINE-
+                        RENDER-SKIP-COUNT is bumped once, at that same
+                        row-0 decision point).  %PUSH-VIDEO-FRAME reads
+                        this same flag after the frame ends to decide
+                        whether %FRAME-UNCHANGED-P's byte compare can be
+                        skipped too -- see its docstring for how the two
+                        flags (this one and PAYLOAD-VALID-P) interact.
+                        Starts T: harmless, since VIDEO-ACTIVE-P gates
+                        every read of it and the very first frame with a
+                        client attached always forces NEEDS-FULL-
+                        RENDER-P anyway."
   machine
   host
   control-listener video-listener audio-listener
@@ -367,7 +388,8 @@ Extra slots for rendering:
   (needs-full-render-p nil)
   (payload-buffer nil)
   (prev-frame      nil)
-  (payload-valid-p nil))
+  (payload-valid-p nil)
+  (render-this-frame-p t))
 
 (defun %add-thread (server th)
   (with-lock ((aesp-server-lock server)) (push th (aesp-server-threads server)))
@@ -500,11 +522,18 @@ reused PAYLOAD-BUFFER instead."
 
 (defun %frame-unchanged-p (fb prev-frame)
   "T if FB (the live 24-bit RGB framebuffer) is byte-identical to
-PREV-FRAME (a same-size snapshot).  Plain AREF -- this is Phase 28c's
-single comparison seam; if Phase 29 lands a per-page dirty map, only
-this function's body needs to change to consult it instead of
-byte-comparing (converting to FAST-AREF would need its own loop-bound
-proof; nothing here has profiled hot enough to justify that yet)."
+PREV-FRAME (a same-size snapshot).  Plain AREF -- this was Phase 28c's
+single comparison seam, kept as the fallback path.  ROADMAP.md Phase 29c
+adds a free alternative ahead of it at the call site in
+%PUSH-VIDEO-FRAME: when the scanline-fn gate skipped rendering the whole
+frame, FB provably still equals PREV-FRAME (nothing wrote to FB), so
+that caller substitutes AESP-SERVER-RENDER-THIS-FRAME-P for a call to
+this function instead of paying for the byte compare -- see
+%PUSH-VIDEO-FRAME's docstring for the exact condition and the state
+machine where the two flags meet.  This function itself is unchanged and
+still the correct fallback whenever a frame WAS rendered and might or
+might not have redrawn identical pixels (e.g. a static screen with the
+skip's own analysis erring toward NIL from ANTIC-COLLECT-WATCHED-PAGES)."
   (declare (type (simple-array (unsigned-byte 8) (*)) fb prev-frame))
   (dotimes (i (length fb) t)
     (unless (= (aref fb i) (aref prev-frame i))
@@ -524,12 +553,18 @@ to convert anyway.  Also holds off pushing while NEEDS-FULL-RENDER-P is
 set: a client that just connected mid-frame would otherwise receive a
 torn frame (see AESP-SERVER's docstring and %REGISTER-VIDEO-CLIENT).
 
-Dedup (Phase 28c): when PAYLOAD-VALID-P and the freshly rendered
-FRAMEBUFFER compares %FRAME-UNCHANGED-P against PREV-FRAME, this push
-resends the existing PAYLOAD-BUFFER verbatim -- no copy, no conversion.
-Every OTHER case (changed, or PAYLOAD-VALID-P false because a reconnect
-just invalidated it -- see %UNREGISTER-VIDEO-CLIENT) copies FRAMEBUFFER
-into PREV-FRAME, converts once via %RGB24->BGRA32-INTO into
+Dedup (Phase 28c, extended by Phase 29c): resending the existing
+PAYLOAD-BUFFER verbatim -- no copy, no conversion -- requires
+PAYLOAD-VALID-P, and then either of two ways to know FRAMEBUFFER equals
+PREV-FRAME: RENDER-THIS-FRAME-P NIL (Phase 29c -- the scanline-fn gate
+skipped every row this frame, so FRAMEBUFFER provably still holds
+whatever it held when PREV-FRAME was last copied from it, no byte
+compare needed), or failing that, %FRAME-UNCHANGED-P's byte compare
+against PREV-FRAME (Phase 28c's original path -- still needed for a
+frame that WAS rendered but happened to redraw identical pixels).  Every
+OTHER case (changed; or PAYLOAD-VALID-P false, which happens right after
+a reconnect invalidates it -- see %UNREGISTER-VIDEO-CLIENT) copies
+FRAMEBUFFER into PREV-FRAME, converts once via %RGB24->BGRA32-INTO into
 AESP-SERVER's preallocated PAYLOAD-BUFFER (Phase 28b -- reused across
 pushes rather than consing a fresh ~322 KB buffer each time; safe
 because WRITE-AESP-MESSAGE writes it out synchronously via
@@ -538,7 +573,33 @@ returning, see the 28b commit message), and sets PAYLOAD-VALID-P.  A
 frame is NEVER suppressed outright -- every call that gets past the
 gates above sends exactly one FRAME_RAW to every client, dedup only
 skips the WORK, because %PUSH-AUDIO-FRAME's docstring pins the Nth
-AUDIO_PCM to the Nth FRAME_RAW and A/V capture depends on that cadence."
+AUDIO_PCM to the Nth FRAME_RAW and A/V capture depends on that cadence.
+
+Where the flags meet -- the state machine PAYLOAD-VALID-P /
+RENDER-THIS-FRAME-P / NEEDS-FULL-RENDER-P form together:
+
+  - NEEDS-FULL-RENDER-P set (client just connected/reconnected) ->
+    the scanline-fn's row-0 decision is forced to render (it ORs this
+    in), so RENDER-THIS-FRAME-P is T for this frame; this function's own
+    NEEDS-FULL-RENDER-P check above still holds off the push entirely
+    until row 0 has run and cleared it, so this branch of the dedup
+    logic never actually observes NEEDS-FULL-RENDER-P set.
+  - PAYLOAD-VALID-P false (no video client has ever gotten a real push
+    since the gate last opened) with RENDER-THIS-FRAME-P T -> always
+    takes the copy+convert+send path; a skip can't have produced this
+    combination (see below), so this is the ordinary post-reconnect
+    first-frame case.
+  - PAYLOAD-VALID-P false with RENDER-THIS-FRAME-P NIL -> defensive
+    case only, believed unreachable (a skip requires NEEDS-FULL-RENDER-P
+    clear, which requires at least one prior render since reconnect,
+    which sets PAYLOAD-VALID-P) but handled safely anyway: falls through
+    to copy+convert+send, which is always correct (FRAMEBUFFER is
+    genuinely current even on a skipped frame) even if the skip's
+    freebie was missed.
+  - PAYLOAD-VALID-P T with RENDER-THIS-FRAME-P NIL -> the free path:
+    resend PAYLOAD-BUFFER, no byte compare, no conversion.
+  - PAYLOAD-VALID-P T with RENDER-THIS-FRAME-P T -> Phase 28c's
+    original path: %FRAME-UNCHANGED-P decides."
   (declare (ignore machine))
   ;; Snapshot the list under lock, then write outside the lock so a slow
   ;; client doesn't block the emulator thread indefinitely.
@@ -550,10 +611,13 @@ AUDIO_PCM to the Nth FRAME_RAW and A/V capture depends on that cadence."
     (let ((fb (aesp-server-framebuffer server)))
       (when (null fb) (return-from %push-video-frame nil))
       (let* ((prev (aesp-server-prev-frame server))
+             (unchanged-p
+               (and (aesp-server-payload-valid-p server)
+                    prev
+                    (or (not (aesp-server-render-this-frame-p server))
+                        (%frame-unchanged-p fb prev))))
              (payload
-               (if (and (aesp-server-payload-valid-p server)
-                        prev
-                        (%frame-unchanged-p fb prev))
+               (if unchanged-p
                    (aesp-server-payload-buffer server)
                    (progn
                      (replace prev fb)
@@ -739,6 +803,22 @@ AESP-SERVER-*-PORT accessors)."
             ;; NEEDS-FULL-RENDER-P so the frame that just started
             ;; rendering top-to-bottom is the one %PUSH-VIDEO-FRAME will
             ;; accept as complete.
+            ;;
+            ;; ROADMAP.md Phase 29c: the decision to render THIS frame at
+            ;; all is made exactly once, at row 0, and remembered in
+            ;; RENDER-THIS-FRAME-P for the rest of the frame's rows -- not
+            ;; recomputed per scanline.  Row 0 either forces a render
+            ;; (NEEDS-FULL-RENDER-P set, or ATARI800-CL.MACHINE:MACHINE-
+            ;; DISPLAY-CHANGED-SINCE-RENDER-P says something the frame
+            ;; depends on changed) -- in which case ATARI800-CL.MACHINE:
+            ;; MACHINE-NOTE-FULL-RENDER is called BEFORE rendering row 0,
+            ;; so writes racing the beam during this very frame correctly
+            ;; accumulate toward the NEXT decision instead of being
+            ;; swallowed by a clear that already happened -- or it skips,
+            ;; bumping ATARI-MACHINE-RENDER-SKIP-COUNT once and leaving
+            ;; every row this frame unrendered (FRAMEBUFFER keeps
+            ;; whatever it held after the last real render, which is
+            ;; exactly correct: nothing that could change it did).
             (setf (atari-machine-scanline-fn machine)
                   (let ((fb (aesp-server-framebuffer server)))
                     (lambda (m)
@@ -749,11 +829,19 @@ AESP-SERVER-*-PORT accessors)."
                                (row (- sl atari800-cl.antic:+active-start-scanline+)))
                           (when (and (>= row 0) (< row 240))
                             (when (zerop row)
-                              (setf (aesp-server-needs-full-render-p server) nil))
-                            (atari800-cl.renderer:render-scanline
-                             fb row a
-                             (atari-machine-gtia m)
-                             (atari-machine-bus  m))))))))
+                              (let ((render-p
+                                      (or (aesp-server-needs-full-render-p server)
+                                          (machine-display-changed-since-render-p m))))
+                                (setf (aesp-server-needs-full-render-p server) nil)
+                                (if render-p
+                                    (machine-note-full-render m)
+                                    (incf (atari-machine-render-skip-count m)))
+                                (setf (aesp-server-render-this-frame-p server) render-p)))
+                            (when (aesp-server-render-this-frame-p server)
+                              (atari800-cl.renderer:render-scanline
+                               fb row a
+                               (atari-machine-gtia m)
+                               (atari-machine-bus  m)))))))))
             (setf (atari-machine-post-frame-fn machine)
                   (lambda (m)
                     (%push-video-frame server m)

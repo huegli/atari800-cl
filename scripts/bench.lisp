@@ -32,9 +32,13 @@
 ;;;;   IDLE    — a single JMP-to-self at reset (no NOP sled -- the PC
 ;;;;             just re-fetches the same three bytes forever) with the
 ;;;;             DISPLAY workload's static 24-line mode-2 screen and
-;;;;             renderer attached.  The canonical parked-machine load:
-;;;;             spin loop + unchanging screen, e.g. a real OS sitting at
-;;;;             the BASIC READY prompt.
+;;;;             renderer attached, PLUS ROADMAP.md Phase 29c's row-0
+;;;;             dirty-frame render-skip decision consulted every frame
+;;;;             (:CONSULT-RENDER-SKIP T) -- unlike DISPLAY, which always
+;;;;             renders.  The canonical parked-machine load: spin loop +
+;;;;             unchanging screen, e.g. a real OS sitting at the BASIC
+;;;;             READY prompt, so this is the workload Phase 29's skip is
+;;;;             meant to speed up.
 ;;;;   SERVE   — the IDLE machine plus a real AESP server with one
 ;;;;             connected video client draining FRAME_RAW on a
 ;;;;             background thread, exercising the actual push path
@@ -228,14 +232,29 @@ looks like."
 ;;; and the renderer producing pixels for all 192 playfield scanlines
 ;;; of every frame.
 
-(defun %setup-display-workload (machine)
+(defun %setup-display-workload (machine &key consult-render-skip)
   "Poke a 24-line mode-2 display list + screen data into MACHINE's RAM,
 enable playfield DMA, and attach the pixel renderer through the
 machine's scanline callback (the same wiring src/aesp.lisp uses).
-Called by RUN-WORKLOAD after cold reset, before the warm-up frames."
+Called by RUN-WORKLOAD after cold reset, before the warm-up frames.
+
+CONSULT-RENDER-SKIP, when true, makes the scanline closure apply
+ROADMAP.md Phase 29c's row-0 decision protocol -- the same one
+src/aesp.lisp's START-AESP-SERVER wires in: at row 0 of every frame, ask
+ATARI800-CL.MACHINE:MACHINE-DISPLAY-CHANGED-SINCE-RENDER-P and either
+call ATARI800-CL.MACHINE:MACHINE-NOTE-FULL-RENDER and render every row
+0-239, or skip every row this frame and bump ATARI-MACHINE-RENDER-SKIP-
+COUNT once.  The :IDLE workload passes T: a deployed idle machine (spin
+loop + unchanging screen) is exactly the render client Phase 29 targets,
+so its benchmark row should show the skip's payoff.  The :DISPLAY
+workload leaves this NIL (the default) and always renders every row:
+:DISPLAY exists specifically to measure the renderer's own per-scanline
+cost, and consulting the skip there would silently turn it into a
+second, redundant copy of :IDLE instead of a renderer benchmark."
   (let ((bus  (atari800-cl.machine:atari-machine-bus  machine))
         (gtia (atari800-cl.machine:atari-machine-gtia machine))
-        (fb   (atari800-cl.renderer:make-framebuffer)))
+        (fb   (atari800-cl.renderer:make-framebuffer))
+        (render-this-frame t))
     ;; DL at $4000: mode 2 + LMS -> $5000, 23 plain mode-2 lines, JVB $4000.
     (atari800-cl.bus:bus-poke-ram bus #x4000 #x42)
     (atari800-cl.bus:bus-poke-ram bus #x4001 #x00)
@@ -263,8 +282,19 @@ Called by RUN-WORKLOAD after cold reset, before the warm-up frames."
                              atari800-cl.antic:+scanlines-per-frame+))
                    (row (- sl atari800-cl.antic:+active-start-scanline+)))
               (when (and (>= row 0) (< row 240))
-                (atari800-cl.renderer:render-scanline
-                 fb row a gtia (atari800-cl.machine:atari-machine-bus m))))))))
+                (if consult-render-skip
+                    (progn
+                      (when (zerop row)
+                        (setf render-this-frame
+                              (atari800-cl.machine:machine-display-changed-since-render-p m))
+                        (if render-this-frame
+                            (atari800-cl.machine:machine-note-full-render m)
+                            (incf (atari800-cl.machine:atari-machine-render-skip-count m))))
+                      (when render-this-frame
+                        (atari800-cl.renderer:render-scanline
+                         fb row a gtia (atari800-cl.machine:atari-machine-bus m))))
+                    (atari800-cl.renderer:render-scanline
+                     fb row a gtia (atari800-cl.machine:atari-machine-bus m)))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Audio workload setup
@@ -538,7 +568,9 @@ lines (NIL entries for skipped workloads are removed)."
                lines))
         ((eq w :idle)
          (push (run-workload "idle" (make-idle-rom)
-                             :setup-fn #'%setup-display-workload)
+                             :setup-fn (lambda (m)
+                                         (%setup-display-workload
+                                          m :consult-render-skip t)))
                lines))
         ((eq w :serve)
          (let ((result (run-serve-workload)))
