@@ -19,8 +19,9 @@
 ;;;;   8         ALLPOT        composite pot status (stub at $FF)
 ;;;;   9         KBCODE        last keyboard scan code
 ;;;;   10        RANDOM        polynomial RNG output (17-bit or 9-bit)
+;;;;   13        SERIN         serial input data (last byte that landed)
 ;;;;   14        IRQST         active-low IRQ status (1 = not pending)
-;;;;   15        SKSTAT        serial/keyboard status (stub at $FF)
+;;;;   15        SKSTAT        serial/keyboard status
 ;;;;
 ;;;; Timer model (one POKEY-TICK = one CPU cycle):
 ;;;;   Each channel has an internal AUDF reload value and a current
@@ -38,9 +39,20 @@
 ;;;;   SEROUT feeds a double-buffered transmitter clocked by channel 4.
 ;;;;   SEROR (bit 4) fires when the holding register empties and the next
 ;;;;   byte is wanted; SEROC (bit 3) fires when the last byte has shifted
-;;;;   out.  No bits actually leave the chip and nothing is received —
-;;;;   see the transmitter section below for what that does and does not
-;;;;   buy.
+;;;;   out.  Each completed byte is also handed to the attached serial-wire
+;;;;   hook (POKEY-SERIAL-OUT-FN, installed by src/sio.lisp) — see the
+;;;;   transmitter section below.
+;;;;
+;;;; Serial input (IRQEN bit 5, ROADMAP.md Phase 25a):
+;;;;   POKEY-QUEUE-SERIAL-IN hands the receiver a wire schedule —
+;;;;   (GAP . BYTE) pairs — and the receiver lands each byte into SERIN
+;;;;   after GAP cycles plus one byte-time, raising the serial-input-
+;;;;   ready IRQ (bit 5) and setting SKSTAT's overrun bit when a byte
+;;;;   lands before the previous one was read.  The XL OS drives SIO
+;;;;   entirely through this interrupt (its IRIR handler reads SERIN in
+;;;;   IRQ context), so a machine with a serial device attached boots
+;;;;   DOS over the wire; without one the OS times out exactly as a
+;;;;   drive-less 800 XL does.
 ;;;;
 ;;;; Reload offsets (ROADMAP.md Phase 8 / MISC_IMPROVEMENTS_PLAN.md item 5):
 ;;;;   The period is NOT simply AUDF+1 in every configuration — POKEY's
@@ -120,6 +132,7 @@
 (defconstant +irq-timer4+ #x04)
 (defconstant +irq-serial-out-done+   #x08)  ; SEROC — transmission complete
 (defconstant +irq-serial-out-needed+ #x10)  ; SEROR — output data needed
+(defconstant +irq-serial-in-ready+   #x20)  ; SERIN — serial input ready
 (defconstant +irq-other-key+  #x40)  ; a (non-BREAK) key was pressed
 (defconstant +irq-break-key+  #x80)  ; BREAK was pressed
 
@@ -137,9 +150,15 @@
 (defconstant +pokey-pending-serial-tx+ #x01)  ; SERIAL-OUT-CYCLES > 0
 (defconstant +pokey-pending-audio+     #x02)  ; an AUDIO-UNIT is attached
 (defconstant +pokey-pending-key+       #x04)  ; an INPUT-STATE is attached
-;;; Bit 3 (#x08) is reserved for ROADMAP.md Phase 16a (SIO receive: a byte
-;;; shifting in), so that phase extends this mask instead of adding its
-;;; own independent per-advance test.
+(defconstant +pokey-pending-serial-rx+ #x08)  ; SERIAL-IN-CYCLES > 0
+;;; +POKEY-PENDING-SERIAL-RX+ (ROADMAP.md Phase 25a, reserved by Phase 22)
+;;; is a pure event flag like the transmitter's bit: set when a byte is
+;;; shifting in, cleared when the queue drains — never an "attachment"
+;;; bit, so a machine with a serial device mounted but no traffic in
+;;; flight still reads PENDING as zero and pays nothing per advance.
+;;; Bytes are queued by POKEY-QUEUE-SERIAL-IN, called from the
+;;; serial-wire hook on the emulator thread, so PENDING stays
+;;; single-writer (the emulator thread), like every other bit.
 ;;;
 ;;; +POKEY-PENDING-KEY+ deliberately mirrors +POKEY-PENDING-AUDIO+'s
 ;;; shape rather than the plan's literal "a latched key pending" wording:
@@ -162,6 +181,20 @@
 ;;; for the cassette's FSK output).  We only distinguish "transmitting or
 ;;; not", so bit 5 alone gates the shift register.
 (defconstant +skctl-transmit-mode+ #x20)
+
+;;; SKSTAT bits (ROADMAP.md Phase 25a).  Active low like IRQST: a bit
+;;; READS AS 1 while its condition is absent and clears when it occurs.
+;;; Only the serial-receive-relevant bits are named here; bit 2 (key
+;;; down) belongs to src/input.lisp's INPUT-POKEY-SKSTAT.  Assignments
+;;; verified against the XL OS's own IRIR handler (Atari_XL_OS_Rev.2.asm:
+;;; "LDA SKSTAT / STA SKRES / BMI" tests bit 7 for frame error, then
+;;; "AND #$20 / BNE" tests bit 5 for overrun) and the POKEY reference at
+;;; oxyron.de — matching atari800's pokey.c, which clears the same bits
+;;; and restores them all on SKREST.
+(defconstant +skstat-frame-error+     #x80)  ; 0 = serial input framing error
+(defconstant +skstat-serial-overrun+ #x20)  ; 0 = SERIN overrun (unread byte
+                                            ; overwritten by the next one)
+(defconstant +skstat-skrest-mask+     #xE0)  ; bits SKREST restores
 
 ;;; Serial output frame: one start bit, eight data bits, one stop bit.
 ;;; The transmit clock is channel 4's OUTPUT, i.e. one bit per TWO channel-4
@@ -250,6 +283,27 @@ Slots:
                                 down by POKEY-TICK / POKEY-ADVANCE; the
                                 per-byte duration comes from the channel-4
                                 timer (see %SERIAL-BYTE-CYCLES).
+  SERIAL-OUT-FN               — serial-wire hook (src/sio.lisp): called
+                                with each byte as it finishes shifting
+                                out, the wire's view of SEROUT.  NIL on
+                                a machine with no serial device layer.
+  SERIAL-IN-BYTE              — byte currently shifting into the receiver,
+                                or 0 when the receiver is idle.
+  SERIAL-IN-CYCLES            — CPU cycles until SERIAL-IN-BYTE lands in
+                                SERIN; 0 means the receiver is idle.
+                                Counted down by POKEY-TICK / POKEY-ADVANCE
+                                like the transmitter, and its PENDING
+                                bit (+POKEY-PENDING-SERIAL-RX+) is set
+                                while it is positive.
+  SERIAL-IN-QUEUE             — pending (GAP . BYTE) pairs behind the
+                                byte in flight; POKEY-QUEUE-SERIAL-IN
+                                appends to it (the serial-wire schedule
+                                handed to the receiver).
+  SERIN                       — the SERIN register: the last byte that
+                                landed, readable at $D20D.
+  SERIAL-IN-UNREAD            — T from the moment a byte lands until
+                                SERIN is read; a byte landing while T
+                                sets SKSTAT's overrun bit.
   CPU                         — CPU back-pointer for IRQ routing."
   (audf  (make-array 4 :element-type '(unsigned-byte 8) :initial-element 0)
          :type (simple-array (unsigned-byte 8) (4)))
@@ -275,6 +329,12 @@ Slots:
   (serial-out-shift   nil :type (or null (unsigned-byte 8)))
   (serial-out-holding nil :type (or null (unsigned-byte 8)))
   (serial-out-cycles  0   :type fixnum)
+  (serial-out-fn      nil :type (or null function))
+  (serial-in-byte     0   :type (unsigned-byte 8))
+  (serial-in-cycles   0   :type fixnum)
+  (serial-in-queue    nil)
+  (serin              0   :type (unsigned-byte 8))
+  (serial-in-unread   nil)
   (cpu nil)
   ;; Optional host INPUT-STATE (atari800-cl.input).  When non-NIL, POT0..3,
   ;; KBCODE, and SKSTAT reads reflect live input instead of the stubs.
@@ -493,12 +553,15 @@ the CPU's pending-IRQ line was actually asserted."
 ;;; after the last byte it swaps SEROR for SEROC and waits for XMTDON.
 ;;;
 ;;; What is modelled: the two interrupts and their timing, clocked by
-;;; channel 4 at two underflows per bit.  What is NOT: the actual serial
-;;; line — no bits leave the chip, nothing is received, and SKSTAT's
-;;; framing/overrun bits are still the $FF stub.  That is enough for the
-;;; OS to complete a transfer and then time out waiting for a device
-;;; that is not there, which is exactly what a real 800 XL with no disk
-;;; drive does before it falls through to BASIC.
+;;; channel 4 at two underflows per bit, and — since ROADMAP.md Phase 25 —
+;;; the wire itself: each byte that finishes shifting is handed to the
+;;; SERIAL-OUT-FN hook (the serial device layer watches the transmitted
+;;; stream there), and the receiver below lands whatever the wire sends
+;;; back into SERIN.  A machine with no serial device attached leaves
+;;; SERIAL-OUT-FN NIL: the transmitter then behaves exactly as it did
+;;; before Phase 25 — the OS completes a transfer and times out waiting
+;;; for a device that is not there, which is exactly what a real 800 XL
+;;; with no disk drive does before it falls through to BASIC.
 
 (defun %serial-transmitting-p (pokey)
   "True while SKCTL selects a transmit mode."
@@ -572,6 +635,14 @@ a byte is ~940 cycles) case of several bytes completing in one call."
     (loop
       (when (plusp (pokey-serial-out-cycles pokey))
         (return))
+      ;; The byte in the shift register has just finished shifting out.
+      ;; Hand it to the serial-wire hook (Phase 25): the device layer
+      ;; accumulates these bytes into command frames and answers on the
+      ;; receive side.  NIL hook = no device attached, pre-Phase-25
+      ;; behavior, and this stays a single slot read per completion.
+      (let ((wire (pokey-serial-out-fn pokey)))
+        (when wire
+          (funcall (the function wire) (pokey-serial-out-shift pokey))))
       (let ((next (pokey-serial-out-holding pokey)))
         (cond
           (next
@@ -590,6 +661,99 @@ a byte is ~940 cycles) case of several bytes completing in one call."
                                                  +pokey-pending-serial-tx+))
            (when (%raise-irq pokey cpu +irq-serial-out-done+)
              (setf irq t))
+           (return)))))
+    irq))
+
+;;; ---------------------------------------------------------------------------
+;;; Serial input receiver (IRQEN bit 5, ROADMAP.md Phase 25a)
+;;;
+;;; The receive side mirrors the transmitter: a byte takes the same
+;;; channel-4-derived byte time to shift in, and the wire's turnaround gap
+;;; (device thinking time, ACK delay, inter-frame spacing) is a plain cycle
+;;; count the device layer prepends.  POKEY-QUEUE-SERIAL-IN takes a wire
+;;; schedule — a list of (GAP . BYTE) pairs, gap first — and %SERIAL-IN-
+;;; ADVANCE lands each byte into SERIN after GAP + one byte time, raising
+;;; the serial-input-ready IRQ (bit 5, what the OS's IRIR handler serves)
+;;; and pulling SKSTAT's overrun bit low when a byte lands before the
+;;; previous one was read.
+;;;
+;;; The XL OS acknowledges the serial-in IRQ in its master IRQ dispatcher
+;;; (IIR writes IRQEN twice), so — unlike the timer IRQs — no
+;;; restore-on-read is needed here: reading SERIN just clears the unread
+;;; flag.  SKREST (a write to $D20A) restores SKSTAT bits 5-7.
+
+(defun %serial-in-start-head (pokey)
+  "Start shifting the queue's head byte: pop it, set its gap-plus-byte-time
+countdown, and set the PENDING bit so POKEY-TICK / POKEY-ADVANCE keeps
+charging the receiver.  Called with a non-empty queue only."
+  (declare (type pokey pokey))
+  (let* ((head  (pop (pokey-serial-in-queue pokey)))
+         (gap   (the fixnum (car head)))
+         (byte  (the (unsigned-byte 8) (cdr head))))
+    (setf (pokey-serial-in-byte pokey)   byte
+          (pokey-serial-in-cycles pokey) (+ gap (%serial-byte-cycles pokey))
+          (pokey-pending pokey) (logior (pokey-pending pokey)
+                                        +pokey-pending-serial-rx+))))
+
+(defun pokey-queue-serial-in (pokey entries)
+  "Append ENTRIES to POKEY's serial input queue and start the receiver if it
+is idle.  ENTRIES is a list of (GAP . BYTE) pairs in wire order — GAP is
+the turnaround delay in CPU cycles before BYTE begins shifting in, and the
+shift itself takes one %SERIAL-BYTE-CYCLES on top.  The device layer builds
+these schedules from the inter-frame delays the OS expects.
+
+Queueing while a byte is in flight appends behind it; queueing while the
+receiver is idle starts the head immediately.  Bit-identical between
+POKEY-TICK and POKEY-ADVANCE when called between advance calls; called
+mid-advance (from the SERIAL-OUT-FN hook as the device layer watches a
+byte complete) the start can land one chunk later than a tick-by-tick
+run — the gaps are thousands of cycles, so the skew is invisible to the
+protocol."
+  (declare (type pokey pokey) (type list entries))
+  (setf (pokey-serial-in-queue pokey)
+        (append (pokey-serial-in-queue pokey) entries))
+  (when (and entries (zerop (pokey-serial-in-cycles pokey)))
+    (%serial-in-start-head pokey))
+  (values))
+
+(defun %serial-in-advance (pokey cpu n)
+  "Advance the receiver by N CPU cycles.  Returns T if an IRQ was raised.
+
+Called only when the receiver is busy — POKEY-TICK / POKEY-ADVANCE test
+SERIAL-IN-CYCLES via the PENDING bit first.  When a byte finishes shifting
+in it lands in SERIN: if the previous byte was never read, SKSTAT's
+overrun bit goes low (active-low semantics, so 'low' means 'error');
+either way the serial-input-ready IRQ (bit 5) fires for the new byte.
+The countdown then carries its remainder into the next queued byte's
+gap, or the receiver goes idle and clears the PENDING bit."
+  (declare (type pokey pokey) (type fixnum n))
+  (let ((irq nil))
+    (decf (pokey-serial-in-cycles pokey) n)
+    (loop
+      (when (plusp (pokey-serial-in-cycles pokey))
+        (return))
+      ;; Land the byte that just finished shifting in.
+      (when (pokey-serial-in-unread pokey)
+        (setf (pokey-skstat pokey)
+              (logandc2 (pokey-skstat pokey) +skstat-serial-overrun+)))
+      (setf (pokey-serin pokey)          (pokey-serial-in-byte pokey)
+            (pokey-serial-in-unread pokey) t)
+      (when (%raise-irq pokey cpu +irq-serial-in-ready+)
+        (setf irq t))
+      ;; Next byte, or idle.
+      (let ((next (pop (pokey-serial-in-queue pokey))))
+        (cond
+          (next
+           (incf (pokey-serial-in-cycles pokey)
+                 (+ (the fixnum (car next)) (%serial-byte-cycles pokey)))
+           (setf (pokey-serial-in-byte pokey)
+                 (the (unsigned-byte 8) (cdr next))))
+          (t
+           (setf (pokey-serial-in-cycles pokey) 0
+                 ;; Receiver drained: clear the PENDING bit so the next
+                 ;; POKEY-TICK / POKEY-ADVANCE stops charging this check.
+                 (pokey-pending pokey) (logandc2 (pokey-pending pokey)
+                                                 +pokey-pending-serial-rx+))
            (return)))))
     irq))
 
@@ -741,6 +905,9 @@ set."
             (when (logtest pending +pokey-pending-serial-tx+)
               (when (%serial-out-advance pokey cpu 1)
                 (setf irq-raised t)))
+            (when (logtest pending +pokey-pending-serial-rx+)
+              (when (%serial-in-advance pokey cpu 1)
+                (setf irq-raised t)))
             (when (logtest pending +pokey-pending-key+)
               (when (%pokey-service-key-irqs pokey cpu)
                 (setf irq-raised t)))
@@ -831,6 +998,11 @@ the audio check alone lived in this position."
             (when (logtest pending +pokey-pending-serial-tx+)
               (when (%serial-out-advance pokey cpu n)
                 (setf irq-raised t)))
+            ;; The receiver is a plain countdown too (gap + byte time per
+            ;; queued byte), charged in one step for the same reason.
+            (when (logtest pending +pokey-pending-serial-rx+)
+              (when (%serial-in-advance pokey cpu n)
+                (setf irq-raised t)))
             ;; A key/BREAK IRQ needs no cycle-count reasoning (it isn't
             ;; timed against N the way the transmitter is), so servicing
             ;; it once per chunk-loop entry, same as POKEY-TICK, is exact.
@@ -891,9 +1063,16 @@ have fired on."
              (atari800-cl.input:input-pokey-kbcode input)
              (pokey-kbcode pokey)))
       (10 (pokey-random pokey))          ; RANDOM
+      (13 (setf (pokey-serial-in-unread pokey) nil)  ; SERIN
+          (pokey-serin pokey))
       (14 (pokey-irqst pokey))           ; IRQST
       (15 (if input                      ; SKSTAT
-              (atari800-cl.input:input-pokey-skstat input)
+              ;; Both halves are active-low, so combine with LOGAND: the
+              ;; input layer's key-down bit contributes its zero, the
+              ;; chip's serial error bits (frame, overrun) contribute
+              ;; theirs, and neither side's zeros are masked away.
+              (logand (atari800-cl.input:input-pokey-skstat input)
+                      (pokey-skstat pokey))
               (pokey-skstat pokey)))
       (t #xFF))))
 
@@ -912,6 +1091,8 @@ value) and reset each channel's sub-divider to a fresh starting value."
 
 Side effects:
   STIMER  ($D209) — any write reloads all four timer counters from AUDFx.
+  SKREST  ($D20A) — restores SKSTAT bits 5-7 (serial frame error and
+                    overrun) to their no-error (1) value.
   IRQEN   ($D20E) — additionally restores latched IRQST bits to 1 for any
                     IRQ being disabled, mirroring real-hardware acknowledge,
                     then re-derives the CPU's IRQ line from the new
@@ -933,7 +1114,8 @@ Side effects:
       (7 (setf (aref (pokey-audc pokey) 3) v))
       (8 (setf (pokey-audctl pokey) v))
       (9 (%reload-all-timers pokey))                 ; STIMER
-      (10 nil)                                       ; SKREST stub
+      (10 (setf (pokey-skstat pokey)                 ; SKREST
+                (logior (pokey-skstat pokey) +skstat-skrest-mask+)))
       (13 (%serial-out-write pokey (pokey-cpu pokey) v))   ; SEROUT
       (14
        ;; IRQEN write — set the mask AND restore IRQST bits for any bit
@@ -964,13 +1146,21 @@ Side effects:
         (pokey-serial-out-shift   pokey) nil
         (pokey-serial-out-holding pokey) nil
         (pokey-serial-out-cycles  pokey) 0
+        (pokey-serial-in-byte     pokey) 0
+        (pokey-serial-in-cycles   pokey) 0
+        (pokey-serial-in-queue    pokey) nil
+        (pokey-serin              pokey) 0
+        (pokey-serial-in-unread   pokey) nil
         (pokey-poly17-state pokey) #x1FFFF
         (pokey-poly9-state  pokey) #x01FF
         (pokey-rng-lag      pokey) 0
-        ;; SERIAL-OUT-CYCLES just went to 0 above, so its PENDING bit must
-        ;; go with it; AUDIO and INPUT are emulator-level attachments
-        ;; independent of chip reset (see ATTACH-AUDIO in src/audio.lisp
-        ;; and ATTACH-POKEY-INPUT above) and survive.
+        ;; SERIAL-OUT-CYCLES and SERIAL-IN-CYCLES just went to 0 above, so
+        ;; their PENDING bits must go with them; AUDIO and INPUT are
+        ;; emulator-level attachments independent of chip reset (see
+        ;; ATTACH-AUDIO in src/audio.lisp and ATTACH-POKEY-INPUT above)
+        ;; and survive.  SERIAL-OUT-FN / SERIAL-IN hooks are attachments
+        ;; of the same kind (the device layer installs them, Phase 25) and
+        ;; survive too.
         (pokey-pending      pokey) (logand (pokey-pending pokey)
                                            (logior +pokey-pending-audio+
                                                    +pokey-pending-key+)))

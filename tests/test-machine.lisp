@@ -439,6 +439,14 @@ detaching with NIL clears them."
 (defparameter *basic-rom-candidates* '("ataribas.rom" "ATARIBAS.ROM")
   "Filenames to try for the 8 KiB BASIC ROM, in preference order.")
 
+(defparameter *dos-atr-candidates*
+  '("dos25.atr" "DOS25.ATR" "dos.atr" "DOS.ATR" "dos2_5.atr" "dos25s.atr")
+  "Filenames to try for a DOS 2.5 ATR disk image, in preference order.  A
+bootable DOS disk is what the Phase 25 serial-wire acceptance test mounts
+(ROADMAP.md: with a DOS 2.5 ATR mounted and the real OS ROM, a cold boot
+reaches the DOS menu).  $ATARI800_CL_DOS_ATR overrides the list, as with
+the ROMs.")
+
 (defun %rom-search-directories ()
   "Directories to look in for ROM images: roms/ under the ASDF system
 source directory, then roms/ under the current working directory."
@@ -547,6 +555,55 @@ without them the OS spins forever waiting for XMTDON."
           (is-true (getf (atari800-cl.machine:machine-portb-state m)
                          :basic-rom-mapped)
                    "BASIC ROM must be mapped once the prompt is up")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 25 acceptance: DOS boots over the SIO serial wire.
+;;;
+;;; ROADMAP.md Phase 25: "with a DOS 2.5 ATR mounted and the real OS ROM,
+;;; a cold boot reaches the DOS menu."  This is the receive path's
+;;; acceptance test — the OS sends its SIO command frames over the
+;;; transmitter (Phase 22) and reads the drive's ACK/COMPLETE/data frames
+;;; back through SERIN and the serial-input-ready IRQ (Phase 25a), served
+;;; by the serial device layer (Phase 25b) that the mount API routes to
+;;; (Phase 25c).  No emulator shortcut is involved: the only disk the
+;;; machine has is the mounted ATR, and every byte of DOS.SYS arrives
+;;; through POKEY.
+;;;
+;;; Skips when the ATR (or the ROMs) are absent, becoming a failure in
+;;; strict mode, exactly like the boot tests above.
+
+(test real-os-rom-boots-dos-menu-over-serial-wire
+  "Mount a DOS 2.5 ATR on drive 1, cold-boot the real OS ROM, and the DOS
+menu (DUP.SYS's \"DISK DIRECTORY\" entry) must appear in screen memory.
+Every sector load crosses the emulated serial wire: boot record, DOS.SYS,
+and DUP.SYS all arrive as POKEY SERIN bytes with the inter-frame delays
+the OS expects."
+  (let ((atr (%find-rom "ATARI800_CL_DOS_ATR" *dos-atr-candidates*)))
+    (if (null atr)
+        (%skip-or-fail "no DOS ATR found in roms/ (or via ~
+               $ATARI800_CL_DOS_ATR); skipping the DOS-menu serial boot test.")
+        (let ((m (%boot-machine-with-real-roms)))
+          (if (null m)
+              (%skip-or-fail "OS/BASIC ROM images not found; ~
+               skipping the DOS-menu serial boot test.")
+              (progn
+                (atari800-cl.hostdev:mount-disk-file
+                 (atari800-cl.machine:atari-machine-hostdev m) 1 atr)
+                (let ((found nil))
+                  (loop repeat 3000
+                        until found
+                        do (atari800-cl.machine:machine-run-frame m)
+                           (when (zerop (mod
+                                         (atari800-cl.machine:atari-machine-frame-count m)
+                                         50))
+                             (setf found (%screen-contains-p m "DISK DIRECTORY"))))
+                  (is-true found
+                           "the DOS menu must appear within 3000 frames ~
+                            (row 0: ~S)"
+                           (%screen-row-text m 0))
+                  (is-false (atari800-cl.cpu:cpu-halted
+                             (atari800-cl.machine:atari-machine-cpu m))
+                            "CPU must not have halted during the DOS boot"))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Typed input reaches BASIC through POKEY's keyboard IRQ (ROADMAP.md

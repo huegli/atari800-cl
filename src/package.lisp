@@ -407,13 +407,23 @@
            ;; Serial output transmitter (SEROUT + SEROR/SEROC interrupts)
            #:pokey-serial-out-shift #:pokey-serial-out-holding
            #:pokey-serial-out-cycles
+           #:pokey-serial-out-fn
            #:+irq-serial-out-done+ #:+irq-serial-out-needed+
            #:+skctl-transmit-mode+
            #:+serial-frame-bits+ #:+serial-half-bits-per-byte+
+           ;; Serial input receiver (SERIN, ROADMAP.md Phase 25a)
+           #:pokey-serial-in-byte #:pokey-serial-in-cycles
+           #:pokey-serial-in-queue #:pokey-serial-in-unread
+           #:pokey-serin
+           #:pokey-skstat
+           #:pokey-queue-serial-in
+           #:+irq-serial-in-ready+
+           #:+skstat-frame-error+ #:+skstat-serial-overrun+
+           #:+skstat-skrest-mask+
            ;; PENDING bitmask (ROADMAP.md Phase 22)
            #:pokey-pending
            #:+pokey-pending-serial-tx+ #:+pokey-pending-audio+
-           #:+pokey-pending-key+
+           #:+pokey-pending-key+ #:+pokey-pending-serial-rx+
            ;; Audio hooks (installed by src/audio.lisp's ATTACH-AUDIO)
            #:pokey-audio
            #:pokey-audio-advance-fn #:pokey-audio-underflow-fn

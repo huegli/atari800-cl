@@ -355,6 +355,7 @@ states that per-cycle stepping produces."
     (5001  #xD20E #x0B)                 ; IRQEN: timers 1 + 2 + 4
     (12345 #xD208 #x01)                 ; AUDCTL: 15 kHz base clock
     (12345 #xD206 10)                   ; AUDF4 = 10
+    (20000 #xD20A 0)                    ; SKREST: restore SKSTAT error bits
     (30000 #xD200 0)                    ; AUDF1 = 0 (fires every expiry)
     (30000 #xD208 #x60)                 ; AUDCTL: ch1 + ch3 at 1.79 MHz
     (30000 #xD209 0)                    ; STIMER
@@ -383,17 +384,21 @@ exactly CYCLE cycles have elapsed.  Sorted by cycle.")
   "Fixed chunk-size sequence (cycled) for the batched POKEY in the
 equivalence test.  A literal vector, not RANDOM, so runs are deterministic.")
 
-(defun %run-pokey-equivalence (&key attach-audio-p serial-p)
+(defun %run-pokey-equivalence (&key attach-audio-p serial-p serial-rx-p)
   "Run the scripted 50,000-cycle POKEY-TICK-vs-POKEY-ADVANCE comparison
 (register-write schedule *POKEY-EQUIVALENCE-SCRIPT*, chunk sizes
 *POKEY-EQUIVALENCE-CHUNKS*), optionally with an AUDIO-UNIT attached to
-both fixtures (ATTACH-AUDIO-P) and/or a serial transmission started on
-both before cycle 0 (SERIAL-P).  These cover ROADMAP.md Phase 22's
-PENDING bitmask: with neither flag every bit stays zero for the whole
-run (the original test); the other combinations put the serial-tx bit,
-the audio bit, or both live for at least part of the window and — since
-the started byte finishes on its own and nothing re-attaches audio —
-also exercise each bit clearing again mid-run, not just staying set.
+both fixtures (ATTACH-AUDIO-P), a serial transmission started on both
+before cycle 0 (SERIAL-P), and a serial-input wire schedule queued on
+both (SERIAL-RX-P, ROADMAP.md Phase 25a).  These cover the PENDING
+bitmask: with no flags every bit stays zero for the whole run (the
+original test); the other combinations put the serial-tx bit, the
+serial-rx bit, the audio bit, or a mix live for at least part of the
+window and — since the started byte finishes, the queued bytes drain,
+and nothing re-attaches audio — also exercise each bit clearing again
+mid-run, not just staying set.  The serial-rx schedule is queued between
+advance calls (before cycle 0), the exact case: the one-chunk skew of
+mid-advance queueing is deliberately NOT exercised here.
 Returns NIL on a clean run, else (CYCLE FIELD) naming the first
 divergence, exactly as the field it's given to for a failure message."
   (multiple-value-bind (pok-a cpu-a bus-a) (%make-pokey-fixture :audctl #x40)
@@ -406,6 +411,14 @@ divergence, exactly as the field it's given to for a failure message."
         (atari800-cl.bus:bus-write bus-b #xD20F #x23)
         (atari800-cl.bus:bus-write bus-a #xD20D #x41)   ; SEROUT: start a byte
         (atari800-cl.bus:bus-write bus-b #xD20D #x41))
+      (when serial-rx-p
+        ;; COPY-LIST for each side: POKEY-QUEUE-SERIAL-IN appends, which
+        ;; with an empty queue RETURNS the caller's list, and both POPs
+        ;; must not share tail structure between the two POKEYs.
+        (let ((entries '((1000 . #x11) (20000 . #x22) (13000 . #x33)
+                         (5000 . #x44) (300 . #x55))))
+          (atari800-cl.pokey:pokey-queue-serial-in pok-a (copy-list entries))
+          (atari800-cl.pokey:pokey-queue-serial-in pok-b (copy-list entries))))
       (let ((script (copy-list *pokey-equivalence-script*))
             (chunks *pokey-equivalence-chunks*)
             (seed-i 0)
@@ -419,6 +432,18 @@ divergence, exactly as the field it's given to for a failure message."
                            ((/= (atari800-cl.pokey:pokey-irqst pok-a)
                                 (atari800-cl.pokey:pokey-irqst pok-b))
                             (list cycle :irqst))
+                           ((/= (atari800-cl.pokey:pokey-pending pok-a)
+                                (atari800-cl.pokey:pokey-pending pok-b))
+                            (list cycle :pending))
+                           ((/= (atari800-cl.pokey:pokey-serin pok-a)
+                                (atari800-cl.pokey:pokey-serin pok-b))
+                            (list cycle :serin))
+                           ((not (eq (atari800-cl.pokey:pokey-serial-in-unread pok-a)
+                                     (atari800-cl.pokey:pokey-serial-in-unread pok-b)))
+                            (list cycle :serial-in-unread))
+                           ((/= (atari800-cl.pokey:pokey-skstat pok-a)
+                                (atari800-cl.pokey:pokey-skstat pok-b))
+                            (list cycle :skstat))
                            ((loop for ch below 4
                                   thereis (/= (aref (atari800-cl.pokey:pokey-timer-counts pok-a) ch)
                                               (aref (atari800-cl.pokey:pokey-timer-counts pok-b) ch)))
@@ -461,28 +486,36 @@ divergence, exactly as the field it's given to for a failure message."
         divergence))))
 
 (test pokey-tick-vs-advance-equivalence
-  "%RUN-POKEY-EQUIVALENCE under all four PENDING-bitmask combinations
-(ROADMAP.md Phase 22): neither, audio only, serial only, and both.  Each
+  "%RUN-POKEY-EQUIVALENCE under all eight PENDING-bitmask combinations
+(ROADMAP.md Phase 22, extended by Phase 25a's serial-rx bit): neither,
+each of audio / serial-tx / serial-rx alone, and every pairing.  Each
 run drives two POKEYs through the scripted 50,000-cycle sequence — one
 via single-cycle POKEY-TICK, one via POKEY-ADVANCE in fixed odd-sized
-chunks — and after every chunk the complete observable state (IRQST, all
-timer counts, all sub-counters, RANDOM, the chunk's IRQ-raised result,
-and the CPU's pending-IRQ line) must agree.  This is the test that
-licenses the event-skipping implementation, extended across every state
-the consolidated PENDING mask can be in so the bitmask cannot silently
+chunks — and after every chunk the complete observable state (IRQST,
+PENDING, SERIN, the unread flag, SKSTAT, all timer counts, all
+sub-counters, RANDOM, the chunk's IRQ-raised result, and the CPU's
+pending-IRQ line) must agree.  This is the test that licenses the
+event-skipping implementation, extended across every state the
+consolidated PENDING mask can be in so the bitmask cannot silently
 diverge POKEY-TICK from POKEY-ADVANCE for a combination neither path's
 author happened to try by hand."
-  (dolist (mode '((:attach-audio-p nil :serial-p nil)
-                  (:attach-audio-p t   :serial-p nil)
-                  (:attach-audio-p nil :serial-p t)
-                  (:attach-audio-p t   :serial-p t)))
-    (destructuring-bind (&key attach-audio-p serial-p) mode
+  (dolist (mode '((:attach-audio-p nil :serial-p nil :serial-rx-p nil)
+                  (:attach-audio-p t   :serial-p nil :serial-rx-p nil)
+                  (:attach-audio-p nil :serial-p t   :serial-rx-p nil)
+                  (:attach-audio-p t   :serial-p t   :serial-rx-p nil)
+                  (:attach-audio-p nil :serial-p nil :serial-rx-p t)
+                  (:attach-audio-p t   :serial-p nil :serial-rx-p t)
+                  (:attach-audio-p nil :serial-p t   :serial-rx-p t)
+                  (:attach-audio-p t   :serial-p t   :serial-rx-p t)))
+    (destructuring-bind (&key attach-audio-p serial-p serial-rx-p) mode
       (let ((divergence (%run-pokey-equivalence :attach-audio-p attach-audio-p
-                                                 :serial-p serial-p)))
+                                                 :serial-p serial-p
+                                                 :serial-rx-p serial-rx-p)))
         (is (null divergence)
             "POKEY state diverged between tick and batched advance ~
-             (attach-audio-p=~A serial-p=~A) at cycle ~S in field ~S"
-            attach-audio-p serial-p (first divergence) (second divergence))))))
+             (attach-audio-p=~A serial-p=~A serial-rx-p=~A) at cycle ~S in field ~S"
+            attach-audio-p serial-p serial-rx-p
+            (first divergence) (second divergence))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Read of IRQST through the bus
@@ -609,6 +642,144 @@ swapped for SEROC, which fires when the final byte drains."
     (is-false (atari800-cl.pokey:pokey-serial-out-shift pok))
     (is-false (atari800-cl.pokey:pokey-serial-out-holding pok))
     (is (zerop (atari800-cl.pokey:pokey-serial-out-cycles pok)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Serial input receiver (SERIN + serial-input-ready IRQ, Phase 25a)
+;;;
+;;; The receive side is the transmitter's mirror: POKEY-QUEUE-SERIAL-IN
+;;; takes (GAP . BYTE) wire schedules, and each byte lands in SERIN after
+;;; GAP + one byte time, raising IRQEN/IRQST bit 5.  The fixture's byte
+;;; time is PERIOD * 20 cycles (200 with the default AUDF3/AUDF4).
+
+(defun %serial-rx-byte-cycles (period)
+  (* period atari800-cl.pokey:+serial-half-bits-per-byte+))
+
+(test pokey-queue-serial-in-lands-byte-and-raises-serial-in-irq
+  "A queued byte lands in SERIN after gap + one byte time and raises the
+serial-input-ready IRQ (IRQEN/IRQST bit 5).  One cycle short, neither has
+happened — the landing is exact, not a fuzzy window."
+  (multiple-value-bind (pok cpu bus period)
+      (%make-serial-fixture :irqen atari800-cl.pokey:+irq-serial-in-ready+)
+    (let ((byte-cycles (%serial-rx-byte-cycles period)))
+      (atari800-cl.pokey:pokey-queue-serial-in pok '((0 . #x41)))
+      (is (logtest (atari800-cl.pokey:pokey-pending pok)
+                   atari800-cl.pokey:+pokey-pending-serial-rx+)
+          "queuing must set the PENDING serial-rx bit")
+      (is (zerop (atari800-cl.bus:bus-read bus #xD20D))
+          "SERIN must still read 0 before the byte lands")
+      (%tick-n-pokey pok cpu (1- byte-cycles))
+      (is-false (cpu-pending-irq cpu) "one cycle short: no IRQ yet")
+      (is-true (%tick-n-pokey pok cpu 1)
+               "the byte-time's last cycle must raise the serial-in IRQ")
+      (is (zerop (logand (atari800-cl.pokey:pokey-irqst pok)
+                         atari800-cl.pokey:+irq-serial-in-ready+))
+          "IRQST bit 5 must read as pending")
+      (is (= #x41 (atari800-cl.bus:bus-read bus #xD20D))
+          "SERIN must return the landed byte")
+      (is-false (atari800-cl.pokey:pokey-serial-in-unread pok)
+                "the SERIN read must clear the unread flag"))))
+
+(test pokey-serial-in-gap-delays-landing
+  "The wire schedule's GAP delays the byte: it lands only after the full
+gap-plus-byte-time has elapsed, matching the turnaround delay the device
+layer asks for."
+  (multiple-value-bind (pok cpu bus period)
+      (%make-serial-fixture :irqen atari800-cl.pokey:+irq-serial-in-ready+)
+    (let ((byte-cycles (%serial-rx-byte-cycles period)))
+      (atari800-cl.pokey:pokey-queue-serial-in pok `((500 . #x42)))
+      (%tick-n-pokey pok cpu (+ 500 byte-cycles -1))
+      (is-false (atari800-cl.pokey:pokey-serial-in-unread pok)
+                "one cycle short of gap + byte time: nothing landed")
+      (%tick-n-pokey pok cpu 1)
+      (is-true (atari800-cl.pokey:pokey-serial-in-unread pok)
+               "the full gap + byte time lands the byte")
+      (is (= #x42 (atari800-cl.pokey:pokey-serin pok))))))
+
+(test pokey-serial-in-overrun-pulls-skstat-low-and-skrest-restores
+  "A byte landing while the previous one is unread pulls SKSTAT's overrun
+bit (bit 5) low — active-low, so low means error.  Reading SERIN between
+landings prevents the overrun, and a SKREST write restores the bit."
+  (multiple-value-bind (pok cpu bus period)
+      (%make-serial-fixture :irqen atari800-cl.pokey:+irq-serial-in-ready+)
+    (let ((byte-cycles (%serial-rx-byte-cycles period)))
+      (atari800-cl.pokey:pokey-queue-serial-in
+       pok `((0 . #x41) (0 . #x42) (0 . #x43)))
+      (%tick-n-pokey pok cpu byte-cycles)      ; byte 1 lands, unread
+      (is (logtest (atari800-cl.pokey:pokey-skstat pok)
+                   atari800-cl.pokey:+skstat-serial-overrun+)
+          "no overrun while only one byte has landed")
+      (is (= #x41 (atari800-cl.bus:bus-read bus #xD20D))
+          "byte 1 readable; this also clears the unread flag")
+      (%tick-n-pokey pok cpu byte-cycles)      ; byte 2 lands after a read
+      (is (logtest (atari800-cl.pokey:pokey-skstat pok)
+                   atari800-cl.pokey:+skstat-serial-overrun+)
+          "no overrun: SERIN was read between landings")
+      ;; Leave byte 2 unread; byte 3 overruns it.  LOGTEST, not LOGAND:
+      ;; an is-false on (LOGAND ...) would fail even when the bit is
+      ;; clear, because LOGAND returns 0 there and 0 is a generalized
+      ;; true -- only LOGTEST yields the NIL is-false wants.
+      (%tick-n-pokey pok cpu byte-cycles)
+      (is-false (logtest (atari800-cl.pokey:pokey-skstat pok)
+                         atari800-cl.pokey:+skstat-serial-overrun+)
+                "overrun: byte 3 landed with byte 2 unread")
+      (is (= #x43 (atari800-cl.pokey:pokey-serin pok))
+          "the newest byte wins, as hardware overwrites SERIN")
+      ;; SKREST ($D20A) restores bits 5-7.
+      (atari800-cl.bus:bus-write bus #xD20A 0)
+      (is (logtest (atari800-cl.pokey:pokey-skstat pok)
+                   atari800-cl.pokey:+skstat-skrest-mask+)
+          "SKREST must restore SKSTAT bits 5-7"))))
+
+(test pokey-serial-in-pending-clears-when-queue-drains
+  "The PENDING serial-rx bit clears once the last queued byte has landed,
+so an idle receiver costs POKEY-TICK / POKEY-ADVANCE nothing again."
+  (multiple-value-bind (pok cpu bus period) (%make-serial-fixture :irqen 0)
+    (declare (ignore bus))
+    (atari800-cl.pokey:pokey-queue-serial-in
+     pok `((100 . #x11) (0 . #x22) (1000 . #x33)))
+    (is (logtest (atari800-cl.pokey:pokey-pending pok)
+                 atari800-cl.pokey:+pokey-pending-serial-rx+))
+    ;; Total time: gap1 + byte + byte + gap2 + byte, plus slack.
+    (%tick-n-pokey pok cpu (+ 100 1000
+                              (* 3 (%serial-rx-byte-cycles period))
+                              10))
+    (is-false (logtest (atari800-cl.pokey:pokey-pending pok)
+                       atari800-cl.pokey:+pokey-pending-serial-rx+)
+              "drained queue must clear the PENDING bit")
+    (is-false (atari800-cl.pokey:pokey-serial-in-queue pok))
+    (is (zerop (atari800-cl.pokey:pokey-serial-in-cycles pok)))))
+
+(test pokey-reset-clears-serial-receiver
+  "RESET-POKEY empties SERIN, the receive queue, and the unread flag, and
+clears the PENDING serial-rx bit (the serial hooks, like AUDIO and INPUT
+attachments, survive)."
+  (multiple-value-bind (pok cpu bus period) (%make-serial-fixture :irqen 0)
+    (declare (ignore bus))
+    (atari800-cl.pokey:pokey-queue-serial-in pok '((0 . #x41) (0 . #x42)))
+    (%tick-n-pokey pok cpu (%serial-rx-byte-cycles period))
+    (atari800-cl.pokey:reset-pokey pok)
+    (is (zerop (atari800-cl.pokey:pokey-serin pok)))
+    (is-false (atari800-cl.pokey:pokey-serial-in-unread pok))
+    (is-false (atari800-cl.pokey:pokey-serial-in-queue pok))
+    (is (zerop (atari800-cl.pokey:pokey-serial-in-cycles pok)))
+    (is-false (logtest (atari800-cl.pokey:pokey-pending pok)
+                       atari800-cl.pokey:+pokey-pending-serial-rx+))
+    (is (= #xFF (atari800-cl.pokey:pokey-skstat pok))
+        "reset restores SKSTAT to its no-error value")))
+
+(test pokey-serial-in-without-irqen-bit-latches-nothing
+  "A landing byte with IRQEN bit 5 disabled raises no IRQ and latches
+nothing in IRQST — same acknowledge discipline as the timers."
+  (multiple-value-bind (pok cpu bus period) (%make-serial-fixture :irqen 0)
+    (declare (ignore bus))
+    (atari800-cl.pokey:pokey-queue-serial-in pok '((0 . #x41)))
+    (%tick-n-pokey pok cpu (%serial-rx-byte-cycles period))
+    (is-false (cpu-pending-irq cpu))
+    (is (= #xFF (atari800-cl.pokey:pokey-irqst pok))
+        "IRQST must stay idle for a disabled source")
+    ;; The byte still landed in SERIN — the data path is independent of
+    ;; the interrupt path, as on hardware.
+    (is (= #x41 (atari800-cl.pokey:pokey-serin pok)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Host input delegation (Stage 2)
