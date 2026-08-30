@@ -299,7 +299,7 @@ BUS-READ."
   (declare (type bus bus) (type u16 lo-addr hi-addr))
   (logior (bus-read bus lo-addr) (ash (bus-read bus hi-addr) 8)))
 
-(defun %status-drive-block (image)
+(defun status-drive-block (image)
   "Build the standard 4-byte 'S' (get status) command response for IMAGE.
 Byte 0 bit 0 is write-protect, bit 3 is double density (256-byte sectors);
 byte 1 is the controller hardware-status byte ($FF = no error, the
@@ -309,7 +309,11 @@ is a format-timeout placeholder ($E0, the value a real single-density
 codes documented at the top of this file are part of the fixed 16a/16c
 contract -- these exact bits are this file's own reasonable choice of 'a
 standard status block', not something the parallel minimal-xl agent's
-SIOV probe depends on bit-for-bit."
+SIOV probe depends on bit-for-bit.
+
+Exported (ROADMAP.md Phase 25b): the serial-wire disk device in
+src/sio.lisp answers the same 'S' command with this same block, so both
+transports report one status."
   (declare (type atr-image image))
   (list (logior (if (atr-image-read-only image) #x01 #x00)
                 (if (= (atr-image-sector-size image) 256) #x08 #x00))
@@ -336,7 +340,7 @@ two could ever go out of sync."
            (cond
              ((null image) +status-timeout+)
              ((= dcomnd +cmd-status+)
-              (loop for byte in (%status-drive-block image)
+              (loop for byte in (status-drive-block image)
                     for addr from dbuf
                     do (bus-write bus (logand addr #xFFFF) byte))
               +status-success+)

@@ -513,6 +513,9 @@
            ;; Protocol constants
            #:+signature+ #:+sig-offset+ #:+go-offset+
            #:+max-drives+
+           ;; Status block builder (shared with the serial-wire disk
+           ;; device, src/sio.lisp -- ROADMAP.md Phase 25b)
+           #:status-drive-block
            #:+device-disk+
            #:+cmd-status+ #:+cmd-read+ #:+cmd-write+ #:+cmd-write-verify+
            #:+status-success+ #:+status-none-yet+
