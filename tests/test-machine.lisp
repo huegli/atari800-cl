@@ -606,6 +606,74 @@ the OS expects."
                             "CPU must not have halted during the DOS boot"))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Phase 25 acceptance, asset-free half: the OS's own disk boot over the
+;;; wire.  The DOS-menu test above needs a real DOS ATR; this one synthesizes
+;;; the smallest disk the XL OS will boot -- a 1-sector ATR whose sector 1 is
+;;; a real boot record -- so the ADB -> status -> read-sector-1 -> EBL dance
+;;; runs entirely over the emulated wire whenever the ROMs are present, no
+;;; fetched asset required.
+
+(defun %make-boot-magic-atr-bytes ()
+  "A 1-sector single-density ATR whose sector 1 is a real XL OS boot
+record.  Layout verified against the OS source itself (ADB / CBI / EBL /
+IBS in minimal-xl/Atari_XL_OS_Rev.2.asm): byte 0 = drive flags, byte 1 =
+sector count, bytes 2/3 = load address, bytes 4/5 = init address (DOSINI),
+and EBL starts execution at load address + 6.  The record loads itself at
+$0600, its program (from offset 6) stores $A5/$5A to $0600/$0601 and
+returns carry-clear -- the good-boot signal CBI6 tests with BCS."
+  (let ((bytes (%make-sd-atr-bytes 1))
+        ;; LDA #$A5 / STA $0600 / LDA #$5A / STA $0601 / CLC / RTS
+        (code '(#xA9 #xA5  #x8D #x00 #x06
+                #xA9 #x5A  #x8D #x01 #x06
+                #x18 #x60)))
+    (flet ((sec1 (i) (+ 16 i)))              ; past the ATR header
+      (setf (aref bytes (sec1 1)) 1          ; sector count: this one only
+            (aref bytes (sec1 2)) #x00        ; load address $0600 (lo)
+            (aref bytes (sec1 3)) #x06        ;                (hi)
+            (aref bytes (sec1 4)) #x06        ; init address $0606 (lo)
+            (aref bytes (sec1 5)) #x06)       ;                (hi)
+      (loop for b in code
+            for i from 6
+            do (setf (aref bytes (sec1 i)) b)))
+    bytes))
+
+(test real-os-rom-boots-synthetic-boot-record-over-serial-wire
+  "Cold-boot the real OS ROM with the 1-sector boot-record ATR mounted
+and the boot record's program must run: the OS first issues an 'S'
+status command on drive 1 (ADB), reads sector 1 (GNS), parses the boot
+record, and jumps to load address + 6 (EBL) -- every byte of the
+transaction crossing the emulated serial wire.  $0600/$0601 holding
+$A5/$5A is the program's own signature."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (%skip-or-fail "OS/BASIC ROM images not found in roms/ (or via ~
+               $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM); ~
+               skipping the serial boot-record test.")
+        (progn
+          (atari800-cl.hostdev:mount-disk
+           (atari800-cl.machine:atari-machine-hostdev m) 1
+           (atari800-cl.hostdev:parse-atr-bytes (%make-boot-magic-atr-bytes)))
+          (let ((bus   (atari800-cl.machine:atari-machine-bus m))
+                (found nil))
+            ;; Checked every frame: the moment the signature appears the
+            ;; test stops the machine, before the OS's post-boot wander
+            ;; (no DOS was booted) can touch $0600 again.
+            (loop repeat 600
+                  until found
+                  do (atari800-cl.machine:machine-run-frame m)
+                     (when (and (= #xA5 (atari800-cl.bus:bus-read bus #x0600))
+                                (= #x5A (atari800-cl.bus:bus-read bus #x0601)))
+                       (setf found t)))
+            (is-true found
+                     "the boot record's program must have run over the ~
+                      wire ($0600=$~2,'0X, $0601=$~2,'0X)"
+                     (atari800-cl.bus:bus-read bus #x0600)
+                     (atari800-cl.bus:bus-read bus #x0601))
+            (is-false (atari800-cl.cpu:cpu-halted
+                       (atari800-cl.machine:atari-machine-cpu m))
+                      "CPU must not have halted during the serial boot"))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Typed input reaches BASIC through POKEY's keyboard IRQ (ROADMAP.md
 ;;; Phase 13) -- the real acceptance criterion: it exercises the keyboard
 ;;; IRQ, the OS editor, and BASIC's evaluator in one pass.

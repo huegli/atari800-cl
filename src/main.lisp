@@ -127,7 +127,11 @@ Returns MACHINE for chaining."
 ;;; ones from raw XEX/OBX binaries.  MAKE-MACHINE always builds a machine
 ;;; with a HOST-BRIDGE already attached (ATARI800-CL.MACHINE:MAKE-ATARI-
 ;;; MACHINE does this unconditionally), so these three functions work
-;;; against any MACHINE with no extra setup.
+;;; against any MACHINE with no extra setup.  Since ROADMAP.md Phase 25c
+;;; the machine's serial-wire SIO layer (src/sio.lisp) reads the same
+;;; bridge's drives vector live, so one mount serves BOTH transports:
+;;; the $D1xx shortcut and the emulated SIO wire the real OS boots
+;;; through.
 
 (defun mount-disk (machine unit path &key (read-only t))
   "Mount PATH (an .atr disk image file) into MACHINE's host disk bridge
@@ -135,7 +139,9 @@ at drive UNIT (1-8, i.e. D1: through D8:), replacing whatever was
 mounted there.  READ-ONLY defaults to true -- WRITE commands against a
 read-only image answer the SIO write-protect status; write SUPPORT
 itself does not exist yet regardless of this flag (see
-ATARI800-CL.HOSTDEV's package docstring).  Does not reset MACHINE; call
+ATARI800-CL.HOSTDEV's package docstring).  The mounted image is visible
+to both the $D1xx bridge and the serial-wire SIO layer (the real OS's
+SIO boot answers from it over the wire).  Does not reset MACHINE; call
 RESET-MACHINE afterward (or mount before the machine's first cold reset)
 so the OS's boot sequence sees the new disk.  Returns MACHINE for
 chaining."

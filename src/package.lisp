@@ -533,6 +533,32 @@
            #:+xex-sector-size+))
 
 ;;; ---------------------------------------------------------------------------
+;;; atari800-cl.sio — Serial-wire SIO device dispatch (src/sio.lisp,
+;;; ROADMAP.md Phase 25b).  Watches the bytes POKEY finishes transmitting
+;;; and answers SIO command frames on the receive side; disk handlers read
+;;; the host bridge's drives vector live, so one mount serves both
+;;; transports.
+
+(defpackage #:atari800-cl.sio
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.pokey #:atari800-cl.hostdev)
+  (:documentation "SIO serial-wire device dispatch: watches POKEY's
+transmitted bytes, answers command frames on the receive side (ROADMAP.md
+Phase 25b).")
+  (:export #:sio-bus
+           #:make-sio-bus
+           #:sio-bus-p
+           #:attach-sio-bus
+           #:reset-sio-bus
+           #:register-sio-device
+           #:register-sio-disk
+           #:make-sio-disk-device
+           ;; Wire bytes
+           #:+sio-ack+ #:+sio-complete+ #:+sio-error+ #:+sio-nak+
+           ;; Timing (CPU cycles; a scanline is 114)
+           #:+sio-ack-delay+ #:+sio-complete-delay+
+           #:+sio-command-frame-length+))
+
+;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.renderer — Per-scanline NTSC pixel renderer
 ;;;
 ;;; Depends on ANTIC (for display-list state) and GTIA (for color/sprite
@@ -562,7 +588,7 @@
         #:atari800-cl.cpu #:atari800-cl.bus #:atari800-cl.mmu
         #:atari800-cl.pia #:atari800-cl.antic #:atari800-cl.gtia
         #:atari800-cl.pokey #:atari800-cl.audio #:atari800-cl.irq
-        #:atari800-cl.hostdev)
+        #:atari800-cl.hostdev #:atari800-cl.sio)
   (:documentation "Atari 800 XL top-level machine + frame scheduler.")
   (:export #:atari-machine
            #:make-atari-machine
@@ -571,6 +597,7 @@
            #:atari-machine-antic #:atari-machine-gtia
            #:atari-machine-pokey
            #:atari-machine-hostdev
+           #:atari-machine-sio
            #:atari-machine-frame-count
            #:atari-machine-running-p
            #:atari-machine-input

@@ -86,6 +86,11 @@ Slots:
   HOSTDEV     — host disk bridge (ROADMAP.md Phase 16, revised) at $D1xx;
                 always present, so MOUNT-DISK et al. work on any machine,
                 but inert (open-bus $D1xx) until a disk is mounted into it.
+  SIO         — serial-wire device layer (ROADMAP.md Phase 25): watches
+                POKEY's transmitted bytes, answers SIO command frames on
+                the receive side.  Its disk handlers read HOSTDEV's drives
+                vector live, so one MOUNT-DISK serves both the $D1xx
+                bridge and the emulated wire.
   FRAME-COUNT — frames elapsed since the machine was constructed.
   RUNNING-P   — when true, MACHINE-RUN-LOOP free-runs frames; when false it
                 parks on the mailbox condvar (paused).
@@ -148,6 +153,7 @@ Slots:
   (gtia nil)
   (pokey nil)
   (hostdev nil)
+  (sio nil)
   (frame-count 0 :type fixnum)
   (running-p nil)
   (mailbox (make-command-mailbox))
@@ -210,16 +216,26 @@ at the bus.  The result is a machine that is ready for MACHINE-COLD-RESET."
          (gtia    (make-gtia))
          (pokey   (make-pokey))
          (hostdev (make-host-bridge))
+         (sio     (make-sio-bus))
          (machine (%make-atari-machine :cpu cpu :bus bus :mmu mmu
                                         :pia pia :antic antic
                                         :gtia gtia :pokey pokey
-                                        :hostdev hostdev)))
+                                        :hostdev hostdev :sio sio)))
     ;; Wire chip dispatch into the bus.
     (attach-pia     bus pia mmu)
     (attach-antic   bus antic cpu)
     (attach-gtia    bus gtia)
     (attach-pokey   bus pokey cpu)
     (attach-hostdev bus hostdev)
+    ;; Wire the serial-wire SIO layer (ROADMAP.md Phase 25c): POKEY's
+    ;; transmitted bytes reach SIO-WIRE-BYTE, and the disk handlers it
+    ;; registers read HOSTDEV's drives vector live -- the same mount
+    ;; serves both the $D1xx bridge above and the wire.  POKEY's PENDING
+    ;; serial bits keep the Phase 30 deferral gate honest: any in-flight
+    ;; transmission or queued reply makes POKEY-DEFERRABLE-P answer NIL,
+    ;; so the deferring loop never stretches a serial byte time.
+    (attach-sio-bus    sio pokey)
+    (register-sio-disk sio hostdev)
     ;; ROADMAP.md Phase 30 (30a): wrap POKEY's bus dispatch closures (just
     ;; installed by ATTACH-POKEY, above) so every $D2xx access syncs the
     ;; deferred lag first.
@@ -305,6 +321,11 @@ vector at $FFFC to set the initial PC.  Returns MACHINE."
     (cond (basic-rom (install-basic-rom bus basic-rom))
           (basic-path (install-basic-rom bus (load-rom-file basic-path))))
     (mmu-write-portb mmu #xFF)
+    ;; A cold reset mid-command-frame must not leave the SIO accumulator
+    ;; swallowing the OS's next frame at the wrong offset (ROADMAP.md
+    ;; Phase 25c).  Devices and the POKEY attachment survive, like every
+    ;; other emulator-level attachment.
+    (reset-sio-bus (atari-machine-sio machine))
     ;; P = $24 (U=1, I=1), matching RESET-CPU.  B is not a real status-
     ;; register bit on NMOS 6502 — it only exists in the copy of P a
     ;; BRK/IRQ pushes to the stack (STATUS-BYTE-FROM-PULL always forces

@@ -48,24 +48,9 @@
 ;;;; frame aligned.  A real write-protected 810 ACKs and then errors only
 ;;;; after swallowing the data frame; that dance buys nothing here.
 
-(defpackage #:atari800-cl.sio
-  (:use #:cl #:atari800-cl.compat #:atari800-cl.pokey #:atari800-cl.hostdev)
-  (:documentation "SIO serial-wire device dispatch: watches POKEY's
-transmitted bytes, answers command frames on the receive side (ROADMAP.md
-Phase 25b).")
-  (:export #:sio-bus
-           #:make-sio-bus
-           #:sio-bus-p
-           #:attach-sio-bus
-           #:reset-sio-bus
-           #:register-sio-device
-           #:register-sio-disk
-           #:make-sio-disk-device
-           ;; Wire bytes
-           #:+sio-ack+ #:+sio-complete+ #:+sio-error+ #:+sio-nak+
-           ;; Timing (CPU cycles; a scanline is 114)
-           #:+sio-ack-delay+ #:+sio-complete-delay+
-           #:+sio-command-frame-length+))
+;;; The DEFPACKAGE lives in src/package.lisp with every other package
+;;; (load order: package.lisp runs before this file, and
+;;; atari800-cl.machine's DEFPACKAGE :USEs this one).
 
 (in-package #:atari800-cl.sio)
 
