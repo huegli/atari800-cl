@@ -16,18 +16,37 @@
 ;;;;
 ;;;;   Read  $D1FE — signature byte +SIGNATURE+ ($A8) when a bridge is
 ;;;;                 attached.  (Every other $D1xx read, including $D1FE
-;;;;                 with no bridge attached, is open bus: $FF.)
+;;;;                 with no bridge attached, is open bus: $FF.)  This
+;;;;                 read also ARMS the go register: a deliberate client
+;;;;                 always probes the signature before asking for work
+;;;;                 (minimal_os.asm's SIO does exactly this before
+;;;;                 every operation).
 ;;;;   Read  $D1FF — status byte of the most recently executed operation;
 ;;;;                 $00 ("none yet") before the first write.
-;;;;   Write $D1FF — (any value) execute the SIO operation described by
-;;;;                 the standard DCB in RAM at $0300 (see the DCB-*
-;;;;                 offset constants below), transferring data through
-;;;;                 BUS-READ/BUS-WRITE (never by poking the RAM array
-;;;;                 directly, so the operation is indistinguishable from
-;;;;                 one the CPU could have done itself one byte at a
-;;;;                 time), then store the resulting status byte into
-;;;;                 DSTATS ($0303) AND latch it for the next $D1FF read.
+;;;;   Write $D1FF — execute the SIO operation described by the standard
+;;;;                 DCB in RAM at $0300 (see the DCB-* offset constants
+;;;;                 below), transferring data through BUS-READ/BUS-WRITE
+;;;;                 (never by poking the RAM array directly, so the
+;;;;                 operation is indistinguishable from one the CPU
+;;;;                 could have done itself one byte at a time), then
+;;;;                 store the resulting status byte into DSTATS ($0303)
+;;;;                 AND latch it for the next $D1FF read.  The write is
+;;;;                 ARMED-THEN-GO, one shot: it executes only if a
+;;;;                 $D1FE signature read happened since the last
+;;;;                 execution, and the arm is consumed either way.
 ;;;;   Write other — ignored.
+;;;;
+;;;; Why the arm handshake (ROADMAP.md Phase 25): the real XL OS uses
+;;;; $D1FF itself -- PDVS, "parallel device select" (Atari_XL_OS_Rev.2.asm
+;;;; EQU $938; the OS writes it at every SIOV entry, and GIN1/GIN2 rotate
+;;;; through device bits).  On stock hardware those strobes hit nothing;
+;;;; a bridge that executed a DCB on every write would race the OS's own
+;;;; serial transfer (it stores a status into DSTATS mid-SIO, and DIO's
+;;;; GETDAT/$40 is gone before the data phase arms -- a cold DOS boot
+;;;; degrades to BOOT ERROR).  The real OS never reads $D1FE, so the
+;;;; signature probe separates a deliberate client from the OS's strobes
+;;;; without changing the minimal-xl 16c client's own sequence (probe,
+;;;; then go).
 ;;;;
 ;;;; Status codes follow SIO convention: $01 success; $8A (138, "device
 ;;;; timeout") for an unknown device id, an unmounted unit, or an
@@ -251,9 +270,15 @@ Slots:
   DRIVES      — a length-+MAX-DRIVES+ simple-vector; index (UNIT - 1) holds
                 the ATR-IMAGE mounted at DUNIT UNIT, or NIL if empty.
   LAST-STATUS — the SIO status byte of the most recently executed 'go'
-                operation ($D1FF read); $00 before the first one."
+                operation ($D1FF read); $00 before the first one.
+  GO-ARMED    — whether a $D1FE signature read has armed the go register
+                since the last 'go' execution (see the wire protocol in
+                the file header: the arm handshake is what separates a
+                deliberate client's $D1FF write from the real OS's PDVS
+                device-select strobes, which must stay inert)."
   (drives (make-array +max-drives+ :initial-element nil) :type simple-vector)
-  (last-status +status-none-yet+ :type u8))
+  (last-status +status-none-yet+ :type u8)
+  (go-armed nil :type boolean))
 
 (defun %check-unit (unit)
   (unless (<= 1 unit +max-drives+)
@@ -360,27 +385,37 @@ two could ever go out of sync."
              (t +status-nak+)))))))
 
 (defun host-bridge-read (bridge address)
-  "Handle a bus read from the $D1xx range.  $D1FE returns +SIGNATURE+;
-$D1FF returns LAST-STATUS.  Every other offset returns $FF (open bus) --
-exactly what an unattached bridge already returns via the bus's own
-default fallthrough, so a probe of any other $D1xx address cannot
-distinguish 'bridge present, unused offset' from 'no bridge'."
+  "Handle a bus read from the $D1xx range.  $D1FE returns +SIGNATURE+ and
+arms the go register (the arm handshake a deliberate client performs
+before writing $D1FF -- see the file header); $D1FF returns LAST-STATUS.
+Every other offset returns $FF (open bus) -- exactly what an unattached
+bridge already returns via the bus's own default fallthrough, so a probe
+of any other $D1xx address cannot distinguish 'bridge present, unused
+offset' from 'no bridge'."
   (declare (type host-bridge bridge) (type u16 address))
   (let ((offset (logand address #xFF)))
-    (cond ((= offset +sig-offset+) +signature+)
+    (cond ((= offset +sig-offset+)
+           (setf (host-bridge-go-armed bridge) t)
+           +signature+)
           ((= offset +go-offset+) (host-bridge-last-status bridge))
           (t #xFF))))
 
 (defun host-bridge-write (bridge bus address value)
   "Handle a bus write into the $D1xx range.  Only $D1FF (the 'go'
-register) has any effect: writing any VALUE there executes the DCB-
-described SIO operation (see %HOSTDEV-EXECUTE) and latches the resulting
-status both into LAST-STATUS (for the next $D1FF read) and into DSTATS
-($0303, so the DCB itself carries the result exactly like a real SIOV
-call leaves it).  Every other $D1xx address is ignored."
+register) is armed-and-live: when a $D1FE signature read has armed it
+since the last execution, writing any VALUE executes the DCB-described
+SIO operation (see %HOSTDEV-EXECUTE) and latches the resulting status
+both into LAST-STATUS (for the next $D1FF read) and into DSTATS ($0303,
+so the DCB itself carries the result exactly like a real SIOV call
+leaves it); the arm is consumed either way.  Unarmed, the write is
+inert -- what the real OS's PDVS device-select strobes (one at every
+SIOV entry) must see, since a stock machine has nothing at $D1xx to
+answer them.  Every other $D1xx address is ignored."
   (declare (type host-bridge bridge) (type bus bus) (type u16 address)
            (ignore value))
-  (when (= (logand address #xFF) +go-offset+)
+  (when (and (= (logand address #xFF) +go-offset+)
+             (host-bridge-go-armed bridge))
+    (setf (host-bridge-go-armed bridge) nil)
     (let ((status (%hostdev-execute bridge bus)))
       (setf (host-bridge-last-status bridge) status)
       (bus-write bus +dcb-dstats+ status))))

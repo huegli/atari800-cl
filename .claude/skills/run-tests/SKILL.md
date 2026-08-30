@@ -37,8 +37,10 @@ a `Skip census:` block after FiveAM's own report -- one `SKIPPED: <test>
 (<reason>)` line per skipped check, or `(none)` -- so an asset-gated test
 that silently skipped can never hide inside a bare "N checks, 1 skip"
 count; `grep SKIPPED` a saved log to see exactly what did not run and why.
-Three tests are asset-gated this way: the Klaus functional test, the Tom
-Harte vectors, and the real-ROM boot tests. Set `ATARI800_CL_STRICT=1` (any
+Asset-gated tests: the Klaus functional test, the Tom Harte vectors, the
+Acid800 subset, and the real-ROM boot tests (including Phase 25's
+DOS-menu serial boot, which needs the DOS 2.5 ATR -- see the
+`fetch-test-vectors` skill). Set `ATARI800_CL_STRICT=1` (any
 non-empty value) to turn those skips into failures instead -- the gate to
 run on a machine that is supposed to have the assets before calling a phase
 done:

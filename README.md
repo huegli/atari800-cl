@@ -35,9 +35,12 @@ What's implemented:
 - **POKEY** -- four-channel timers with per-channel clock divider,
   hardware reload offsets (AUDF+4 at 1.79 MHz) and linked 16-bit
   channel pairs, IRQEN/IRQST latches (active-low) and timer-1/2/4
-  IRQs, 17- and 9-bit polynomial RNG behind RANDOM, and the
-  double-buffered serial transmitter's SEROR/SEROC interrupts (enough
-  for SIO to send a command frame and time out).
+  IRQs, 17- and 9-bit polynomial RNG behind RANDOM, and the serial
+  port's two halves: the double-buffered transmitter's SEROR/SEROC
+  interrupts and the receiver's SERIN register, serial-input-ready IRQ
+  (bit 5), and SKSTAT overrun bit -- together enough for whole SIO
+  transactions over the wire, not just sending a command frame and
+  timing out.
 - **POKEY audio** -- four-channel synthesis into mono 8-bit PCM at
   44 744 Hz: poly4/5/9/17 distortions, volume-only mode, and mixing,
   attached on demand with `machine-attach-audio` and collected with
@@ -78,17 +81,18 @@ What's implemented:
   against any machine. This is an emulator-side peripheral a real Atari
   OS ignores; software has to probe for it, which this project's own
   `minimal-xl` OS submodule does -- see `ROADMAP.md` Phase 16.
+- **The SIO serial wire.** `src/sio.lisp` answers SIO command frames on
+  POKEY's serial line: a mounted disk image (the same `MOUNT-DISK`
+  surface the host bridge uses) ACKs the frame, streams its data bytes
+  into SERIN through the serial-input-ready IRQ, and raises COMPLETE,
+  with the inter-frame gaps the OS's SIOV loop expects. With a DOS 2.5
+  ATR mounted and the real OS ROM, a cold boot with OPTION held (BASIC
+  off, as on real hardware) loads the boot record, DOS.SYS, and DUP.SYS
+  entirely through the wire and reaches the DOS menu --
+  `ROADMAP.md` Phase 25, whose acceptance test is exactly that boot.
 
 What's *not* yet implemented:
 
-- **The serial wire itself.** The host disk bridge above lets software
-  that probes for it (this project's own `minimal-xl` OS) load real
-  disk images without any serial traffic, but nothing emulates SIO's
-  byte-level wire protocol: POKEY raises the serial-output interrupts a
-  transfer needs, but no bits leave the chip and nothing is received on
-  it, so a real (non-bridge-aware) OS's SIO device transfers always time
-  out -- which is what lets the stock Atari OS's cold boot fall through
-  to BASIC with no disk attached. See `ROADMAP.md` Phase 25.
 - Light pen, cartridge mapper, and the right-cartridge slot.
 
 See `CHANGES.md` for a phase-by-phase summary of what each commit
@@ -693,16 +697,17 @@ atari800-cl/
   `antic_hiresbug`'s hi-res collision quirk) -- confirmed failing, but
   not yet traced to a specific cause.  See `ROADMAP.md` Phase 24 and
   `CHANGES.md` for what each test actually reports.
-- **No light pen and no SIO wire protocol.**  Joystick, console keys,
-  paddles and key codes come from an attached host input state
-  (`attach-input`); with none attached the registers read their idle
-  stubs -- PORTA $FF (no buttons), POT0-7 $FF, KBCODE 0, TRIG0-3
-  released.  POKEY's serial transmitter raises SEROR/SEROC but drives no
-  line, so a real OS's SIO transfers always end in a device timeout --
-  the host disk bridge (`ROADMAP.md` Phase 16; see "What's implemented"
-  above) sidesteps this for software that knows to probe for it, rather
-  than emulating the wire; genuine byte-level SIO receive remains
-  unmodelled (`ROADMAP.md` Phase 25).
+- **No light pen, and the SIO wire only knows the disk.**  Joystick,
+  console keys, paddles and key codes come from an attached host input
+  state (`attach-input`); with none attached the registers read their
+  idle stubs -- PORTA $FF (no buttons), POT0-7 $FF, KBCODE 0, TRIG0-3
+  released.  POKEY's serial line now carries full SIO transactions
+  (`ROADMAP.md` Phase 25): a mounted disk answers command frames
+  byte-by-byte through SERIN, which is how the real OS ROM boots DOS 2.5
+  to its menu.  But the device layer implements only that disk -- any
+  other device id (printer, RS-232, a cassette) times out, exactly as on
+  a machine with nothing attached, and the cassette's own tape encoding
+  is not modelled at all.
 - **No cartridge or right-cartridge support.**  $8000-$9FFF behaves
   as plain RAM with no mapper.
 

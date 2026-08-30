@@ -15,8 +15,9 @@ The emulated machine is functionally complete at the chip-state level:
 - **POKEY audio synthesis** (`src/audio.lisp`) -- four-channel polynomial distortion (poly4/5/9/17) + mixing into mono 8-bit PCM at ~44.7 kHz, attached on demand via `machine-attach-audio` so machines without audio pay only a NIL test per POKEY advance.
 - **Machine scheduler** -- `MACHINE-RUN-FRAME` runs one NTSC frame (29,868 clocks = 262 scanlines x 114 CPU cycles) scanline-by-scanline: `ANTIC-BEGIN-SCANLINE` fires the line's events and reports stolen cycles, the CPU executes against the line's remaining budget with POKEY advanced instruction-by-instruction, and `ANTIC-END-SCANLINE` closes the line.
 - **Pixel renderer** -- per-scanline 384x240 24-bit RGB framebuffer rendering (background + playfield modes 2-F + player/missile compositing with PRIOR arbitration), driven by the machine's per-scanline callback and pushed to clients over AESP video frames; `scripts/capture-screenshot.py` grabs PNG/PPM screenshots.
+- **SIO serial wire** (`src/sio.lisp`) -- POKEY's serial port both ways: the transmitter (Phase 22) plus SERIN / serial-input-ready IRQ / SKSTAT overrun (Phase 25a), with a device layer (Phase 25b) that answers command frames on the wire for mounted disk images, so a real-OS-ROM cold boot with OPTION held loads DOS 2.5 (boot record, DOS.SYS, DUP.SYS) entirely through the wire and reaches the DOS menu. The Phase 16 host bridge (`src/hostdev.lisp`, `$D1xx`) coexists for bridge-aware software; its `$D1FF` go register is arm-gated by a `$D1FE` signature probe because the real OS writes `$D1FF` as PDVS at every SIOV.
 
-What is *not* modelled: POKEY's two high-pass filters (AUDCTL bits 1-2) and two-tone serial mode, the SIO bus's receive side (no bits leave the chip and nothing answers a command frame, so every device transfer times out -- keyboard and BREAK IRQs, and the serial-output IRQs a transfer's send half needs, are both modelled), light pen, and cartridge mapping. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
+What is *not* modelled: POKEY's two high-pass filters (AUDCTL bits 1-2) and two-tone serial mode, light pen, cartridge mapping, and cassette tape encoding; the SIO device layer answers only the disk, so every other device id times out. See README.md "Known limitations" for the full list. Correctness, especially 6502 behavioral accuracy, is prioritized over performance.
 
 ## Build & Test Commands
 
@@ -88,9 +89,11 @@ Opcodes are defined via the `DEFOPCODE` macro which creates a named function (`O
 
 Tests use FiveAM. The root suite is `atari800-cl-suite` in `tests/test-suite.lisp`; each component file defines a child suite `:in` it: `compat-suite`, `memory-suite`, `cpu-suite`, `harte-suite`, `cpu-opcodes-suite`, `illegal-opcodes`, `mmu-suite`, `pia-suite`, `antic-suite`, `renderer-suite`, `gtia-suite`, `pokey-suite`, `machine-suite`, and `regression-suite`. Shared fixtures (`%MAKE-SYNTHETIC-OS-ROM`, `MAKE-TEST-MACHINE`, `WITH-CPU-STATE`, `%POKE`) live in `tests/test-helpers.lisp`. The test package `:import-from`s FiveAM symbols (not `:use`) to avoid name collisions between implementations.
 
-Three tests are asset-gated (need fetched data before they run): the Klaus
-Dormann 6502 functional test, the Tom Harte / SingleStepTests vectors, and
-Acid800. See the `fetch-test-vectors` skill for how to fetch and run them.
+Four tests are asset-gated (need fetched data before they run): the Klaus
+Dormann 6502 functional test, the Tom Harte / SingleStepTests vectors,
+Acid800, and the DOS 2.5 ATR behind the Phase 25 serial-boot acceptance
+test (`scripts/fetch-dos-atr.sh` or `$ATARI800_CL_DOS_ATR`). See the
+`fetch-test-vectors` skill for how to fetch and run them.
 **A Harte failure is presumed a real emulator bug**: fix it in `src/`, add
 a focused regression test to `tests/test-regressions.lisp` naming the
 opcode and case id, and only then consider the skip list.

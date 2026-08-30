@@ -1430,7 +1430,49 @@ Commit: "Add the Acid800 harness: CPU and ANTIC subsets under the real OS".
 
 ---
 
-## Phase 25 -- SIO receive path + serial-wire disk (deferred)
+## Phase 25 -- SIO receive path + serial-wire disk
+
+> **Done (2026-08-30)**, four commits: `5cf3fdd` (25a, POKEY's serial
+> receiver -- SERIN, the serial-input-ready IRQ, SKSTAT overrun, PENDING
+> bit 3, and the SERIAL-OUT-FN hook the device layer watches), `cdbe0be`
+> (25b, `src/sio.lisp`'s device dispatch -- registered devices watch the
+> transmitted command frame and reply with ACK / data / COMPLETE frames
+> through the receiver, reusing Phase 16b's ATR layer behind a disk
+> device), `30691da` (25c, mount-API routing so the same
+> `MOUNT-DISK`/`UNMOUNT-DISK` surface serves both the bridge and the
+> wire), and this close-out (the host-bridge `$D1FF` arm-gate fix, the
+> DOS ATR fetch script, and the acceptance test's boot configuration).
+>
+> The acceptance test `REAL-OS-ROM-BOOTS-DOS-MENU-OVER-SERIAL-WIRE`
+> passes on both implementations with no skips of its own: SBCL 3582
+> checks / 3566 pass / 16 skip / 0 fail, LispWorks 3585 / 3569 / 16 / 0
+> (the 16 skips are the usual gated or documented items -- Harte unset,
+> Acid800's known issues, and the two minimal-xl hostdev boots whose
+> submodule assets are not built in this worktree). The boot is
+> byte-honest: boot record, DOS.SYS (sectors 1-40), and DUP.SYS
+> (sectors 41-82) all cross the wire as SERIN bytes with the OS's
+> expected inter-frame delays -- the directory search for AUTORUN.SYS
+> correctly fails (status 170), and DUP.SYS is loaded only when the OS
+> takes its `JMP (DOSVEC)` handoff.
+>
+> Two findings the phase surfaced, both now part of the emulator's
+> contract. First, the real XL OS writes `$D1FF` itself -- PDVS, the
+> parallel-device-select register (Atari_XL_OS_Rev.2.asm EQU $938), once
+> per SIOV entry -- so the Phase 16 host bridge's "execute the DCB on
+> every `$D1FF` write" semantics raced the OS's own serial transfer:
+> the strobe executed the DCB mid-SIO and overwrote DIO's GETDAT
+> (`$40`) in DSTATS, degrading a DOS boot to BOOT ERROR. The go
+> register is now armed-then-go: only a `$D1FE` signature read (which
+> the real OS never performs) arms the next `$D1FF` write, one shot
+> (`tests/test-hostdev.lisp`'s `UNARMED-D1FF-WRITE-IS-INERT-REAL-OS-PDVS-
+> STROBE` is the regression). Second, the DOS menu is reachable only
+> with BASIC disabled, exactly as on real hardware: with BASIC enabled
+> the OS hands control to BASIC's READY prompt after DUPINIT (DUP.SYS
+> loads only when the user types DOS at the prompt, a jump through
+> DOSVEC), so the acceptance test attaches an input state with OPTION
+> held and asserts BASIC stayed unmapped -- the no-cartridge handoff
+> that makes the OS jump through DOSVEC, where DOS.SYS's stub loads
+> DUP.SYS and enters the menu.
 
 > This is the original Phase 16 plan, deferred on 2026-08-20 when the
 > revised Phase 16 (host disk bridge) replaced it: SIO fidelity is not

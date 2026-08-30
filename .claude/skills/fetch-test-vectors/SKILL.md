@@ -1,6 +1,6 @@
 ---
 name: fetch-test-vectors
-description: How to fetch and run the asset-gated CPU/ANTIC accuracy tests (Klaus Dormann functional test, Tom Harte SingleStepTests vectors, Acid800 hardware suite) for atari800-cl -- fetch scripts, env vars, subset flags, and strict mode.
+description: How to fetch and run the asset-gated accuracy tests (Klaus Dormann functional test, Tom Harte SingleStepTests vectors, Acid800 hardware suite, DOS 2.5 ATR serial-boot image) for atari800-cl -- fetch scripts, env vars, subset flags, and strict mode.
 ---
 
 # Asset-gated test vectors
@@ -70,4 +70,16 @@ documented divergences, not missing assets.
 
 Also see `CLAUDE.md`'s Build & Test Commands for the strict-mode skip
 census (`ATARI800_CL_STRICT=1`), which turns asset-gated skips (including
-these three) into failures.
+these) into failures.
+
+**The DOS 2.5 ATR** (`tests/test-machine.lisp`'s
+`REAL-OS-ROM-BOOTS-DOS-MENU-OVER-SERIAL-WIRE`, Phase 25's acceptance
+test) gates the serial-wire DOS boot: a real-OS-ROM cold boot with OPTION
+held must load the boot record, DOS.SYS, and DUP.SYS through POKEY's
+serial port and reach the DOS menu. `./scripts/fetch-dos-atr.sh` (or
+`$ATARI800_CL_DOS_ATR` pointing at any DOS 2.5 image) fetches it:
+
+```sh
+./scripts/fetch-dos-atr.sh
+./scripts/test-sbcl.sh
+```

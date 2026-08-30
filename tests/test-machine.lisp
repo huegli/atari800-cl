@@ -573,11 +573,16 @@ without them the OS spins forever waiting for XMTDON."
 ;;; strict mode, exactly like the boot tests above.
 
 (test real-os-rom-boots-dos-menu-over-serial-wire
-  "Mount a DOS 2.5 ATR on drive 1, cold-boot the real OS ROM, and the DOS
-menu (DUP.SYS's \"DISK DIRECTORY\" entry) must appear in screen memory.
-Every sector load crosses the emulated serial wire: boot record, DOS.SYS,
-and DUP.SYS all arrive as POKEY SERIN bytes with the inter-frame delays
-the OS expects."
+  "Mount a DOS 2.5 ATR on drive 1, cold-boot the real OS ROM with OPTION
+held -- exactly how a real 800XL reaches the DOS menu: with BASIC enabled
+the OS hands control to BASIC's READY prompt after DUPINIT (DUP.SYS is
+then loaded only when the user types DOS at the prompt, a jump through
+DOSVEC), while with OPTION held there is no cartridge and the boot ends
+in the OS's JMP (DOSVEC) handoff, through which DOS.SYS's stub loads
+DUP.SYS and enters the menu.  The DOS menu (its \"DISK DIRECTORY\"
+entry) must appear in screen memory.  Every sector load crosses the
+emulated serial wire: boot record, DOS.SYS, and DUP.SYS all arrive as
+POKEY SERIN bytes with the inter-frame delays the OS expects."
   (let ((atr (%find-rom "ATARI800_CL_DOS_ATR" *dos-atr-candidates*)))
     (if (null atr)
         (%skip-or-fail "no DOS ATR found in roms/ (or via ~
@@ -589,21 +594,31 @@ the OS expects."
               (progn
                 (atari800-cl.hostdev:mount-disk-file
                  (atari800-cl.machine:atari-machine-hostdev m) 1 atr)
-                (let ((found nil))
-                  (loop repeat 3000
-                        until found
-                        do (atari800-cl.machine:machine-run-frame m)
-                           (when (zerop (mod
-                                         (atari800-cl.machine:atari-machine-frame-count m)
-                                         50))
+                ;; OPTION held through the boot: GTIA CONSOL reports it
+                ;; pressed, the OS leaves BASIC unmapped, and the boot
+                ;; ends in the no-cartridge JMP (DOSVEC) handoff.
+                (let ((in (atari800-cl.input:make-input-state)))
+                  (atari800-cl.machine:attach-input m in)
+                  (atari800-cl.input:input-set-console in :option t)
+                  (let ((found nil))
+                    (loop repeat 3000
+                          until found
+                          do (atari800-cl.machine:machine-run-frame m)
+                             (when (zerop (mod
+                                           (atari800-cl.machine:atari-machine-frame-count m)
+                                           50))
                              (setf found (%screen-contains-p m "DISK DIRECTORY"))))
-                  (is-true found
-                           "the DOS menu must appear within 3000 frames ~
-                            (row 0: ~S)"
-                           (%screen-row-text m 0))
-                  (is-false (atari800-cl.cpu:cpu-halted
-                             (atari800-cl.machine:atari-machine-cpu m))
-                            "CPU must not have halted during the DOS boot"))))))))
+                    (is-true found
+                             "the DOS menu must appear within 3000 frames ~
+                              (row 0: ~S)"
+                             (%screen-row-text m 0))
+                    (is-false (atari800-cl.cpu:cpu-halted
+                               (atari800-cl.machine:atari-machine-cpu m))
+                              "CPU must not have halted during the DOS boot")
+                    (is-false (getf (atari800-cl.machine:machine-portb-state m)
+                                    :basic-rom-mapped)
+                              "BASIC must stay unmapped: OPTION was held, so ~
+                               the OS takes the no-cartridge handoff")))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Phase 25 acceptance, asset-free half: the OS's own disk boot over the

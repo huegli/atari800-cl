@@ -3,6 +3,57 @@
 A flat log of what each build phase delivered, in commit order.
 For deeper detail see `git log` on the corresponding feature branch.
 
+## ROADMAP Phase 25 -- SIO receive path + serial-wire disk
+
+The missing half of SIO: POKEY could send a command frame (Phase 22)
+but nothing ever answered it, so every device transfer timed out and
+the only disk loading was the Phase 16 host bridge, which real software
+never touches. Phase 25 closes the wire, in four commits.
+
+`5cf3fdd` (25a) gives POKEY its receiver: SERIN, the serial-input-ready
+IRQ (IRQEN bit 5, the interrupt the XL OS's IRIR handler serves), the
+SKSTAT overrun bit (active-low, with SKREST restoring it), and PENDING
+bit 3 as the receive-side twin of the transmitter's charge flags -- all
+clocked from a wire schedule of gap/byte pairs so the device layer can
+time replies the way a real drive does. `cdbe0be` (25b) adds
+`src/sio.lisp`: devices register by id and watch the transmitted
+command frame through a hook on the transmitter, then answer with the
+ACK / data / COMPLETE frame sequence and the inter-frame gaps the OS's
+SIOV loop expects -- the disk device reuses Phase 16b's ATR layer
+unchanged. `30691da` (25c) routes the existing mount API to the serial
+layer too, so `MOUNT-DISK` serves both the bridge and the wire.
+
+The close-out commit makes the acceptance test real. Two findings:
+
+The real XL OS writes `$D1FF` itself -- PDVS, the parallel-device-select
+register (Atari_XL_OS_Rev.2.asm EQU $938), once per SIOV entry -- which
+collided with the host bridge's "execute the DCB on every `$D1FF`
+write" semantics: the strobe ran the DCB mid-SIO and overwrote DIO's
+GETDAT (`$40`) in DSTATS, so the serial data phase never armed and a
+DOS boot degraded to BOOT ERROR. The go register is now armed-then-go:
+a `$D1FE` signature read (which the real OS never performs) arms
+exactly one subsequent `$D1FF` write; everything else is inert, as on
+stock hardware where the strobes hit nothing.
+
+And the DOS menu is only reachable with BASIC disabled, exactly as on
+real hardware: with BASIC enabled the OS hands control to BASIC's READY
+prompt after DUPINIT finishes (DUP.SYS loads only when the user types
+DOS at the prompt, a jump through DOSVEC), while with OPTION held there
+is no cartridge and the boot ends in the OS's `JMP (DOSVEC)` handoff,
+through which DOS.SYS's stub loads DUP.SYS and enters the menu. The
+acceptance test `REAL-OS-ROM-BOOTS-DOS-MENU-OVER-SERIAL-WIRE` therefore
+boots with an input state holding OPTION and asserts BASIC stayed
+unmapped; `scripts/fetch-dos-atr.sh` fetches the disk (or set
+`$ATARI800_CL_DOS_ATR`). The boot is byte-honest: boot record, DOS.SYS
+(sectors 1-40), and DUP.SYS (sectors 41-82) all arrive as SERIN bytes,
+the AUTORUN.SYS directory search correctly fails with status 170, and
+the menu appears around frame 600. Suite green on both implementations:
+SBCL 3582 checks / 3566 pass / 16 skip / 0 fail, LispWorks 3585 / 3569
+/ 16 / 0 (skips are the usual gated or documented items, none of them
+new). No optimization: bench deltas were noise-level in 25a and the
+close-out touches only the `$D1xx` range, so `PERFORMANCE_LOG.md` has
+no new entry.
+
 ## Bench harness: LispWorks workload drivers now compiled
 
 `scripts/bench-lispworks.lisp` used to `LOAD` `scripts/bench.lisp` as
