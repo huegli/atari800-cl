@@ -1,5 +1,7 @@
 # atari800-cl
 
+[![CI](https://github.com/huegli/atari800-cl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/huegli/atari800-cl/actions/workflows/ci.yml)
+
 A headless Atari 800 XL emulator written in portable Common Lisp.
 
 This is the scaffold for a clean-room Atari 800 XL emulator targeting

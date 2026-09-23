@@ -46,6 +46,21 @@ listener caveat, `ATARI800_CL_STRICT` / skip-census asset-gated tests, the
 `asdf:test-system` exit-code gotcha, and legacy manual SBCL/LispWorks shell
 invocations for running a single test or suite.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs `./scripts/test-sbcl.sh` on every push to
+`main` and every PR targeting `main`, after fetching the Klaus Dormann
+functional test. It runs non-strict, so the Harte vectors and the
+real-ROM boot tests skip; the job summary prints the skip census.
+
+**CI covers SBCL only, so it does not enforce the "green on both" rule
+above.** LispWorks is commercial and cannot run on a GitHub-hosted
+runner, so `./scripts/test-lispworks.sh` remains a manual step you run
+before committing. `.github/workflows/lispworks.yml` is a
+workflow_dispatch-only stub that closes the gap once a machine with
+licensed LispWorks is registered as a self-hosted runner labelled
+`lispworks`; its header comment lists the activation steps.
+
 ## Benchmarking
 
 Frame-rate benchmark harness for measuring optimization deltas
