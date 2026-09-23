@@ -82,6 +82,46 @@ build is what `./scripts/test-lispworks.sh` runs without it.
 > status off `fiveam:run!`, which returns `T` only when every check
 > passes. The commands below do this (exit 0 = all pass, 1 = failure).
 
+**Missing Quicklisp dependency trap (`MISSING-DEPENDENCY` for `closer-mop`
+et al).** The wrapper scripts deliberately point ASDF's source-registry at
+only two trees: this repository and `$QUICKLISP_SOFTWARE` (default
+`~/quicklisp/dists/quicklisp/software`) -- see the design goals above. They
+do **not** include `~/quicklisp/local-projects`. If a system is registered
+with ASDF only via `local-projects` (for example, a `closer-mop` or
+`parachute` pulled in by a different local package manager such as ocicl
+living under `~/quicklisp/local-projects/*/ocicl/`) but was never actually
+installed into the Quicklisp software tree, you get a confusing split:
+
+- A plain `(ql:quickload :shasht)` in an ordinary Quicklisp REPL
+  "succeeds" silently, because ASDF's *default* (non-overridden)
+  source-registry already resolves `closer-mop` via `local-projects` --
+  Quicklisp never notices anything is missing from its own tree and skips
+  its normal download.
+- `./scripts/test-sbcl.sh` / `./scripts/test-lispworks.sh` then fail with
+  `ASDF/FIND-COMPONENT:MISSING-DEPENDENCY ... Component :CLOSER-MOP not
+  found, required by #<SYSTEM "shasht">` (or the same for `:parachute`,
+  `shasht`'s test-op dependency), because their restricted source-registry
+  can't see `local-projects` and the system was never physically present
+  under `dists/quicklisp/software`.
+
+`shasht` (JSON parsing for the Harte vector suite, `tests/test-harte.lisp`)
+is the system that pulls this in: `shasht` needs `trivial-do` and
+`closer-mop`; `shasht/test` additionally needs `alexandria` and
+`parachute`. Fix by force-installing straight into the Quicklisp software
+tree (bypasses the `local-projects` short-circuit above):
+
+```sh
+sbcl --noinform --non-interactive \
+  --eval '(load "~/quicklisp/setup.lisp")' \
+  --eval '(dolist (s (list "closer-mop" "parachute"))
+            (ql-dist:ensure-installed (ql-dist:find-system s)))'
+```
+
+Verify with `ls ~/quicklisp/dists/quicklisp/software/ | grep -E
+"closer-mop|parachute"` before re-running the test scripts. This is a
+one-time, per-machine fix (like the ROMs/vectors themselves), not something
+the project's `.asd` files can work around.
+
 Legacy manual shell form for **SBCL** (`.sbclrc` loads Quicklisp before `--eval`; prefer `./scripts/test-sbcl.sh` for automation):
 ```sh
 sbcl --non-interactive \
