@@ -457,8 +457,8 @@ and say so in the commit message.
 | 16    | Host disk bridge + virtual disk (revised)    | 21         | no       | done   |
 | 17    | Harte bus-trace comparison                   | 12         | yes      | done   |
 | 18    | LispWorks profiling pass                     | --          | yes      | done   |
-| 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | open   |
-| 20    | ANTIC display-list latch note (misc item 10) | --          | no       | open   |
+| 19    | 256-entry palette (GTIA mode 9 luminances)   | 7          | no       | done   |
+| 20    | ANTIC display-list latch note (misc item 10) | --          | no       | done   |
 | 21    | Strict test gate + skip census               | --          | no       | done   |
 | 22    | POKEY pending-work bitmask                   | --          | yes      | done   |
 | 23    | CONFIRM retirement pass                      | --          | no       | done   |

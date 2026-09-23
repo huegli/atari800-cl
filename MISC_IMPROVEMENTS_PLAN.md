@@ -24,8 +24,11 @@
 > symbols (`flag-set?`, `run-cpu` with a memory arg,
 > `+color-clocks-per-scanline+`) found no live drift -- every hit was
 > either this plan's own text or a historical CHANGES.md/ROADMAP.md
-> record of the rename itself. Item 10 remains open, scheduled as
-> ROADMAP.md Phase 20.
+> record of the rename itself. **Item 10 done (2026-08-23) via
+> ROADMAP.md Phase 20**: documentation only, an honest comment block
+> in `src/antic.lisp` at the VBI re-latch and the DLISTL/H write cases
+> describing the divergence, cross-referencing SCANLINE_ACCURACY_PLAN.md
+> Phase 4+ and the `ACID800-ANTIC-DLISTWRAP` test that exercises it.
 
 Everything from the project review that belongs to neither
 SCANLINE_ACCURACY_PLAN.md nor PERFORMANCE_PLAN.md. Items are independent
