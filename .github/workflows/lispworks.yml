@@ -1,0 +1,67 @@
+# LispWorks half of CLAUDE.md's "must pass on BOTH SBCL and LispWorks"
+# rule. INACTIVE BY DEFAULT: LispWorks is commercial and cannot run on a
+# GitHub-hosted runner, so this job is workflow_dispatch-only and will
+# never fire on push or PR. It is a stub kept ready to switch on.
+#
+# To activate:
+#   1. Install licensed LispWorks on a machine whose `lw-console` is on
+#      PATH (or set the LW_CONSOLE env var to the console executable).
+#   2. Register that machine as a GitHub self-hosted runner for this
+#      repository with the label `lispworks`
+#      (Settings -> Actions -> Runners -> New self-hosted runner).
+#   3. Ensure the Quicklisp software tree exists there with this
+#      project's dependencies installed -- see the run-tests skill for
+#      the closer-mop / parachute local-projects trap, which DOES apply
+#      to a long-lived self-hosted runner (unlike the clean hosted
+#      runner in ci.yml).
+#   4. Add push/pull_request triggers below, matching ci.yml.
+#
+# Until then, running the LispWorks suite is a manual pre-commit step:
+#   ./scripts/test-lispworks.sh
+name: CI (LispWorks, self-hosted)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-lispworks:
+    name: Test suite (LispWorks)
+    runs-on: [self-hosted, lispworks]
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same posture as ci.yml: non-strict, so asset-gated tests skip
+      # rather than fail when the ROMs and Harte vectors are absent.
+      - name: Run test suite
+        shell: bash
+        run: ./scripts/test-lispworks.sh 2>&1 | tee "$RUNNER_TEMP/test-lispworks.log"
+
+      # ROADMAP.md Phase 26 audit build. LispWorks-only: it forces
+      # FAST-AREF's (safety 0) carve-out back to the fully-checked form
+      # and routes the run to a separate .cache/fasls-checked/ tree.
+      # Uncomment to make every run also prove the carve-out is sound.
+      # - name: Run test suite (checked FAST-AREF audit build)
+      #   shell: bash
+      #   env:
+      #     ATARI800_CL_CHECKED_AREF: 1
+      #   run: ./scripts/test-lispworks.sh
+
+      - name: Report skip census
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Skip census (LispWorks)'
+            echo ''
+            echo '```'
+            if [ -f "$RUNNER_TEMP/test-lispworks.log" ]; then
+              grep -A3 'Did [0-9]* checks' "$RUNNER_TEMP/test-lispworks.log" || true
+              echo ''
+              sed -n '/^Skip census:/,$p' "$RUNNER_TEMP/test-lispworks.log"
+            else
+              echo '(test suite did not run; no log produced)'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

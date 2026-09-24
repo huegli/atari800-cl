@@ -1,0 +1,92 @@
+# SBCL test suite on every push to main and every PR targeting main.
+#
+# This workflow covers ONLY SBCL. CLAUDE.md's rule is that the suite must
+# be green on both SBCL and LispWorks, but LispWorks is commercial and
+# cannot be installed on a GitHub-hosted runner, so the LispWorks half
+# stays a manual pre-commit step. See .github/workflows/lispworks.yml for
+# the self-hosted job that would close that gap.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-sbcl:
+    name: Test suite (SBCL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbcl
+          sbcl --version
+
+      # Keyed on the .asd so a dependency change forces a clean reinstall
+      # of the Quicklisp software tree rather than reusing a stale one.
+      - name: Cache Quicklisp
+        id: ql-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/quicklisp
+          key: quicklisp-${{ runner.os }}-${{ hashFiles('atari800-cl.asd') }}
+
+      # Installs into ~/quicklisp/dists/quicklisp/software, which is where
+      # scripts/test-sbcl.sh's QUICKLISP_SOFTWARE default points. A fresh
+      # runner has no ~/quicklisp/local-projects, so the closer-mop /
+      # parachute split documented in the run-tests skill cannot occur
+      # here -- shasht pulls trivial-do and closer-mop into the software
+      # tree normally.
+      - name: Install Quicklisp and dependencies
+        if: steps.ql-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/quicklisp.lisp" https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --noinform --no-userinit --non-interactive \
+            --load "$RUNNER_TEMP/quicklisp.lisp" \
+            --eval '(quicklisp-quickstart:install :path "~/quicklisp/")' \
+            --eval '(ql:quickload (list :bordeaux-threads :usocket :flexi-streams :fiveam :shasht))'
+
+      # The Klaus Dormann 6502 functional test: a single 64 KiB binary,
+      # sha256-pinned in the fetch script, landing in roms/ where
+      # tests/test-cpu.lisp looks for it. The script exits nonzero on a
+      # hash mismatch, so an upstream rebuild fails the job loudly instead
+      # of silently degrading that test to a skip.
+      - name: Fetch Klaus Dormann functional test
+        run: ./scripts/fetch-test-roms.sh
+
+      # Deliberately NOT ATARI800_CL_STRICT=1: the Atari OS ROMs are
+      # copyrighted and the Harte vectors are a ~1 GB fetch, so those
+      # tests are expected to skip here. The skip census below keeps that
+      # visible rather than hidden behind a green check.
+      - name: Run test suite
+        shell: bash
+        run: ./scripts/test-sbcl.sh 2>&1 | tee "$RUNNER_TEMP/test-sbcl.log"
+
+      - name: Report skip census
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Skip census (SBCL)'
+            echo ''
+            echo '```'
+            if [ -f "$RUNNER_TEMP/test-sbcl.log" ]; then
+              grep -A3 'Did [0-9]* checks' "$RUNNER_TEMP/test-sbcl.log" || true
+              echo ''
+              sed -n '/^Skip census:/,$p' "$RUNNER_TEMP/test-sbcl.log"
+            else
+              echo '(test suite did not run; no log produced)'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
