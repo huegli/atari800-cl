@@ -439,6 +439,14 @@ detaching with NIL clears them."
 (defparameter *basic-rom-candidates* '("ataribas.rom" "ATARIBAS.ROM")
   "Filenames to try for the 8 KiB BASIC ROM, in preference order.")
 
+(defparameter *dos-atr-candidates*
+  '("dos25.atr" "DOS25.ATR" "dos.atr" "DOS.ATR" "dos2_5.atr" "dos25s.atr")
+  "Filenames to try for a DOS 2.5 ATR disk image, in preference order.  A
+bootable DOS disk is what the Phase 25 serial-wire acceptance test mounts
+(ROADMAP.md: with a DOS 2.5 ATR mounted and the real OS ROM, a cold boot
+reaches the DOS menu).  $ATARI800_CL_DOS_ATR overrides the list, as with
+the ROMs.")
+
 (defun %rom-search-directories ()
   "Directories to look in for ROM images: roms/ under the ASDF system
 source directory, then roms/ under the current working directory."
@@ -547,6 +555,202 @@ without them the OS spins forever waiting for XMTDON."
           (is-true (getf (atari800-cl.machine:machine-portb-state m)
                          :basic-rom-mapped)
                    "BASIC ROM must be mapped once the prompt is up")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 25 acceptance: DOS boots over the SIO serial wire.
+;;;
+;;; ROADMAP.md Phase 25: "with a DOS 2.5 ATR mounted and the real OS ROM,
+;;; a cold boot reaches the DOS menu."  This is the receive path's
+;;; acceptance test — the OS sends its SIO command frames over the
+;;; transmitter (Phase 22) and reads the drive's ACK/COMPLETE/data frames
+;;; back through SERIN and the serial-input-ready IRQ (Phase 25a), served
+;;; by the serial device layer (Phase 25b) that the mount API routes to
+;;; (Phase 25c).  No emulator shortcut is involved: the only disk the
+;;; machine has is the mounted ATR, and every byte of DOS.SYS arrives
+;;; through POKEY.
+;;;
+;;; Skips when the ATR (or the ROMs) are absent, becoming a failure in
+;;; strict mode, exactly like the boot tests above.
+
+(test real-os-rom-boots-dos-menu-over-serial-wire
+  "Mount a DOS 2.5 ATR on drive 1, cold-boot the real OS ROM with OPTION
+held -- exactly how a real 800XL reaches the DOS menu: with BASIC enabled
+the OS hands control to BASIC's READY prompt after DUPINIT (DUP.SYS is
+then loaded only when the user types DOS at the prompt, a jump through
+DOSVEC), while with OPTION held there is no cartridge and the boot ends
+in the OS's JMP (DOSVEC) handoff, through which DOS.SYS's stub loads
+DUP.SYS and enters the menu.  The DOS menu (its \"DISK DIRECTORY\"
+entry) must appear in screen memory.  Every sector load crosses the
+emulated serial wire: boot record, DOS.SYS, and DUP.SYS all arrive as
+POKEY SERIN bytes with the inter-frame delays the OS expects."
+  (let ((atr (%find-rom "ATARI800_CL_DOS_ATR" *dos-atr-candidates*)))
+    (if (null atr)
+        (%skip-or-fail "no DOS ATR found in roms/ (or via ~
+               $ATARI800_CL_DOS_ATR); skipping the DOS-menu serial boot test.")
+        (let ((m (%boot-machine-with-real-roms)))
+          (if (null m)
+              (%skip-or-fail "OS/BASIC ROM images not found; ~
+               skipping the DOS-menu serial boot test.")
+              (progn
+                (atari800-cl.hostdev:mount-disk-file
+                 (atari800-cl.machine:atari-machine-hostdev m) 1 atr)
+                ;; OPTION held through the boot: GTIA CONSOL reports it
+                ;; pressed, the OS leaves BASIC unmapped, and the boot
+                ;; ends in the no-cartridge JMP (DOSVEC) handoff.
+                (let ((in (atari800-cl.input:make-input-state)))
+                  (atari800-cl.machine:attach-input m in)
+                  (atari800-cl.input:input-set-console in :option t)
+                  (let ((found nil))
+                    (loop repeat 3000
+                          until found
+                          do (atari800-cl.machine:machine-run-frame m)
+                             (when (zerop (mod
+                                           (atari800-cl.machine:atari-machine-frame-count m)
+                                           50))
+                             (setf found (%screen-contains-p m "DISK DIRECTORY"))))
+                    (is-true found
+                             "the DOS menu must appear within 3000 frames ~
+                              (row 0: ~S)"
+                             (%screen-row-text m 0))
+                    (is-false (atari800-cl.cpu:cpu-halted
+                               (atari800-cl.machine:atari-machine-cpu m))
+                              "CPU must not have halted during the DOS boot")
+                    (is-false (getf (atari800-cl.machine:machine-portb-state m)
+                                    :basic-rom-mapped)
+                              "BASIC must stay unmapped: OPTION was held, so ~
+                               the OS takes the no-cartridge handoff")))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 25 acceptance, asset-free half: the OS's own disk boot over the
+;;; wire.  The DOS-menu test above needs a real DOS ATR; this one synthesizes
+;;; the smallest disk the XL OS will boot -- a 1-sector ATR whose sector 1 is
+;;; a real boot record -- so the ADB -> status -> read-sector-1 -> EBL dance
+;;; runs entirely over the emulated wire whenever the ROMs are present, no
+;;; fetched asset required.
+
+(defun %make-boot-magic-atr-bytes ()
+  "A 1-sector single-density ATR whose sector 1 is a real XL OS boot
+record.  Layout verified against the OS source itself (ADB / CBI / EBL /
+IBS in minimal-xl/Atari_XL_OS_Rev.2.asm): byte 0 = drive flags, byte 1 =
+sector count, bytes 2/3 = load address, bytes 4/5 = init address (DOSINI),
+and EBL starts execution at load address + 6.  The record loads itself at
+$0600, its program (from offset 6) stores $A5/$5A to $0600/$0601 and
+returns carry-clear -- the good-boot signal CBI6 tests with BCS."
+  (let ((bytes (%make-sd-atr-bytes 1))
+        ;; LDA #$A5 / STA $0600 / LDA #$5A / STA $0601 / CLC / RTS
+        (code '(#xA9 #xA5  #x8D #x00 #x06
+                #xA9 #x5A  #x8D #x01 #x06
+                #x18 #x60)))
+    (flet ((sec1 (i) (+ 16 i)))              ; past the ATR header
+      (setf (aref bytes (sec1 1)) 1          ; sector count: this one only
+            (aref bytes (sec1 2)) #x00        ; load address $0600 (lo)
+            (aref bytes (sec1 3)) #x06        ;                (hi)
+            (aref bytes (sec1 4)) #x06        ; init address $0606 (lo)
+            (aref bytes (sec1 5)) #x06)       ;                (hi)
+      (loop for b in code
+            for i from 6
+            do (setf (aref bytes (sec1 i)) b)))
+    bytes))
+
+(test real-os-rom-boots-synthetic-boot-record-over-serial-wire
+  "Cold-boot the real OS ROM with the 1-sector boot-record ATR mounted
+and the boot record's program must run: the OS first issues an 'S'
+status command on drive 1 (ADB), reads sector 1 (GNS), parses the boot
+record, and jumps to load address + 6 (EBL) -- every byte of the
+transaction crossing the emulated serial wire.  $0600/$0601 holding
+$A5/$5A is the program's own signature."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (%skip-or-fail "OS/BASIC ROM images not found in roms/ (or via ~
+               $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM); ~
+               skipping the serial boot-record test.")
+        (progn
+          (atari800-cl.hostdev:mount-disk
+           (atari800-cl.machine:atari-machine-hostdev m) 1
+           (atari800-cl.hostdev:parse-atr-bytes (%make-boot-magic-atr-bytes)))
+          (let ((bus   (atari800-cl.machine:atari-machine-bus m))
+                (found nil))
+            ;; Checked every frame: the moment the signature appears the
+            ;; test stops the machine, before the OS's post-boot wander
+            ;; (no DOS was booted) can touch $0600 again.
+            (loop repeat 600
+                  until found
+                  do (atari800-cl.machine:machine-run-frame m)
+                     (when (and (= #xA5 (atari800-cl.bus:bus-read bus #x0600))
+                                (= #x5A (atari800-cl.bus:bus-read bus #x0601)))
+                       (setf found t)))
+            (is-true found
+                     "the boot record's program must have run over the ~
+                      wire ($0600=$~2,'0X, $0601=$~2,'0X)"
+                     (atari800-cl.bus:bus-read bus #x0600)
+                     (atari800-cl.bus:bus-read bus #x0601))
+            (is-false (atari800-cl.cpu:cpu-halted
+                       (atari800-cl.machine:atari-machine-cpu m))
+                      "CPU must not have halted during the serial boot"))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 25 control: the wire is load-bearing.
+;;;
+;;; Both serial-boot tests above mount through the HOST-BRIDGE's drives
+;;; vector, which the $D1xx device (Phase 16) and the serial device layer
+;;; (Phase 25b) both read live.  That shared mount is what makes "one
+;;; mount, both transports" work -- and it is also what leaves those
+;;; tests, on their own, unable to tell "booted over the wire" from
+;;; "booted through the bridge": both would pass either way.  This
+;;; control settles it.  Identical setup, one change -- every serial-wire
+;;; drive id answers silence -- so the bridge is the only device left
+;;; standing, and it must not be enough.
+;;;
+;;; This is the regression the close-out's $D1FF arm-gate guards.  The
+;;; real XL OS strobes $D1FF as PDVS (parallel device select) at every
+;;; SIOV entry; with the execute-on-every-write go register the bridge
+;;; originally had, those strobes could drive a transfer the wire never
+;;; carried.  UNARMED-D1FF-WRITE-IS-INERT-REAL-OS-PDVS-STROBE
+;;; (tests/test-hostdev.lisp) pins the gate at the register; this pins
+;;; the consequence at the boot.
+
+(test serial-wire-silenced-boot-record-does-not-run
+  "The mirror of REAL-OS-ROM-BOOTS-SYNTHETIC-BOOT-RECORD-OVER-SERIAL-WIRE:
+same ROMs, the same 1-sector boot-record ATR mounted on drive 1, the same
+frame budget -- but every serial-wire drive id ($31-$38) is registered as
+NIL, so no device answers a command frame and no byte can reach the OS
+through SERIN.  The ATR deliberately stays mounted on the HOST-BRIDGE:
+that is the whole point of the control, since the bridge is then the only
+disk path the machine has left.  $0600/$0601 must never take the boot
+record's $A5/$5A signature -- if they do, something other than the wire
+loaded sector 1 and the positive test above proves less than it claims."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (%skip-or-fail "OS/BASIC ROM images not found in roms/ (or via ~
+               $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM); ~
+               skipping the silenced-wire control.")
+        (progn
+          (atari800-cl.hostdev:mount-disk
+           (atari800-cl.machine:atari-machine-hostdev m) 1
+           (atari800-cl.hostdev:parse-atr-bytes (%make-boot-magic-atr-bytes)))
+          ;; Silence D1:-D8: on the wire only; the bridge mount above stays.
+          (let ((sio (atari800-cl.machine:atari-machine-sio m)))
+            (dotimes (i atari800-cl.hostdev:+max-drives+)
+              (atari800-cl.sio:register-sio-device
+               sio (+ atari800-cl.hostdev:+device-disk+ i) nil)))
+          (let ((bus (atari800-cl.machine:atari-machine-bus m))
+                (ran nil))
+            (loop repeat 600
+                  until ran
+                  do (atari800-cl.machine:machine-run-frame m)
+                     (when (and (= #xA5 (atari800-cl.bus:bus-read bus #x0600))
+                                (= #x5A (atari800-cl.bus:bus-read bus #x0601)))
+                       (setf ran t)))
+            (is-false ran
+                      "the boot record must NOT run with the serial wire ~
+                       silenced -- something other than SERIN loaded ~
+                       sector 1 ($0600=$~2,'0X, $0601=$~2,'0X)"
+                      (atari800-cl.bus:bus-read bus #x0600)
+                      (atari800-cl.bus:bus-read bus #x0601))
+            (is-false (atari800-cl.cpu:cpu-halted
+                       (atari800-cl.machine:atari-machine-cpu m))
+                      "CPU must not have halted: a silent wire is a ~
+                       device timeout, not a crash"))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Typed input reaches BASIC through POKEY's keyboard IRQ (ROADMAP.md

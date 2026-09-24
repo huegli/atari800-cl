@@ -181,8 +181,46 @@ status byte after one -- even for a failing operation."
     (atari800-cl.bus:bus-write bus #x0300 atari800-cl.hostdev:+device-disk+)
     (atari800-cl.bus:bus-write bus #x0301 1)
     (atari800-cl.bus:bus-write bus #x0302 atari800-cl.hostdev:+cmd-status+)
+    (atari800-cl.bus:bus-read  bus #xD1FE)       ; arm the go register
     (atari800-cl.bus:bus-write bus #xD1FF #xFF)
     (is (= atari800-cl.hostdev:+status-timeout+ (atari800-cl.bus:bus-read bus #xD1FF)))))
+
+(test unarmed-d1ff-write-is-inert-real-os-pdvs-strobe
+  "ROADMAP.md Phase 25 regression: the real XL OS writes $D1FF as PDVS,
+the parallel-device-select register, at every SIOV entry (and GIN1/GIN2
+rotate device bits through it).  On stock hardware those strobes hit
+nothing -- and on this bridge they must execute nothing: an UNARMED
+$D1FF write neither runs the DCB operation nor disturbs DSTATS
+($0303).  Before the arm handshake existed, every OS SIOV strobe
+executed the DCB mid-SIO and overwrote DIO's GETDAT ($40) in DSTATS
+with a status byte, so the serial data phase never armed and a cold
+DOS boot degraded to BOOT ERROR."
+  (let* ((bus (atari800-cl.bus:make-bus))
+         (bridge (atari800-cl.hostdev:make-host-bridge)))
+    (atari800-cl.hostdev:attach-hostdev bus bridge)
+    ;; A DCB that would succeed (and overwrite DSTATS) if it ran.
+    (atari800-cl.bus:bus-write bus #x0300 atari800-cl.hostdev:+device-disk+)
+    (atari800-cl.bus:bus-write bus #x0301 1)
+    (atari800-cl.bus:bus-write bus #x0302 atari800-cl.hostdev:+cmd-status+)
+    (atari800-cl.bus:bus-write bus #x0303 #x40)  ; DIO's GETDAT
+    ;; The OS's own strobe: no signature probe, just the bare write.
+    (atari800-cl.bus:bus-write bus #xD1FF #x00)
+    (is (= #x40 (atari800-cl.bus:bus-read bus #x0303))
+        "DSTATS must survive the unarmed strobe untouched")
+    (is (= 0 (atari800-cl.bus:bus-read bus #xD1FF))
+        "no operation ran, so LAST-STATUS must still be the default")
+    ;; The arm is one-shot: after probing the signature ONCE, the first
+    ;; $D1FF write executes and a second (unarmed) write does nothing.
+    (atari800-cl.bus:bus-read  bus #xD1FE)
+    (atari800-cl.bus:bus-write bus #xD1FF #x00)
+    (is (= atari800-cl.hostdev:+status-timeout+
+           (atari800-cl.bus:bus-read bus #xD1FF))
+        "the armed write must have executed (nothing mounted -> timeout)")
+    (atari800-cl.bus:bus-write bus #x0303 #x40)  ; reset DSTATS
+    (atari800-cl.bus:bus-write bus #xD1FF #x00)  ; strobe again: unarmed
+    (is (= #x40 (atari800-cl.bus:bus-read bus #x0303))
+        "the arm is consumed by the first go write; the second strobe ~
+         must neither run the operation nor touch DSTATS")))
 
 (test writes-to-other-d1xx-addresses-are-ignored
   "A write anywhere in $D1xx besides $D1FF has no effect: it neither
@@ -200,8 +238,10 @@ changes LAST-STATUS nor executes a DCB operation."
 
 (defun %dcb-execute (bus &key (ddevic atari800-cl.hostdev:+device-disk+)
                               (dunit 1) dcomnd (dbuf #x0600) (daux 0))
-  "Poke a standard DCB at $0300 and write the 'go' register.  Returns the
-resulting $D1FF status byte."
+  "Poke a standard DCB at $0300, arm the 'go' register with a signature
+probe ($D1FE -- the same deliberate-client handshake minimal_os.asm's
+SIO performs before every HBGO write), and write the 'go' register.
+Returns the resulting $D1FF status byte."
   (atari800-cl.bus:bus-write bus #x0300 ddevic)
   (atari800-cl.bus:bus-write bus #x0301 dunit)
   (atari800-cl.bus:bus-write bus #x0302 dcomnd)
@@ -209,6 +249,7 @@ resulting $D1FF status byte."
   (atari800-cl.bus:bus-write bus #x0305 (ash dbuf -8))
   (atari800-cl.bus:bus-write bus #x030A (logand daux #xFF))
   (atari800-cl.bus:bus-write bus #x030B (ash daux -8))
+  (atari800-cl.bus:bus-read  bus #xD1FE)           ; arm the go register
   (atari800-cl.bus:bus-write bus #xD1FF 1)
   (atari800-cl.bus:bus-read bus #xD1FF))
 

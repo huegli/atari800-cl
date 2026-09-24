@@ -407,13 +407,23 @@
            ;; Serial output transmitter (SEROUT + SEROR/SEROC interrupts)
            #:pokey-serial-out-shift #:pokey-serial-out-holding
            #:pokey-serial-out-cycles
+           #:pokey-serial-out-fn
            #:+irq-serial-out-done+ #:+irq-serial-out-needed+
            #:+skctl-transmit-mode+
            #:+serial-frame-bits+ #:+serial-half-bits-per-byte+
+           ;; Serial input receiver (SERIN, ROADMAP.md Phase 25a)
+           #:pokey-serial-in-byte #:pokey-serial-in-cycles
+           #:pokey-serial-in-queue #:pokey-serial-in-unread
+           #:pokey-serin
+           #:pokey-skstat
+           #:pokey-queue-serial-in
+           #:+irq-serial-in-ready+
+           #:+skstat-frame-error+ #:+skstat-serial-overrun+
+           #:+skstat-skrest-mask+
            ;; PENDING bitmask (ROADMAP.md Phase 22)
            #:pokey-pending
            #:+pokey-pending-serial-tx+ #:+pokey-pending-audio+
-           #:+pokey-pending-key+
+           #:+pokey-pending-key+ #:+pokey-pending-serial-rx+
            ;; Audio hooks (installed by src/audio.lisp's ATTACH-AUDIO)
            #:pokey-audio
            #:pokey-audio-advance-fn #:pokey-audio-underflow-fn
@@ -503,6 +513,9 @@
            ;; Protocol constants
            #:+signature+ #:+sig-offset+ #:+go-offset+
            #:+max-drives+
+           ;; Status block builder (shared with the serial-wire disk
+           ;; device, src/sio.lisp -- ROADMAP.md Phase 25b)
+           #:status-drive-block
            #:+device-disk+
            #:+cmd-status+ #:+cmd-read+ #:+cmd-write+ #:+cmd-write-verify+
            #:+status-success+ #:+status-none-yet+
@@ -518,6 +531,32 @@
            #:xex-format-error
            #:xex-format-error-reason
            #:+xex-sector-size+))
+
+;;; ---------------------------------------------------------------------------
+;;; atari800-cl.sio — Serial-wire SIO device dispatch (src/sio.lisp,
+;;; ROADMAP.md Phase 25b).  Watches the bytes POKEY finishes transmitting
+;;; and answers SIO command frames on the receive side; disk handlers read
+;;; the host bridge's drives vector live, so one mount serves both
+;;; transports.
+
+(defpackage #:atari800-cl.sio
+  (:use #:cl #:atari800-cl.compat #:atari800-cl.pokey #:atari800-cl.hostdev)
+  (:documentation "SIO serial-wire device dispatch: watches POKEY's
+transmitted bytes, answers command frames on the receive side (ROADMAP.md
+Phase 25b).")
+  (:export #:sio-bus
+           #:make-sio-bus
+           #:sio-bus-p
+           #:attach-sio-bus
+           #:reset-sio-bus
+           #:register-sio-device
+           #:register-sio-disk
+           #:make-sio-disk-device
+           ;; Wire bytes
+           #:+sio-ack+ #:+sio-complete+ #:+sio-error+ #:+sio-nak+
+           ;; Timing (CPU cycles; a scanline is 114)
+           #:+sio-ack-delay+ #:+sio-complete-delay+
+           #:+sio-command-frame-length+))
 
 ;;; ---------------------------------------------------------------------------
 ;;; atari800-cl.renderer — Per-scanline NTSC pixel renderer
@@ -549,7 +588,7 @@
         #:atari800-cl.cpu #:atari800-cl.bus #:atari800-cl.mmu
         #:atari800-cl.pia #:atari800-cl.antic #:atari800-cl.gtia
         #:atari800-cl.pokey #:atari800-cl.audio #:atari800-cl.irq
-        #:atari800-cl.hostdev)
+        #:atari800-cl.hostdev #:atari800-cl.sio)
   (:documentation "Atari 800 XL top-level machine + frame scheduler.")
   (:export #:atari-machine
            #:make-atari-machine
@@ -558,6 +597,7 @@
            #:atari-machine-antic #:atari-machine-gtia
            #:atari-machine-pokey
            #:atari-machine-hostdev
+           #:atari-machine-sio
            #:atari-machine-frame-count
            #:atari-machine-running-p
            #:atari-machine-input

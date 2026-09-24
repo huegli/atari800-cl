@@ -34,10 +34,13 @@ compiled-cache/
 roms/*.rom
 roms/*.ROM
 roms/*.bin
+roms/*.atr
 !roms/.gitkeep
 
-# Acid800 test suite (fetch-acid800.sh) — third-party binaries, not vendored
-roms/acid800/
+# Acid800 test suite (fetch-acid800.sh) — third-party binaries, not vendored.
+# No trailing slash: the fetched directory may appear as a symlink into
+# another checkout, which the directory-only pattern would not match.
+roms/acid800
 
 # Local quickproject / sly state
 .sbclrc.local
