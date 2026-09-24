@@ -62,6 +62,19 @@ workflow_dispatch-only stub that closes the gap once a machine with
 licensed LispWorks is registered as a self-hosted runner labelled
 `lispworks`; its header comment lists the activation steps.
 
+## Demos
+
+`scripts/dos-boot-demo.lisp` (SBCL) and
+`scripts/dos-boot-demo-lispworks.sh` (LispWorks) boot DOS 2.5 from an
+ATR over the emulated SIO serial wire and serve the DOS menu to a
+capture client -- the Phase 25 visual verification. Both print
+`AESP_VIDEO <port>` and then `MENU <frame>`; screenshot with
+`./scripts/capture-screenshot.py -p <port> -o out.png`. Needs the real
+OS/BASIC ROMs plus a DOS ATR (`./scripts/fetch-dos-atr.sh`). The
+LispWorks driver LOADs the SBCL demo rather than reimplementing it, so
+both run identical emulator code and their framebuffers can be compared
+byte for byte. See README.md "Booting DOS 2.5 over the serial wire".
+
 ## Benchmarking
 
 Frame-rate benchmark harness for measuring optimization deltas
