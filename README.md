@@ -463,6 +463,60 @@ use `scripts/capture-screenshot.py` (one PNG/PPM),
 `scripts/capture-audio.py` (WAV), or `scripts/record.sh` for all of it
 at once -- see [Recording](#recording-asm--mp4).
 
+## Booting DOS 2.5 over the serial wire
+
+With a real DOS 2.5 disk image mounted, the emulator boots it the way
+hardware does: the boot record, `DOS.SYS` and `DUP.SYS` all arrive as
+POKEY `SERIN` bytes across the emulated SIO serial wire, with the ACK /
+data / COMPLETE frames and inter-frame gaps the OS's `SIOV` loop expects.
+Nothing shortcuts the transfer by writing sectors straight into RAM.
+
+Fetch a disk image once (`roms/` is gitignored, so this is per-machine
+setup, like the ROMs themselves):
+
+```sh
+./scripts/fetch-dos-atr.sh          # roms/dos25.atr, from the Internet Archive
+```
+
+Then run the demo, which boots to the DOS menu and keeps serving frames
+at ~60 fps until killed, so a capture client can grab the screen:
+
+```sh
+sbcl --script scripts/dos-boot-demo.lisp     # SBCL
+./scripts/dos-boot-demo-lispworks.sh         # LispWorks
+```
+
+Both print the same status lines -- `AESP_CONTROL`, `AESP_VIDEO` and
+`AESP_AUDIO` with their chosen ports, then `MENU <frame>` followed by the
+decoded text screen once the menu is up.  Take the screenshot with the
+video port it printed:
+
+```sh
+./scripts/capture-screenshot.py -p <video-port> -o dos-menu.png
+```
+
+Either demo accepts a different image as its argument:
+
+```sh
+sbcl --script scripts/dos-boot-demo.lisp path/to/other.atr
+./scripts/dos-boot-demo-lispworks.sh path/to/other.atr
+```
+
+The LispWorks driver forwards that argument as `$ATARI800_CL_DOS_ATR`,
+because `lw-console -build` owns the command line and the demo cannot
+see a positional argument there.  Both fall back to that variable, then
+to the `roms/` defaults.
+
+The demos hold OPTION down through the boot, which is what a real 800 XL
+needs to reach the DOS menu: with BASIC enabled the OS hands control to
+BASIC's READY prompt when `DUPINIT` finishes, and `DUP.SYS` loads only
+once the user types `DOS` there (a jump through `DOSVEC`).  With OPTION
+held there is no cartridge, so the boot ends in the no-cartridge
+`JMP (DOSVEC)` handoff that loads `DUP.SYS` and enters the menu.
+
+The same boot is an automated test -- `REAL-OS-ROM-BOOTS-DOS-MENU-OVER-SERIAL-WIRE`
+in `tests/test-machine.lisp` -- which skips unless a DOS ATR is present.
+
 ## Raster effects (WSYNC)
 
 `STA WSYNC` ($D40A) -- the register every DLI handler starts with --
@@ -596,6 +650,9 @@ atari800-cl/
 |   |-- mads-build.sh        # assemble MADS sources to XEX
 |   |-- atari-run.sh         # run a XEX and capture a screenshot
 |   |-- record.sh            # asm/xex -> mp4 (video + audio, via ffmpeg)
+|   |-- fetch-dos-atr.sh     # DOS 2.5 disk image -> roms/dos25.atr
+|   |-- dos-boot-demo.lisp   # boot DOS 2.5 over the serial wire (SBCL)
+|   |-- dos-boot-demo-lispworks.sh  # the same demo under LispWorks
 |   |-- aesp_client.py       # shared AESP codec for the capture scripts
 |   |-- capture-screenshot.py # AESP video-frame -> PNG/PPM
 |   |-- capture-video.py     # AESP video-frames -> numbered PNG sequence
