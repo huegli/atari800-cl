@@ -689,6 +689,70 @@ $A5/$5A is the program's own signature."
                       "CPU must not have halted during the serial boot"))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Phase 25 control: the wire is load-bearing.
+;;;
+;;; Both serial-boot tests above mount through the HOST-BRIDGE's drives
+;;; vector, which the $D1xx device (Phase 16) and the serial device layer
+;;; (Phase 25b) both read live.  That shared mount is what makes "one
+;;; mount, both transports" work -- and it is also what leaves those
+;;; tests, on their own, unable to tell "booted over the wire" from
+;;; "booted through the bridge": both would pass either way.  This
+;;; control settles it.  Identical setup, one change -- every serial-wire
+;;; drive id answers silence -- so the bridge is the only device left
+;;; standing, and it must not be enough.
+;;;
+;;; This is the regression the close-out's $D1FF arm-gate guards.  The
+;;; real XL OS strobes $D1FF as PDVS (parallel device select) at every
+;;; SIOV entry; with the execute-on-every-write go register the bridge
+;;; originally had, those strobes could drive a transfer the wire never
+;;; carried.  UNARMED-D1FF-WRITE-IS-INERT-REAL-OS-PDVS-STROBE
+;;; (tests/test-hostdev.lisp) pins the gate at the register; this pins
+;;; the consequence at the boot.
+
+(test serial-wire-silenced-boot-record-does-not-run
+  "The mirror of REAL-OS-ROM-BOOTS-SYNTHETIC-BOOT-RECORD-OVER-SERIAL-WIRE:
+same ROMs, the same 1-sector boot-record ATR mounted on drive 1, the same
+frame budget -- but every serial-wire drive id ($31-$38) is registered as
+NIL, so no device answers a command frame and no byte can reach the OS
+through SERIN.  The ATR deliberately stays mounted on the HOST-BRIDGE:
+that is the whole point of the control, since the bridge is then the only
+disk path the machine has left.  $0600/$0601 must never take the boot
+record's $A5/$5A signature -- if they do, something other than the wire
+loaded sector 1 and the positive test above proves less than it claims."
+  (let ((m (%boot-machine-with-real-roms)))
+    (if (null m)
+        (%skip-or-fail "OS/BASIC ROM images not found in roms/ (or via ~
+               $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM); ~
+               skipping the silenced-wire control.")
+        (progn
+          (atari800-cl.hostdev:mount-disk
+           (atari800-cl.machine:atari-machine-hostdev m) 1
+           (atari800-cl.hostdev:parse-atr-bytes (%make-boot-magic-atr-bytes)))
+          ;; Silence D1:-D8: on the wire only; the bridge mount above stays.
+          (let ((sio (atari800-cl.machine:atari-machine-sio m)))
+            (dotimes (i atari800-cl.hostdev:+max-drives+)
+              (atari800-cl.sio:register-sio-device
+               sio (+ atari800-cl.hostdev:+device-disk+ i) nil)))
+          (let ((bus (atari800-cl.machine:atari-machine-bus m))
+                (ran nil))
+            (loop repeat 600
+                  until ran
+                  do (atari800-cl.machine:machine-run-frame m)
+                     (when (and (= #xA5 (atari800-cl.bus:bus-read bus #x0600))
+                                (= #x5A (atari800-cl.bus:bus-read bus #x0601)))
+                       (setf ran t)))
+            (is-false ran
+                      "the boot record must NOT run with the serial wire ~
+                       silenced -- something other than SERIN loaded ~
+                       sector 1 ($0600=$~2,'0X, $0601=$~2,'0X)"
+                      (atari800-cl.bus:bus-read bus #x0600)
+                      (atari800-cl.bus:bus-read bus #x0601))
+            (is-false (atari800-cl.cpu:cpu-halted
+                       (atari800-cl.machine:atari-machine-cpu m))
+                      "CPU must not have halted: a silent wire is a ~
+                       device timeout, not a crash"))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Typed input reaches BASIC through POKEY's keyboard IRQ (ROADMAP.md
 ;;; Phase 13) -- the real acceptance criterion: it exercises the keyboard
 ;;; IRQ, the OS editor, and BASIC's evaluator in one pass.
