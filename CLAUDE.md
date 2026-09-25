@@ -75,6 +75,42 @@ LispWorks driver LOADs the SBCL demo rather than reimplementing it, so
 both run identical emulator code and their framebuffers can be compared
 byte for byte. See README.md "Booting DOS 2.5 over the serial wire".
 
+### Viewing screenshots over SSH + tmux
+
+Claude Code captures tool stdout, and its Bash tool has no controlling
+terminal (`tty` reports "not a tty"; `/dev/tty` fails with "device not
+configured"). An iTerm2 inline-image escape sequence written to stdout
+therefore never reaches the terminal -- `imgcat foo.png` from a tool
+call, or via the `!` prefix, renders nothing.
+
+The way around it is to write the sequence straight to the tty device of
+a tmux pane, which bypasses that capture entirely. Use a pane that is
+NOT the one running Claude, or the image fights the TUI's redraw:
+
+```sh
+imgcat -r -W 100% -H 100% shot.png \
+  > "$(tmux list-panes -a -F '#{pane_tty} #{pane_current_command}' \
+       | awk '$2!="claude"{print $1; exit}')"
+```
+
+Three things matter:
+
+- **`allow-passthrough` must be on** for the tmux server that owns the
+  pane -- off by default since tmux 3.3, and over SSH that means the
+  REMOTE host's `~/.tmux.conf`, not the local one:
+  `set -g allow-passthrough on`.
+- **Clear the pane first** (`printf '\033[H\033[2J\033[3J'` to that
+  same tty) or the image lands below whatever is already there and has
+  to be scrolled back to. The `\033[3J` clears scrollback too.
+- **Bound the size in both axes** (`-r -W 100% -H 100%`); percent units
+  are relative to the pane, so a large image is fitted and a small one
+  keeps its natural size.
+
+This is how to show the DOS-boot screenshots above from inside a Claude
+Code session. A `tmimg` helper wrapping all three steps may be installed
+at `~/.local/bin/tmimg` on a given machine; it is personal tooling, not
+part of this repository.
+
 ## Benchmarking
 
 Frame-rate benchmark harness for measuring optimization deltas
