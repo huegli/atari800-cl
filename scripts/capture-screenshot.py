@@ -3,9 +3,13 @@
 
 The AESP server (started by scripts/atari-run.sh or scripts/record.sh)
 pushes one FRAME_RAW message per emulated NTSC frame to every client
-connected to its video port.  Each frame is exactly 384 * 240 * 4 bytes
+connected to its video port.  Each frame is exactly 336 * 240 * 4 bytes
 of BGRA8888 pixel data (row-major, top scanline first, no padding, no
-frame-number prefix -- see docs/PROTOCOL.md in the Attic project).
+frame-number prefix -- see docs/PROTOCOL.md in the Attic project). The
+renderer's own framebuffer is 384 pixels wide (320-pixel playfield +
+border); FRAME_RAW crops 24 columns off each edge to match the Attic
+client's hard-coded 336-pixel visible width -- see
++AESP-FRAME-RAW-WIDTH+ in src/aesp.lisp.
 
 This script connects to the video port, reads the first FRAME_RAW, converts
 it to RGB, and writes it to a PNG (via Pillow if available) or a PPM (no
@@ -67,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--control-port", type=int, default=aesp.DEFAULT_CONTROL_PORT,
                    help=f"AESP control port (default: {aesp.DEFAULT_CONTROL_PORT})")
     p.add_argument("--no-control", action="store_true",
-                   help="skip VIDEO_SUBSCRIBE; use default 384x240 geometry")
+                   help="skip VIDEO_SUBSCRIBE; use default 336x240 geometry")
     p.add_argument("--frames", type=int, default=1,
                    help="save the Nth frame received (default: 1 = first)")
     p.add_argument("--timeout", type=float, default=10.0,

@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--control-port", type=int, default=aesp.DEFAULT_CONTROL_PORT,
                    help=f"AESP control port (default: {aesp.DEFAULT_CONTROL_PORT})")
     p.add_argument("--no-control", action="store_true",
-                   help="skip VIDEO_SUBSCRIBE; use default 384x240 geometry")
+                   help="skip VIDEO_SUBSCRIBE; use default 336x240 geometry")
     p.add_argument("--timeout", type=float, default=10.0,
                    help="socket timeout in seconds (default: 10)")
     p.add_argument("--format", choices=["auto", "png", "ppm"], default="auto",

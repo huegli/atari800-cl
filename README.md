@@ -453,8 +453,10 @@ through to its BASIC prompt entirely from the REPL:
 
 The emulator runs headless: it opens no window and plays no sound
 itself.  The built-in pixel renderer paints a 384x240 RGB framebuffer
-each frame, converted to BGRA8888 and pushed to AESP video subscribers
-as `FRAME_RAW`, and POKEY synthesises mono 8-bit PCM which audio subscribers
+each frame; converted to BGRA8888, cropped to the 336x240 visible area
+AESP clients expect (see [Protocol servers](#protocol-servers-aesp--cli)),
+and pushed to AESP video subscribers as `FRAME_RAW`.  POKEY synthesises
+mono 8-bit PCM which audio subscribers
 receive as `AUDIO_PCM` pushes.  In-process, attach synthesis with
 `a800:machine-attach-audio` and collect samples with
 `a800:machine-audio-drain` after each frame; to capture from outside,
@@ -587,7 +589,7 @@ boot, capture video and audio over AESP, mux with ffmpeg:
 
 ```sh
 ./scripts/record.sh asm/edvent02_rasterbars.asm -frames 300 -o rasterbars.mp4
-# => 300 frames at 59.92 fps: a 5-second h264 + AAC video, 384x240
+# => 300 frames at 59.92 fps: a 5-second h264 + AAC video, 336x240
 ```
 
 It takes a `.xex` just as happily, `--keep` leaves the intermediate frame
@@ -644,8 +646,9 @@ to the machine's command mailbox and executed on the emulator thread.
 `PAUSE`/`RESUME`/`RESET`->`ACK`; `STATUS`/`INFO`; the input events
 `KEY_DOWN`/`KEY_UP`/`JOYSTICK`/`CONSOLE_KEYS`/`PADDLE`->`ACK`;
 `VIDEO_SUBSCRIBE`->`FRAME_CONFIG` followed by per-frame `FRAME_RAW`
-pushes of the rendered 384x240 framebuffer as BGRA8888 (converted from
-the renderer's internal 24-bit RGB), and
+pushes of the rendered framebuffer as 336x240 BGRA8888 (converted from,
+and cropped from, the renderer's internal 384x240 24-bit RGB -- see
+`+AESP-FRAME-RAW-WIDTH+` in `src/aesp.lisp` for why), and
 `AUDIO_SUBSCRIBE`->`AUDIO_CONFIG` (44 744 Hz, 8-bit, mono) followed by
 per-frame `AUDIO_PCM` pushes of 746-747 raw mono samples to audio-port
 clients; `MOUNT`/`LOAD_XEX` (`[unit][read-only][path]`)->`ACK` mount an
