@@ -3,8 +3,15 @@
 ;;;; and serve its screen to a screenshot client.
 ;;;;
 ;;;; Usage:
-;;;;   sbcl --script scripts/edventure-demo.lisp
+;;;;   sbcl --script scripts/edventure-demo.lisp [branch]
 ;;;;   ./scripts/capture-screenshot.py -p <video-port> -o edventure.png
+;;;;
+;;;; BRANCH selects which branch of the EdVenture repo to clone (the
+;;;; tutorial series is one branch per episode); it defaults to
+;;;; episode_29_work, the newest at the time this script was written --
+;;;; NOT the repo's own default branch, episode_1, which is an early
+;;;; "HELLO ATARI!" stub.  $ATARI800_CL_EDVENTURE_BRANCH is a lower-
+;;;; priority default (checked when no argument is given).
 ;;;;
 ;;;; EdVenture is not vendored into this repository: it is a separate,
 ;;;; independently versioned project, so this script shallow-clones it
@@ -28,7 +35,8 @@
 ;;;; number of frames and then serves whatever is on screen.
 ;;;;
 ;;;; Status lines on stdout (the same shape scripts/dos-boot-demo.lisp
-;;;; prints):
+;;;; prints, plus BRANCH):
+;;;;   BRANCH <name>
 ;;;;   AESP_CONTROL <port>
 ;;;;   AESP_VIDEO   <port>
 ;;;;   AESP_AUDIO   <port>
@@ -75,6 +83,14 @@
     (format *error-output* "fatal: could not load :atari800-cl -- ~A~%" c)
     (uiop:quit 3)))
 
+;;; --- Command line: the optional single argument picks the EdVenture
+;;; --- branch to clone, same argv access scripts/dos-boot-demo.lisp uses.
+
+(defun demo-argv ()
+  #+sbcl       (cdr sb-ext:*posix-argv*)
+  #+lispworks  (cdr sys:*line-arguments-list*)
+  #-(or sbcl lispworks) nil)
+
 ;;; --- Fatal errors: signalled by any step below, caught once at the
 ;;; --- bottom so the temp clone (once it exists) is always removed
 ;;; --- before this process exits.
@@ -93,10 +109,17 @@
 (defparameter *edventure-dir* nil)
 (defparameter *edventure-repo-url* "https://github.com/EdSalisbury/edventure")
 ;; The repo's default branch (episode_1) is an early "HELLO ATARI!" stub;
-;; the tutorial series' branches are per-episode, and episode_29_work is
-;; the newest -- the one this demo (and its 300-frame boot budget) was
-;; built and screenshotted against.
-(defparameter *edventure-branch* "episode_29_work")
+;; the tutorial series' branches are per-episode.  episode_29_work is the
+;; newest at the time this script was written -- the one its 300-frame
+;; boot budget was tuned and screenshotted against -- and stays the
+;; default; pass another branch as the command-line argument (or set
+;; $ATARI800_CL_EDVENTURE_BRANCH) to try a different episode, keeping in
+;; mind the boot-frame budget below may need adjusting for it.
+(defparameter *edventure-branch*
+  (or (first (demo-argv))
+      (let ((env (uiop:getenv "ATARI800_CL_EDVENTURE_BRANCH")))
+        (and env (plusp (length env)) env))
+      "episode_29_work"))
 
 (defun cleanup ()
   (when (and *edventure-dir* (probe-file *edventure-dir*))
@@ -178,6 +201,9 @@
         (fatal "OS/BASIC ROMs not found (roms/~{~A~^, roms/~}, or ~
                 $ATARI800_CL_OS_ROM/$ATARI800_CL_BASIC_ROM)"
                (list (first *os-rom-names*) (first *basic-rom-names*))))
+
+      (format t "BRANCH ~A~%" *edventure-branch*)
+      (force-output)
 
       (setf *edventure-dir* (make-temp-dir))
       (clone-edventure *edventure-dir*)
