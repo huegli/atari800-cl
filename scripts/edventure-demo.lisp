@@ -6,6 +6,11 @@
 ;;;;   sbcl --script scripts/edventure-demo.lisp [branch]
 ;;;;   ./scripts/capture-screenshot.py -p <video-port> -o edventure.png
 ;;;;
+;;;; scripts/edventure-demo.sh wraps this (and its LispWorks counterpart
+;;;; scripts/edventure-demo-lispworks.lisp) behind a single --impl
+;;;; sbcl|lispworks command-line option, defaulting to sbcl:
+;;;;   ./scripts/edventure-demo.sh [--impl sbcl|lispworks] [branch]
+;;;;
 ;;;; BRANCH selects which branch of the EdVenture repo to clone (the
 ;;;; tutorial series is one branch per episode); it defaults to
 ;;;; episode_29_work, the newest at the time this script was written --
@@ -115,8 +120,16 @@
 ;; default; pass another branch as the command-line argument (or set
 ;; $ATARI800_CL_EDVENTURE_BRANCH) to try a different episode, keeping in
 ;; mind the boot-frame budget below may need adjusting for it.
+;;
+;; Positional argv is only consulted under SBCL: `lw-console -build`
+;; owns the command line, so sys:*line-arguments-list* holds LispWorks's
+;; own arguments (e.g. "-build") rather than anything a caller passed --
+;; scripts/edventure-demo-lispworks.lisp's header explains this in more
+;; detail.  scripts/edventure-demo.sh --impl lispworks therefore passes
+;; a branch through the env var instead, which is why that path is
+;; checked regardless of implementation.
 (defparameter *edventure-branch*
-  (or (first (demo-argv))
+  (or #+sbcl (first (demo-argv))
       (let ((env (uiop:getenv "ATARI800_CL_EDVENTURE_BRANCH")))
         (and env (plusp (length env)) env))
       "episode_29_work"))
