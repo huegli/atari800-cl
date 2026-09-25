@@ -517,6 +517,54 @@ held there is no cartridge, so the boot ends in the no-cartridge
 The same boot is an automated test -- `REAL-OS-ROM-BOOTS-DOS-MENU-OVER-SERIAL-WIRE`
 in `tests/test-machine.lisp` -- which skips unless a DOS ATR is present.
 
+## Booting EdVenture (a homebrew game demo)
+
+[EdVenture](https://github.com/EdSalisbury/edventure) is a homebrew
+dungeon-crawler built across a YouTube tutorial series (Mission:
+EdPossible), assembled with MADS into a plain multi-segment DOS binary
+with no `RUNAD` set. That is enough to boot with no cartridge-mapping
+support needed (out of scope for this emulator -- see [Known
+limitations](#known-limitations)): `a800:load-xex`'s bootable-ATR
+synthesis already defaults `RUNAD` to the first segment's start, so it
+boots like any other self-booting disk over the same serial-wire path
+DOS 2.5 uses above.
+
+EdVenture is not vendored into this repository -- it is a separate,
+independently versioned project. `scripts/edventure-demo.lisp`
+shallow-clones it fresh into a temporary directory on every run,
+assembles it there with `mads` (must be on `PATH`, alongside `git`),
+and deletes the clone again once the binary is loaded (also on SIGINT /
+SIGTERM, so a killed run does not leave a temp checkout behind):
+
+```sh
+./scripts/edventure-demo.sh                          # SBCL (default)
+./scripts/edventure-demo.sh --impl lispworks          # LispWorks
+```
+
+Both boot to a live dungeon screen and keep serving frames at ~60 fps
+until killed:
+
+```sh
+./scripts/capture-screenshot.py -p <video-port> -o edventure.png
+```
+
+The tutorial series is one git branch per episode; the demo defaults to
+`episode_29_work` (the newest at the time it was written -- the repo's
+own default branch, `episode_1`, is an early "HELLO ATARI!" stub, not
+the game). Pick a different episode with an argument or
+`$ATARI800_CL_EDVENTURE_BRANCH` (the LispWorks path only, since
+`lw-console -build` owns the command line):
+
+```sh
+./scripts/edventure-demo.sh episode_11
+./scripts/edventure-demo.sh --impl lispworks episode_11
+```
+
+The demo boots for a fixed 300 frames before it starts serving -- long
+enough for `episode_29_work`'s boot and first dungeon draw, tuned by
+trial; a much earlier or later episode may need a different budget to
+settle before its screen is captured.
+
 ## Raster effects (WSYNC)
 
 `STA WSYNC` ($D40A) -- the register every DLI handler starts with --
