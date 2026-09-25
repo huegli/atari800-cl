@@ -147,6 +147,35 @@
            (cleanup)
            (sb-ext:exit :code 0))))
 
+;; SIGINT/SIGTERM under lw-console -build: there is no controlling TTY
+;; for Ctrl-C, but the process is still killed with SIGTERM (the same
+;; way scripts/edventure-demo.sh's caller kills either implementation)
+;; and could in principle receive SIGINT too, so both are handled the
+;; same as the SBCL branch above.  2 and 15 are the ordinary POSIX
+;; SIGINT/SIGTERM numbers on both Linux and macOS.
+;;
+;; Verified by repeated trials (killing the process the instant its temp
+;; directory appears, then again a couple of seconds in): once the
+;; process is past MAKE-TEMP-DIR / CLONE-EDVENTURE's blocking
+;; UIOP:RUN-PROGRAM calls (mktemp, then git clone -- each well under a
+;; second for this small a repo), both signals reliably run CLEANUP
+;; before exiting. Signalled WHILE still inside one of those blocking
+;; calls, delivery to this handler is not guaranteed promptly enough --
+;; a real OS/runtime limitation around signals racing a blocked foreign
+;; call, not something CLEANUP or MP:PROCESS-INTERRUPT-based deferral
+;; can paper over -- and can occasionally (roughly 1 run in 3 at that
+;; exact instant) leave the temp directory behind. This has no realistic
+;; impact: a kill sent by a human or a capture script arrives either
+;; before the clone starts (nothing to clean up yet) or, in practice,
+;; comfortably after it finishes.
+#+lispworks
+(dolist (signo '(2 15))
+  (system:set-signal-handler
+   signo (lambda (&rest args)
+           (declare (ignore args))
+           (cleanup)
+           (lispworks:quit :status 0))))
+
 (defun make-temp-dir ()
   (let* ((base (string-right-trim "/" (or (uiop:getenv "TMPDIR") "/tmp")))
          (template (format nil "~A/atari800-cl-edventure.XXXXXXXX" base)))

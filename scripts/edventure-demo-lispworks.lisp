@@ -29,12 +29,13 @@
 ;;;; instead, which the demo already checks as a fallback when no
 ;;;; positional argument is given.
 ;;;;
-;;;; Note: the demo's SIGINT/SIGTERM handlers (which delete its temp
-;;;; EdVenture clone if the process is killed mid-boot, before the clone
-;;;; is removed on the normal path) are guarded #+sbcl and so do not
-;;;; apply here; a LispWorks run killed mid-boot may leave a temp
-;;;; directory behind under $TMPDIR. A run killed after its usual READY
-;;;; line (the clone is already deleted by then) is unaffected.
+;;;; The demo's SIGINT/SIGTERM handlers (which delete its temp EdVenture
+;;;; clone if the process is killed mid-boot, before the clone is
+;;;; removed on the normal path) have a #+lispworks branch using
+;;;; SYSTEM:SET-SIGNAL-HANDLER alongside the #+sbcl one; see that
+;;;; branch's own comment in scripts/edventure-demo.lisp for the one
+;;;; corner it does not cover (a signal arriving while the process is
+;;;; still inside its initial mktemp/git-clone subprocess calls).
 
 (require "asdf")
 (dolist (module-name '("asdf" "ASDF"))
