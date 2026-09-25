@@ -58,3 +58,9 @@ asm/*.xex
 # Python bytecode cache (scripts/capture-screenshot.py etc.)
 __pycache__/
 *.pyc
+
+# EdVenture (github.com/EdSalisbury/edventure) -- a separate, independently
+# versioned project. scripts/edventure-demo.lisp clones it fresh into a
+# temp directory on each run and cleans up after itself; a local checkout
+# here (for manual poking around) must never be committed.
+/edventure/
