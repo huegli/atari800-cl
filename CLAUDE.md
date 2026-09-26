@@ -64,16 +64,20 @@ licensed LispWorks is registered as a self-hosted runner labelled
 
 ## Demos
 
-`scripts/dos-boot-demo.lisp` (SBCL) and
-`scripts/dos-boot-demo-lispworks.sh` (LispWorks) boot DOS 2.5 from an
-ATR over the emulated SIO serial wire and serve the DOS menu to a
+`demos/dos-boot-demo.sh [--impl sbcl|lispworks]` boots DOS 2.5 from an
+ATR over the emulated SIO serial wire and serves the DOS menu to a
 capture client -- the Phase 25 visual verification. Both print
 `AESP_VIDEO <port>` and then `MENU <frame>`; screenshot with
 `./scripts/capture-screenshot.py -p <port> -o out.png`. Needs the real
 OS/BASIC ROMs plus a DOS ATR (`./scripts/fetch-dos-atr.sh`). The
 LispWorks driver LOADs the SBCL demo rather than reimplementing it, so
 both run identical emulator code and their framebuffers can be compared
-byte for byte. See README.md "Booting DOS 2.5 over the serial wire".
+byte for byte. `demos/minimal-xl-boot-demo.sh [--impl sbcl|lispworks]`
+is the same pattern for the `minimal-xl/` submodule's stripped-down OS
+instead of the real ROMs -- no copyrighted dump needed, no SIO boot, just
+30 frames to its idle loop with the boot banner decoded (`BANNER
+<frame>`). See README.md "Booting DOS 2.5 over the serial wire" and
+"Booting the minimal XL OS".
 
 ### Viewing screenshots over SSH + tmux
 

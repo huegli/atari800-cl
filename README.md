@@ -293,6 +293,35 @@ sources are enabled and there is no keyboard) with `DMACTL=$22`,
 `NMIEN=$40` and `DLIST=$BC20`.  To capture a PNG instead, start the
 servers and resume as in steps 3-5 above; everything else is identical.
 
+`demos/minimal-xl-boot-demo.sh` wraps exactly that sequence as a
+standalone demo, the same shape as the DOS boot demo above but with no
+copyrighted ROM dump, no SIO boot, and no `roms/` setup required:
+
+```sh
+git submodule update --init minimal-xl               # once, if empty
+./demos/minimal-xl-boot-demo.sh                       # SBCL (default)
+./demos/minimal-xl-boot-demo.sh --impl lispworks      # LispWorks
+```
+
+Both print `AESP_CONTROL` / `AESP_VIDEO` / `AESP_AUDIO` with their
+chosen ports, run the 30 frames above, then print `BANNER <frame>`
+followed by the decoded banner text.  Screenshot with the video port it
+printed:
+
+```sh
+./scripts/capture-screenshot.py -p <video-port> -o minimal-xl-banner.png
+```
+
+Either form accepts a different ROM as its argument (falling back to
+`$ATARI800_CL_MINIMAL_XL_ROM`, then `minimal-xl/minimal_os.rom`, the
+same argument/env-var/default order the DOS demo uses for its ROMs and
+ATR):
+
+```sh
+./demos/minimal-xl-boot-demo.sh path/to/other_os.rom
+./demos/minimal-xl-boot-demo.sh --impl lispworks path/to/other_os.rom
+```
+
 Rebuilding the ROM from source is optional and needs MADS.  The current
 `minimal_os.asm` carries `OPT h+` / `run RESET`, so MADS emits a **XEX**,
 not a raw ROM: 16,396 bytes = a 6-byte header, the 16,384-byte ROM core
@@ -484,8 +513,8 @@ Then run the demo, which boots to the DOS menu and keeps serving frames
 at ~60 fps until killed, so a capture client can grab the screen:
 
 ```sh
-sbcl --script scripts/dos-boot-demo.lisp     # SBCL
-./scripts/dos-boot-demo-lispworks.sh         # LispWorks
+./demos/dos-boot-demo.sh                     # SBCL (default)
+./demos/dos-boot-demo.sh --impl lispworks    # LispWorks
 ```
 
 Both print the same status lines -- `AESP_CONTROL`, `AESP_VIDEO` and
@@ -500,14 +529,14 @@ video port it printed:
 Either demo accepts a different image as its argument:
 
 ```sh
-sbcl --script scripts/dos-boot-demo.lisp path/to/other.atr
-./scripts/dos-boot-demo-lispworks.sh path/to/other.atr
+./demos/dos-boot-demo.sh path/to/other.atr
+./demos/dos-boot-demo.sh --impl lispworks path/to/other.atr
 ```
 
-The LispWorks driver forwards that argument as `$ATARI800_CL_DOS_ATR`,
-because `lw-console -build` owns the command line and the demo cannot
-see a positional argument there.  Both fall back to that variable, then
-to the `roms/` defaults.
+Under `--impl lispworks` that argument is forwarded as
+`$ATARI800_CL_DOS_ATR`, because `lw-console -build` owns the command
+line and the demo cannot see a positional argument there.  Both fall
+back to that variable, then to the `roms/` defaults.
 
 The demos hold OPTION down through the boot, which is what a real 800 XL
 needs to reach the DOS menu: with BASIC enabled the OS hands control to
@@ -532,15 +561,15 @@ boots like any other self-booting disk over the same serial-wire path
 DOS 2.5 uses above.
 
 EdVenture is not vendored into this repository -- it is a separate,
-independently versioned project. `scripts/edventure-demo.lisp`
+independently versioned project. `demos/edventure-demo.lisp`
 shallow-clones it fresh into a temporary directory on every run,
 assembles it there with `mads` (must be on `PATH`, alongside `git`),
 and deletes the clone again once the binary is loaded (also on SIGINT /
 SIGTERM, so a killed run does not leave a temp checkout behind):
 
 ```sh
-./scripts/edventure-demo.sh                          # SBCL (default)
-./scripts/edventure-demo.sh --impl lispworks          # LispWorks
+./demos/edventure-demo.sh                          # SBCL (default)
+./demos/edventure-demo.sh --impl lispworks          # LispWorks
 ```
 
 Both boot to a live dungeon screen and keep serving frames at ~60 fps
@@ -558,8 +587,8 @@ the game). Pick a different episode with an argument or
 `lw-console -build` owns the command line):
 
 ```sh
-./scripts/edventure-demo.sh episode_11
-./scripts/edventure-demo.sh --impl lispworks episode_11
+./demos/edventure-demo.sh episode_11
+./demos/edventure-demo.sh --impl lispworks episode_11
 ```
 
 The demo boots for a fixed 300 frames before it starts serving -- long
@@ -693,6 +722,16 @@ atari800-cl/
 |   `-- AI-Prompts.md        # the build-by-prompt plan
 |-- asm/                     # example 6502 programs (MADS syntax)
 |-- minimal-xl/              # git submodule: minimal XL OS for bring-up
+|-- demos/
+|   |-- dos-boot-demo.sh     # boot DOS 2.5 over the serial wire, --impl sbcl|lispworks
+|   |-- dos-boot-demo.lisp             # shared implementation (SBCL top-level)
+|   |-- dos-boot-demo-lispworks.lisp   # LispWorks driver, LOADs the above
+|   |-- minimal-xl-boot-demo.sh        # boot the minimal-xl/ OS, --impl sbcl|lispworks
+|   |-- minimal-xl-boot-demo.lisp      # shared implementation (SBCL top-level)
+|   |-- minimal-xl-boot-demo-lispworks.lisp  # LispWorks driver, LOADs the above
+|   |-- edventure-demo.sh    # boot the EdVenture homebrew game, --impl sbcl|lispworks
+|   |-- edventure-demo.lisp            # shared implementation (SBCL top-level)
+|   `-- edventure-demo-lispworks.lisp  # LispWorks driver, LOADs the above
 |-- scripts/
 |   |-- test-sbcl.sh         # noninteractive test runners
 |   |-- test-lispworks.sh
@@ -702,8 +741,6 @@ atari800-cl/
 |   |-- atari-run.sh         # run a XEX and capture a screenshot
 |   |-- record.sh            # asm/xex -> mp4 (video + audio, via ffmpeg)
 |   |-- fetch-dos-atr.sh     # DOS 2.5 disk image -> roms/dos25.atr
-|   |-- dos-boot-demo.lisp   # boot DOS 2.5 over the serial wire (SBCL)
-|   |-- dos-boot-demo-lispworks.sh  # the same demo under LispWorks
 |   |-- aesp_client.py       # shared AESP codec for the capture scripts
 |   |-- capture-screenshot.py # AESP video-frame -> PNG/PPM
 |   |-- capture-video.py     # AESP video-frames -> numbered PNG sequence
