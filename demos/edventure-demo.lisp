@@ -1,15 +1,15 @@
-;;;; scripts/edventure-demo.lisp --- Boot the EdVenture homebrew game
+;;;; demos/edventure-demo.lisp --- Boot the EdVenture homebrew game
 ;;;; (github.com/EdSalisbury/edventure) over the emulated SIO serial wire
 ;;;; and serve its screen to a screenshot client.
 ;;;;
 ;;;; Usage:
-;;;;   sbcl --script scripts/edventure-demo.lisp [branch]
+;;;;   sbcl --script demos/edventure-demo.lisp [branch]
 ;;;;   ./scripts/capture-screenshot.py -p <video-port> -o edventure.png
 ;;;;
-;;;; scripts/edventure-demo.sh wraps this (and its LispWorks counterpart
-;;;; scripts/edventure-demo-lispworks.lisp) behind a single --impl
+;;;; demos/edventure-demo.sh wraps this (and its LispWorks counterpart
+;;;; demos/edventure-demo-lispworks.lisp) behind a single --impl
 ;;;; sbcl|lispworks command-line option, defaulting to sbcl:
-;;;;   ./scripts/edventure-demo.sh [--impl sbcl|lispworks] [branch]
+;;;;   ./demos/edventure-demo.sh [--impl sbcl|lispworks] [branch]
 ;;;;
 ;;;; BRANCH selects which branch of the EdVenture repo to clone (the
 ;;;; tutorial series is one branch per episode); it defaults to
@@ -27,7 +27,7 @@
 ;;;;
 ;;;; What it does: builds a machine on the real OS/BASIC ROMs (roms/
 ;;;; defaults, overridable via $ATARI800_CL_OS_ROM / $ATARI800_CL_BASIC_ROM,
-;;;; exactly like scripts/dos-boot-demo.lisp and the test suite), wraps
+;;;; exactly like demos/dos-boot-demo.lisp and the test suite), wraps
 ;;;; the assembled binary in a synthesized bootable ATR via
 ;;;; ATARI800-CL:LOAD-XEX (src/xex.lisp's xexboot loader, which defaults
 ;;;; RUNAD to the first segment's start -- $B000 here, since MADS output
@@ -39,7 +39,7 @@
 ;;;; draws a custom-charset graphics screen -- so this just runs a fixed
 ;;;; number of frames and then serves whatever is on screen.
 ;;;;
-;;;; Status lines on stdout (the same shape scripts/dos-boot-demo.lisp
+;;;; Status lines on stdout (the same shape demos/dos-boot-demo.lisp
 ;;;; prints, plus BRANCH):
 ;;;;   BRANCH <name>
 ;;;;   AESP_CONTROL <port>
@@ -54,7 +54,7 @@
 (require :asdf)
 
 ;;; --- Load Quicklisp + atari800-cl (same self-contained preamble
-;;; --- scripts/dos-boot-demo.lisp uses: repo-local FASL cache,
+;;; --- demos/dos-boot-demo.lisp uses: repo-local FASL cache,
 ;;; --- repo-registered source tree, so a stale cache can never shadow
 ;;; --- current source).
 
@@ -89,7 +89,7 @@
     (uiop:quit 3)))
 
 ;;; --- Command line: the optional single argument picks the EdVenture
-;;; --- branch to clone, same argv access scripts/dos-boot-demo.lisp uses.
+;;; --- branch to clone, same argv access demos/dos-boot-demo.lisp uses.
 
 (defun demo-argv ()
   #+sbcl       (cdr sb-ext:*posix-argv*)
@@ -124,8 +124,8 @@
 ;; Positional argv is only consulted under SBCL: `lw-console -build`
 ;; owns the command line, so sys:*line-arguments-list* holds LispWorks's
 ;; own arguments (e.g. "-build") rather than anything a caller passed --
-;; scripts/edventure-demo-lispworks.lisp's header explains this in more
-;; detail.  scripts/edventure-demo.sh --impl lispworks therefore passes
+;; demos/edventure-demo-lispworks.lisp's header explains this in more
+;; detail.  demos/edventure-demo.sh --impl lispworks therefore passes
 ;; a branch through the env var instead, which is why that path is
 ;; checked regardless of implementation.
 (defparameter *edventure-branch*
@@ -149,7 +149,7 @@
 
 ;; SIGINT/SIGTERM under lw-console -build: there is no controlling TTY
 ;; for Ctrl-C, but the process is still killed with SIGTERM (the same
-;; way scripts/edventure-demo.sh's caller kills either implementation)
+;; way demos/edventure-demo.sh's caller kills either implementation)
 ;; and could in principle receive SIGINT too, so both are handled the
 ;; same as the SBCL branch above.  2 and 15 are the ordinary POSIX
 ;; SIGINT/SIGTERM numbers on both Linux and macOS.
@@ -219,7 +219,7 @@
     obx))
 
 ;;; --- Asset lookup: same candidate lists / env-var-beats-roms/-default
-;;; --- rule as scripts/dos-boot-demo.lisp, so a checkout the test suite
+;;; --- rule as demos/dos-boot-demo.lisp, so a checkout the test suite
 ;;; --- can find its ROMs in works here too.
 
 (defparameter *os-rom-names*    '("atariosxl.rom" "ATARIXL.ROM" "atarixl.rom"))

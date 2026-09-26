@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Unified entry point for the EdVenture demo: dispatches to
-# scripts/edventure-demo.lisp (SBCL, --impl sbcl, the default) or its
-# LispWorks counterpart scripts/edventure-demo-lispworks.lisp
+# demos/edventure-demo.lisp (SBCL, --impl sbcl, the default) or its
+# LispWorks counterpart demos/edventure-demo-lispworks.lisp
 # (--impl lispworks).  Both boot the same EdVenture branch over the
 # emulated SIO serial wire and serve the result to a screenshot client:
 #
-#   ./scripts/edventure-demo.sh [--impl sbcl|lispworks] [branch] &
+#   ./demos/edventure-demo.sh [--impl sbcl|lispworks] [branch] &
 #   ./scripts/capture-screenshot.py -p <video-port> -o edventure.png
 #
 # BRANCH defaults to episode_29_work inside the demo itself (see its
@@ -58,9 +58,9 @@ BRANCH="${1:-}"
 case "$IMPL" in
   sbcl)
     if [ -n "$BRANCH" ]; then
-      exec sbcl --script "$REPO_ROOT/scripts/edventure-demo.lisp" "$BRANCH"
+      exec sbcl --script "$REPO_ROOT/demos/edventure-demo.lisp" "$BRANCH"
     else
-      exec sbcl --script "$REPO_ROOT/scripts/edventure-demo.lisp"
+      exec sbcl --script "$REPO_ROOT/demos/edventure-demo.lisp"
     fi
     ;;
   lispworks)
@@ -73,7 +73,7 @@ case "$IMPL" in
     if [ -n "$BRANCH" ]; then
       export ATARI800_CL_EDVENTURE_BRANCH="$BRANCH"
     fi
-    exec "$LW_CONSOLE" -build "$REPO_ROOT/scripts/edventure-demo-lispworks.lisp"
+    exec "$LW_CONSOLE" -build "$REPO_ROOT/demos/edventure-demo-lispworks.lisp"
     ;;
   *)
     echo "error: unknown --impl '$IMPL' (expected sbcl or lispworks)" >&2

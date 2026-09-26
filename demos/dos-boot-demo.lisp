@@ -1,9 +1,9 @@
-;;;; scripts/dos-boot-demo.lisp --- Phase 25 visual verification: boot
+;;;; demos/dos-boot-demo.lisp --- Phase 25 visual verification: boot
 ;;;; DOS 2.5 over the emulated SIO serial wire and serve the DOS menu to
 ;;;; a screenshot client.
 ;;;;
 ;;;; Usage:
-;;;;   sbcl --script scripts/dos-boot-demo.lisp [path/to/dos25.atr]
+;;;;   ./demos/dos-boot-demo.sh [--impl sbcl|lispworks] [path/to/dos25.atr]
 ;;;;   ./scripts/capture-screenshot.py -p <video-port> -o dos-menu.png
 ;;;;
 ;;;; What it does: builds a machine on the real OS/BASIC ROMs (roms/

@@ -1,8 +1,8 @@
-;;;; scripts/dos-boot-demo-lispworks.lisp --- LispWorks driver for
-;;;; scripts/dos-boot-demo.lisp (Phase 25 visual verification).
+;;;; demos/dos-boot-demo-lispworks.lisp --- LispWorks driver for
+;;;; demos/dos-boot-demo.lisp (Phase 25 visual verification).
 ;;;;
-;;;; Invoked by scripts/dos-boot-demo-lispworks.sh via:
-;;;;   lw-console -build scripts/dos-boot-demo-lispworks.lisp
+;;;; Invoked by demos/dos-boot-demo.sh --impl lispworks via:
+;;;;   lw-console -build demos/dos-boot-demo-lispworks.lisp
 ;;;;
 ;;;; The demo itself is an `sbcl --script` top-level program.  Rather
 ;;;; than reimplement it here -- which would let the two implementations
@@ -34,7 +34,7 @@
   (pushnew module-name *modules* :test #'string=))
 
 (defun demo-pathname ()
-  "Pathname of scripts/dos-boot-demo.lisp, resolved next to this file."
+  "Pathname of demos/dos-boot-demo.lisp, resolved next to this file."
   (merge-pathnames "dos-boot-demo.lisp"
                    (uiop:pathname-directory-pathname *load-truename*)))
 
